@@ -9,7 +9,8 @@ completas e as regras de segurança.
 | Pasta | O que é |
 |---|---|
 | `Scripts/2026/10/` | DDL versionado (schema `ad`, tabelas com RLS, grants) |
-| `Procedures/BAD/` | functions RPC, helpers de RLS, policies e triggers (repeatables Flyway) |
+| `Procedures/BAD/` | functions RPC, helpers internos, policies e triggers (repeatables Flyway) |
+| `Procedures/BPRIVATE/` | helpers de RLS no schema `private`, que não é exposto na API |
 | `docs/dictionary/` | dicionário de dados: `schema.json` (fonte) + `index.html` (viewer com ERD e busca) |
 | `docs/DATA_DICTIONARY.md` | dicionário em Markdown com ERD Mermaid (renderiza no GitHub) |
 | `tests/` | testes SQL de RLS e das functions (rodam em transação com rollback) |

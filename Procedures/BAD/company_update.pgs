@@ -49,7 +49,7 @@ begin
   if _nr_company is null then
     raise exception '%', ad.fn_message('COMPANY_UPDATE_COMPANY_REQUIRED');
   end if;
-  if not ad.fn_is_company_admin(_nr_company) then
+  if not private.fn_is_company_admin(_nr_company) then
     raise exception '%', ad.fn_message('COMPANY_UPDATE_FORBIDDEN');
   end if;
 

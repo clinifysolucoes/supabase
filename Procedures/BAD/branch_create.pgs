@@ -55,8 +55,8 @@ begin
     raise exception '%', ad.fn_message('BRANCH_CREATE_COMPANY_REQUIRED');
   end if;
 
-  _nr_user := ad.fn_current_user_nr();
-  if _nr_user is null or not ad.fn_is_company_admin(_nr_company) then
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null or not private.fn_is_company_admin(_nr_company) then
     raise exception '%', ad.fn_message('BRANCH_CREATE_FORBIDDEN');
   end if;
 

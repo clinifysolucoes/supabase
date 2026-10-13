@@ -1,7 +1,7 @@
 /*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
-  ::  Schema      : AD - Administrative                                           ::
-  ::  Object      : ad.fn_current_user_nr()                                       ::
+  ::  Schema      : PRIVATE - helpers de RLS, fora da API                         ::
+  ::  Object      : private.fn_current_user_nr()                                  ::
   ::  UsedBy      : RLS policies, ad.trg_audit, functions RPC                     ::
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
@@ -18,7 +18,7 @@
     sem passar pela RLS (evita recursao, pois a policy de app_user usa esta fn).
 */
 
-create or replace function ad.fn_current_user_nr()
+create or replace function private.fn_current_user_nr()
 returns bigint
 language sql
 stable
@@ -31,5 +31,5 @@ as $$
      and u.it_status = 1;
 $$;
 
-revoke all on function ad.fn_current_user_nr() from public, anon;
-grant execute on function ad.fn_current_user_nr() to authenticated;
+revoke all on function private.fn_current_user_nr() from public, anon;
+grant execute on function private.fn_current_user_nr() to authenticated;

@@ -19,6 +19,9 @@ begin
     'anon tem privilegio em public.flyway_schema_history';
   assert not has_table_privilege('authenticated', 'public.flyway_schema_history', 'SELECT, INSERT, UPDATE, DELETE'),
     'authenticated tem privilegio em public.flyway_schema_history';
+  assert exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'flyway_schema_history'
+                   and policyname = 'flyway_schema_history_no_api_access'),
+    'policy deny-all ausente em public.flyway_schema_history';
 end $$;
 
 set local role anon;

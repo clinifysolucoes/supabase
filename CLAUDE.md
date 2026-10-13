@@ -4,11 +4,12 @@
 
 Hoje este repositório contém **apenas o núcleo de autenticação e acesso**: empresas, filiais, usuários
 multi-empresa, perfis de acesso por filial e log de sessão — rodando em **Supabase** (PostgreSQL + Auth +
-PostgREST). Tabelas, functions e policies vivem no schema `ad` (Administrative).
+PostgREST). Tabelas, functions e policies vivem no schema `ad` (Administrative); os helpers de RLS vivem no schema
+`private`, que nunca é exposto na API.
 
 **No futuro** será um sistema de odontologia (agenda, pacientes, prontuário, orçamentos, financeiro).
 Tudo isso virá em novos schemas (ex.: `od`) **em cima** desta base: toda tabela de negócio terá
-`(nr_company, nr_branch)` e uma policy RLS baseada em `ad.fn_my_branches()`.
+`(nr_company, nr_branch)` e uma policy RLS baseada em `private.fn_my_branches()`.
 
 O app será um único código **Flutter** (web + Android + iOS) usando `supabase_flutter`.
 As telas ainda não existem neste repo — aqui é só banco.
@@ -29,6 +30,7 @@ Objetos principais:
 | `ad.company_user_save` / `ad.user_update` | usuários da empresa / próprio cadastro |
 | `ad.fn_check_version` | versão do contrato (`nr_version` dentro do `p_json`) |
 | `ad.fn_message` | erro i18n `{"Message": "CHAVE", "Parameters": {...}}` |
+| `private.fn_*` | helpers de RLS (`fn_current_user_nr`, `fn_my_branches`, `fn_my_companies`, `fn_is_company_admin`, `fn_is_admin_of_user`), fora da API |
 
 ---
 
@@ -118,6 +120,7 @@ ou function no schema `ad` sem comentário, ou seja, sem entrada no JSON.
 ```
 Supabase/
 ├── Procedures/BAD/<nome>.pgs      # REPEATABLES: functions, triggers e RLS policies (Flyway reaplica se o checksum mudar)
+├── Procedures/BPRIVATE/fn_*.pgs   # helpers de RLS no schema private (fora da API)
 ├── Scripts/YYYY/MM/V<YYYYMMDD>_<HHMM>__<desc>.sql   # VERSIONADAS: DDL (uma vez, em ordem)
 ├── docs/
 │   ├── dictionary/schema.json     # DICIONÁRIO DE DADOS - source of truth (edite aqui)
@@ -145,7 +148,8 @@ Supabase/
   alfabeto; na dúvida use `plpgsql` (resolve em runtime).
 - Todo `.pgs` tem o header corporativo (`Project`, `Schema`, `Object`, `UsedBy`, `Programmer`, `Date`,
   `Change`) e a seção `Description` com Input/Output/Errors.
-- Prefixos: `fn_` = helper interno ou de RLS (nunca chamado pelo app); sem prefixo = RPC exposta ao app;
+- Prefixos: `fn_` = helper interno (em `ad`, sem grant) ou de RLS (em `private`, `EXECUTE` para
+  `authenticated`), nunca chamado pelo app; sem prefixo = RPC exposta ao app;
   `trg_` = trigger function; `rls_` = policies.
 
 ### Versionadas (`Scripts/YYYY/MM/V<YYYYMMDD>_<HHMM>__<desc>.sql`)
@@ -224,9 +228,12 @@ preenchidas pelo trigger `ad.trg_audit` (não precisa setar nas functions).
    `grant execute ... to authenticated` só nas RPC. Helpers internos ficam sem grant.
 6. **`service_role` nunca entra no app Flutter**. Só em Edge Functions e CI. A chave `anon` é pública por
    natureza: toda a segurança é a RLS + as functions.
-7. **Regra de acesso central = `ad.fn_my_branches()`**. Toda tabela de negócio futura usa
-   `using ((nr_company, nr_branch) in (select nr_company, nr_branch from ad.fn_my_branches()))`.
-   Nunca reimplemente a regra em outra policy.
+7. **Regra de acesso central = `private.fn_my_branches()`**. Toda tabela de negócio futura usa
+   `using ((nr_company, nr_branch) in (select nr_company, nr_branch from private.fn_my_branches()))`.
+   Nunca reimplemente a regra em outra policy. Os helpers de RLS ficam no schema `private`
+   (`Procedures/BPRIVATE/`): as policies rodam como o usuário, então `authenticated` precisa de `EXECUTE`
+   neles, e em `ad` eles apareceriam em `/rest/v1/rpc/` (lint 0029 da Supabase). `private` nunca entra em
+   Exposed schemas.
 8. **Anti-lockout**: operações que mexem em perfis/vínculos terminam com `ad.fn_company_has_admin` e
    desfazem a transação se a empresa ficaria sem administrador ativo.
 9. **Situação e bloqueio** (`it_status`, `id_blocked`) de empresa/filial/usuário são operações de
@@ -249,8 +256,8 @@ declare
   _nr_user bigint;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, '<entidade>_<acao>');
-  _nr_user := ad.fn_current_user_nr();                      -- NULL = sem sessão ou usuário inativo
-  if _nr_user is null or not ad.fn_is_company_admin((p_json ->> 'nr_company')::bigint) then
+  _nr_user := private.fn_current_user_nr();                      -- NULL = sem sessão ou usuário inativo
+  if _nr_user is null or not private.fn_is_company_admin((p_json ->> 'nr_company')::bigint) then
     raise exception '%', ad.fn_message('<ENTIDADE>_<ACAO>_FORBIDDEN');
   end if;
   -- consistências: raise exception '%', ad.fn_message('<CHAVE>', jsonb_build_object('Campo', valor));

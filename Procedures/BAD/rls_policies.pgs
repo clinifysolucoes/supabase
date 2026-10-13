@@ -19,7 +19,7 @@
 
     Regras:
       company / access_profile  -> empresas com pelo menos uma filial acessivel
-      branch                    -> filiais acessiveis (ad.fn_my_branches)
+      branch                    -> filiais acessiveis (private.fn_my_branches)
       company_user / branch_user_profile -> proprios vinculos, ou todos da empresa
                                    se for administrador dela
       app_user                  -> proprio cadastro, ou cadastro de quem esta numa
@@ -31,40 +31,40 @@
 drop policy if exists company_select on ad.company;
 create policy company_select on ad.company
   for select to authenticated
-  using (nr_company in (select ad.fn_my_companies()));
+  using (nr_company in (select private.fn_my_companies()));
 
 -- ad.branch
 drop policy if exists branch_select on ad.branch;
 create policy branch_select on ad.branch
   for select to authenticated
-  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from ad.fn_my_branches() mb));
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
 
 -- ad.access_profile
 drop policy if exists access_profile_select on ad.access_profile;
 create policy access_profile_select on ad.access_profile
   for select to authenticated
-  using (nr_company in (select ad.fn_my_companies()));
+  using (nr_company in (select private.fn_my_companies()));
 
 -- ad.company_user
 drop policy if exists company_user_select on ad.company_user;
 create policy company_user_select on ad.company_user
   for select to authenticated
-  using (nr_user = ad.fn_current_user_nr() or ad.fn_is_company_admin(nr_company));
+  using (nr_user = private.fn_current_user_nr() or private.fn_is_company_admin(nr_company));
 
 -- ad.branch_user_profile
 drop policy if exists branch_user_profile_select on ad.branch_user_profile;
 create policy branch_user_profile_select on ad.branch_user_profile
   for select to authenticated
-  using (nr_user = ad.fn_current_user_nr() or ad.fn_is_company_admin(nr_company));
+  using (nr_user = private.fn_current_user_nr() or private.fn_is_company_admin(nr_company));
 
 -- ad.app_user
 drop policy if exists app_user_select on ad.app_user;
 create policy app_user_select on ad.app_user
   for select to authenticated
-  using (uu_auth = (select auth.uid()) or ad.fn_is_admin_of_user(nr_user));
+  using (uu_auth = (select auth.uid()) or private.fn_is_admin_of_user(nr_user));
 
 -- ad.access_log
 drop policy if exists access_log_select on ad.access_log;
 create policy access_log_select on ad.access_log
   for select to authenticated
-  using (nr_user = ad.fn_current_user_nr());
+  using (nr_user = private.fn_current_user_nr());

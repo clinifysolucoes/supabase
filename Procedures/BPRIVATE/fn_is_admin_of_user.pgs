@@ -1,7 +1,7 @@
 /*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
-  ::  Schema      : AD - Administrative                                           ::
-  ::  Object      : ad.fn_is_admin_of_user(bigint)                                ::
+  ::  Schema      : PRIVATE - helpers de RLS, fora da API                         ::
+  ::  Object      : private.fn_is_admin_of_user(bigint)                           ::
   ::  UsedBy      : RLS policy de ad.app_user                                     ::
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
@@ -14,7 +14,7 @@
     (nome, e-mail, telefone) das pessoas da sua equipe - e so delas.
 */
 
-create or replace function ad.fn_is_admin_of_user(p_nr_user bigint)
+create or replace function private.fn_is_admin_of_user(p_nr_user bigint)
 returns boolean
 language plpgsql
 stable
@@ -26,10 +26,10 @@ begin
     select 1
       from ad.company_user cu
      where cu.nr_user = p_nr_user
-       and ad.fn_is_company_admin(cu.nr_company)
+       and private.fn_is_company_admin(cu.nr_company)
   );
 end;
 $$;
 
-revoke all on function ad.fn_is_admin_of_user(bigint) from public, anon;
-grant execute on function ad.fn_is_admin_of_user(bigint) to authenticated;
+revoke all on function private.fn_is_admin_of_user(bigint) from public, anon;
+grant execute on function private.fn_is_admin_of_user(bigint) to authenticated;

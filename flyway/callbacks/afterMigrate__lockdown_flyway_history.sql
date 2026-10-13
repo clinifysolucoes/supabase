@@ -23,3 +23,17 @@
 
 revoke all on table public.flyway_schema_history from public, anon, authenticated;
 alter table public.flyway_schema_history enable row level security;
+
+-- Policy deny-all so para o lint rls_enabled_no_policy (0008) nao acusar RLS sem policy.
+-- Nao muda nada na pratica: sem privilegio nem policy ja nao havia acesso pela API.
+do $$
+begin
+  if not exists (
+    select 1 from pg_catalog.pg_policies
+     where schemaname = 'public' and tablename = 'flyway_schema_history'
+       and policyname = 'flyway_schema_history_no_api_access'
+  ) then
+    create policy flyway_schema_history_no_api_access on public.flyway_schema_history
+      for all to anon, authenticated using (false) with check (false);
+  end if;
+end $$;

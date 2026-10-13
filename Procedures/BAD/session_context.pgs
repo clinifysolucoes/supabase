@@ -81,7 +81,7 @@ begin
   /*------------------------------------------------------------------------*/
   with mb as (
     select m.nr_company, m.nr_branch
-      from ad.fn_my_branches() m
+      from private.fn_my_branches() m
   ), prof as (
     select bup.nr_company,
            bup.nr_branch,
@@ -157,7 +157,7 @@ begin
              end as vc_reason
     ) r
    where cu.nr_user = _u.nr_user
-     and cu.nr_company not in (select m.nr_company from ad.fn_my_branches() m);
+     and cu.nr_company not in (select m.nr_company from private.fn_my_branches() m);
 
   /*------------------------------------------------------------------------*/
   /* Log de acesso: IP e user-agent vem dos headers do PostgREST             */
