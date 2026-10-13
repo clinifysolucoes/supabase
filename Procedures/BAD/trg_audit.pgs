@@ -10,7 +10,7 @@
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Preenche as colunas de auditoria padrao sem depender de cada function lembrar:
-      nr_operator  usuario logado (ad.fn_current_user_nr) ou o informado
+      nr_operator  usuario logado (private.fn_current_user_nr) ou o informado
       dh_created   fixado no INSERT, nunca muda
       dh_updated   now() a cada INSERT/UPDATE
     Toda tabela nova do schema ad DEVE receber o trigger <tabela>_audit aqui.
@@ -26,11 +26,11 @@ begin
   if tg_op = 'INSERT' then
     new.dh_created  := now();
     new.dh_updated  := now();
-    new.nr_operator := coalesce(new.nr_operator, ad.fn_current_user_nr());
+    new.nr_operator := coalesce(new.nr_operator, private.fn_current_user_nr());
   else
     new.dh_created  := old.dh_created;
     new.dh_updated  := now();
-    new.nr_operator := coalesce(ad.fn_current_user_nr(), new.nr_operator);
+    new.nr_operator := coalesce(private.fn_current_user_nr(), new.nr_operator);
   end if;
   return new;
 end;

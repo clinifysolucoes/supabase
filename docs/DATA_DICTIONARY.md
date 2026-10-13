@@ -163,7 +163,7 @@ erDiagram
 
 Empresa (tenant principal). Toda informação de negócio pertence a uma empresa e, dentro dela, a uma filial.
 
-**RLS:** SELECT: empresas em que o usuário tem pelo menos uma filial acessível (ad.fn_my_companies). Escrita só via company_create / company_update.
+**RLS:** SELECT: empresas em que o usuário tem pelo menos uma filial acessível (private.fn_my_companies). Escrita só via company_create / company_update.
 
 | Coluna | Tipo | Chave | Nulo | Default | Descrição |
 |---|---|---|---|---|---|
@@ -195,7 +195,7 @@ Empresa (tenant principal). Toda informação de negócio pertence a uma empresa
 
 Filial (unidade/clínica) da empresa. PK composta (nr_company, nr_branch) com numeração sequencial por empresa. Toda tabela de negócio futura referencia (nr_company, nr_branch).
 
-**RLS:** SELECT: filiais acessíveis ao usuário (ad.fn_my_branches). Escrita só via company_create (matriz), branch_create e branch_update.
+**RLS:** SELECT: filiais acessíveis ao usuário (private.fn_my_branches). Escrita só via company_create (matriz), branch_create e branch_update.
 
 | Coluna | Tipo | Chave | Nulo | Default | Descrição |
 |---|---|---|---|---|---|
@@ -234,7 +234,7 @@ Filial (unidade/clínica) da empresa. PK composta (nr_company, nr_branch) com nu
 
 Usuário do sistema. A autenticação (e-mail, senha, OTP, social, 2FA, tentativas) é do Supabase Auth (auth.users); aqui ficam o id numérico, nome e dados do app. Criado automaticamente pelo trigger ad.trg_auth_user_sync no signup.
 
-**RLS:** SELECT: o próprio cadastro, ou cadastros de usuários vinculados a uma empresa que o usuário administra (ad.fn_is_admin_of_user). Escrita só via user_update (próprio) e triggers.
+**RLS:** SELECT: o próprio cadastro, ou cadastros de usuários vinculados a uma empresa que o usuário administra (private.fn_is_admin_of_user). Escrita só via user_update (próprio) e triggers.
 
 | Coluna | Tipo | Chave | Nulo | Default | Descrição |
 |---|---|---|---|---|---|
@@ -247,7 +247,7 @@ Usuário do sistema. A autenticação (e-mail, senha, OTP, social, 2FA, tentativ
 | `vc_mobile` | `varchar(20)` |  | NULL |  | Celular. |
 | `vc_avatar_url` | `text` |  | NULL |  | URL da foto no Supabase Storage. |
 | `it_level` | `smallint` |  | NOT NULL | `0` | Nível do usuário na plataforma. Alterável só por service_role. Valores: 0 = Normal; 100 = Administrador da plataforma (suporte). |
-| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do usuário na plataforma. Bloqueado/inativo não enxerga nada (ad.fn_current_user_nr retorna NULL). Valores: 1 = Ativo; 80 = Bloqueado; 90 = Inativo. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do usuário na plataforma. Bloqueado/inativo não enxerga nada (private.fn_current_user_nr retorna NULL). Valores: 1 = Ativo; 80 = Bloqueado; 90 = Inativo. |
 | `vc_block_reason` | `varchar(200)` |  | NULL |  | Motivo do bloqueio (devolvido em SESSION_USER_BLOCKED). |
 | `dh_last_login` | `timestamptz` |  | NULL |  | Data/hora do último session_context (login no app). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
@@ -260,14 +260,14 @@ Usuário do sistema. A autenticação (e-mail, senha, OTP, social, 2FA, tentativ
 
 Perfil de acesso da empresa (Administrador, Dentista, Recepção...). Numeração sequencial por empresa. company_create cria 1 = Administrador (nível 100) e 2 = Usuário (nível 0). A ligação perfil x telas ainda não existe neste projeto.
 
-**RLS:** SELECT: perfis das empresas acessíveis (ad.fn_my_companies). Escrita só via access_profile_save.
+**RLS:** SELECT: perfis das empresas acessíveis (private.fn_my_companies). Escrita só via access_profile_save.
 
 | Coluna | Tipo | Chave | Nulo | Default | Descrição |
 |---|---|---|---|---|---|
 | `nr_company` | `bigint` | PK1, FK → `company.nr_company` | NOT NULL |  | Número da empresa. |
 | `nr_profile` | `bigint` | PK2 | NOT NULL |  | Código do perfil, sequencial dentro da empresa. |
 | `vc_name` | `varchar(30)` | UK | NOT NULL |  | Nome do perfil, único na empresa. |
-| `it_level` | `smallint` |  | NOT NULL | `0` | Nível hierárquico 0..100. 100 = administrador da empresa (ad.fn_is_company_admin). Valores: 0 = Usuário comum; 100 = Administrador da empresa. |
+| `it_level` | `smallint` |  | NOT NULL | `0` | Nível hierárquico 0..100. 100 = administrador da empresa (private.fn_is_company_admin). Valores: 0 = Usuário comum; 100 = Administrador da empresa. |
 | `it_status` | `smallint` |  | NOT NULL | `1` | Situação do perfil. Inativo não concede acesso. Valores: 1 = Ativo; 90 = Inativo. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
@@ -355,11 +355,11 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 
 | Function | Grant | Descrição |
 |---|---|---|
-| `ad.fn_current_user_nr()` | authenticated (usada nas policies) | auth.uid() → ad.app_user.nr_user do usuário logado e ativo; NULL sem sessão ou bloqueado. STABLE, SECURITY DEFINER. |
-| `ad.fn_my_branches()` | authenticated (usada nas policies) | Pares (nr_company, nr_branch) acessíveis agora: vínculo com perfil ativo, usuário ativo na empresa, empresa e filial ativas e não bloqueadas. |
-| `ad.fn_my_companies()` | authenticated (usada nas policies) | Empresas com pelo menos uma filial acessível (derivada de fn_my_branches). |
-| `ad.fn_is_company_admin(p_nr_company bigint)` | authenticated (usada nas policies) | TRUE se o usuário logado tem perfil ativo de nível ≥ 100 em alguma filial acessível da empresa. |
-| `ad.fn_is_admin_of_user(p_nr_user bigint)` | authenticated (usada nas policies) | TRUE se o usuário logado administra alguma empresa em que p_nr_user está vinculado (policy de app_user). |
+| `private.fn_current_user_nr()` | authenticated (usada nas policies; schema private, fora da API) | auth.uid() → ad.app_user.nr_user do usuário logado e ativo; NULL sem sessão ou bloqueado. STABLE, SECURITY DEFINER. |
+| `private.fn_my_branches()` | authenticated (usada nas policies; schema private, fora da API) | Pares (nr_company, nr_branch) acessíveis agora: vínculo com perfil ativo, usuário ativo na empresa, empresa e filial ativas e não bloqueadas. |
+| `private.fn_my_companies()` | authenticated (usada nas policies; schema private, fora da API) | Empresas com pelo menos uma filial acessível (derivada de fn_my_branches). |
+| `private.fn_is_company_admin(p_nr_company bigint)` | authenticated (usada nas policies; schema private, fora da API) | TRUE se o usuário logado tem perfil ativo de nível ≥ 100 em alguma filial acessível da empresa. |
+| `private.fn_is_admin_of_user(p_nr_user bigint)` | authenticated (usada nas policies; schema private, fora da API) | TRUE se o usuário logado administra alguma empresa em que p_nr_user está vinculado (policy de app_user). |
 | `ad.fn_company_has_admin(p_nr_company bigint)` | interna | TRUE se a empresa ainda tem um administrador ativo em filial ativa. Guarda anti-lockout de access_profile_save e company_user_save. |
 | `ad.fn_set_user_branches(p_nr_company bigint, p_nr_user bigint, p_branches jsonb, p_nr_operator bigint)` | interna | Substitui os vínculos filial x perfil de um usuário na empresa, validando filial e perfil. |
 | `ad.fn_check_version(p_nr_version integer, p_nr_expected integer, p_vc_function text)` | interna | Compara nr_version do app com a versão do contrato da function; RAISE VERSION_MISMATCH se diferente. |

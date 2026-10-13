@@ -1,7 +1,7 @@
 -- ============================================================================
 -- O dicionario de dados (docs/dictionary/schema.json) vira COMMENT ON no banco
 -- (R__zz_dictionary_comments.sql). Este teste garante que o dicionario cobre
--- TODO o schema ad: tabela, coluna ou function sem comentario = esta faltando
+-- TODO o schema ad (e as functions de private): objeto sem comentario = esta faltando
 -- no JSON. (O caminho inverso - JSON citando coluna inexistente - ja falha no
 -- proprio COMMENT ON durante o flyway migrate.)
 -- ============================================================================
@@ -35,7 +35,7 @@ begin
     into _missing
     from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
-   where n.nspname = 'ad'
+   where n.nspname in ('ad', 'private')
      and obj_description(p.oid, 'pg_proc') is null;
   if _missing is not null then
     raise exception 'Functions sem descricao no dicionario: %', _missing;
@@ -45,7 +45,7 @@ begin
     into _missing
     from pg_class c
     join pg_namespace n on n.oid = c.relnamespace
-   where n.nspname = 'ad'
+   where n.nspname in ('ad', 'private')
      and c.relkind = 'r'
      and not c.relrowsecurity;
   if _missing is not null then

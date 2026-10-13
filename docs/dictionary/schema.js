@@ -45,7 +45,7 @@ window.DICTIONARY = {
       "name": "company",
       "title": "Empresa",
       "description": "Empresa (tenant principal). Toda informação de negócio pertence a uma empresa e, dentro dela, a uma filial.",
-      "rls": "SELECT: empresas em que o usuário tem pelo menos uma filial acessível (ad.fn_my_companies). Escrita só via company_create / company_update.",
+      "rls": "SELECT: empresas em que o usuário tem pelo menos uma filial acessível (private.fn_my_companies). Escrita só via company_create / company_update.",
       "columns": [
         {
           "name": "nr_company",
@@ -199,7 +199,7 @@ window.DICTIONARY = {
       "name": "branch",
       "title": "Filial",
       "description": "Filial (unidade/clínica) da empresa. PK composta (nr_company, nr_branch) com numeração sequencial por empresa. Toda tabela de negócio futura referencia (nr_company, nr_branch).",
-      "rls": "SELECT: filiais acessíveis ao usuário (ad.fn_my_branches). Escrita só via company_create (matriz), branch_create e branch_update.",
+      "rls": "SELECT: filiais acessíveis ao usuário (private.fn_my_branches). Escrita só via company_create (matriz), branch_create e branch_update.",
       "columns": [
         {
           "name": "nr_company",
@@ -405,7 +405,7 @@ window.DICTIONARY = {
       "name": "app_user",
       "title": "Usuário",
       "description": "Usuário do sistema. A autenticação (e-mail, senha, OTP, social, 2FA, tentativas) é do Supabase Auth (auth.users); aqui ficam o id numérico, nome e dados do app. Criado automaticamente pelo trigger ad.trg_auth_user_sync no signup.",
-      "rls": "SELECT: o próprio cadastro, ou cadastros de usuários vinculados a uma empresa que o usuário administra (ad.fn_is_admin_of_user). Escrita só via user_update (próprio) e triggers.",
+      "rls": "SELECT: o próprio cadastro, ou cadastros de usuários vinculados a uma empresa que o usuário administra (private.fn_is_admin_of_user). Escrita só via user_update (próprio) e triggers.",
       "columns": [
         {
           "name": "nr_user",
@@ -477,7 +477,7 @@ window.DICTIONARY = {
           "type": "smallint",
           "nullable": false,
           "default": "1",
-          "description": "Situação do usuário na plataforma. Bloqueado/inativo não enxerga nada (ad.fn_current_user_nr retorna NULL).",
+          "description": "Situação do usuário na plataforma. Bloqueado/inativo não enxerga nada (private.fn_current_user_nr retorna NULL).",
           "values": {
             "1": "Ativo",
             "80": "Bloqueado",
@@ -523,7 +523,7 @@ window.DICTIONARY = {
       "name": "access_profile",
       "title": "Perfil de acesso",
       "description": "Perfil de acesso da empresa (Administrador, Dentista, Recepção...). Numeração sequencial por empresa. company_create cria 1 = Administrador (nível 100) e 2 = Usuário (nível 0). A ligação perfil x telas ainda não existe neste projeto.",
-      "rls": "SELECT: perfis das empresas acessíveis (ad.fn_my_companies). Escrita só via access_profile_save.",
+      "rls": "SELECT: perfis das empresas acessíveis (private.fn_my_companies). Escrita só via access_profile_save.",
       "columns": [
         {
           "name": "nr_company",
@@ -552,7 +552,7 @@ window.DICTIONARY = {
           "type": "smallint",
           "nullable": false,
           "default": "0",
-          "description": "Nível hierárquico 0..100. 100 = administrador da empresa (ad.fn_is_company_admin).",
+          "description": "Nível hierárquico 0..100. 100 = administrador da empresa (private.fn_is_company_admin).",
           "values": {
             "0": "Usuário comum",
             "100": "Administrador da empresa"
@@ -1032,37 +1032,37 @@ window.DICTIONARY = {
     },
     {
       "name": "fn_current_user_nr",
-      "signature": "ad.fn_current_user_nr()",
+      "signature": "private.fn_current_user_nr()",
       "kind": "helper",
-      "grant": "authenticated (usada nas policies)",
+      "grant": "authenticated (usada nas policies; schema private, fora da API)",
       "description": "auth.uid() → ad.app_user.nr_user do usuário logado e ativo; NULL sem sessão ou bloqueado. STABLE, SECURITY DEFINER."
     },
     {
       "name": "fn_my_branches",
-      "signature": "ad.fn_my_branches()",
+      "signature": "private.fn_my_branches()",
       "kind": "helper",
-      "grant": "authenticated (usada nas policies)",
+      "grant": "authenticated (usada nas policies; schema private, fora da API)",
       "description": "Pares (nr_company, nr_branch) acessíveis agora: vínculo com perfil ativo, usuário ativo na empresa, empresa e filial ativas e não bloqueadas."
     },
     {
       "name": "fn_my_companies",
-      "signature": "ad.fn_my_companies()",
+      "signature": "private.fn_my_companies()",
       "kind": "helper",
-      "grant": "authenticated (usada nas policies)",
+      "grant": "authenticated (usada nas policies; schema private, fora da API)",
       "description": "Empresas com pelo menos uma filial acessível (derivada de fn_my_branches)."
     },
     {
       "name": "fn_is_company_admin",
-      "signature": "ad.fn_is_company_admin(p_nr_company bigint)",
+      "signature": "private.fn_is_company_admin(p_nr_company bigint)",
       "kind": "helper",
-      "grant": "authenticated (usada nas policies)",
+      "grant": "authenticated (usada nas policies; schema private, fora da API)",
       "description": "TRUE se o usuário logado tem perfil ativo de nível ≥ 100 em alguma filial acessível da empresa."
     },
     {
       "name": "fn_is_admin_of_user",
-      "signature": "ad.fn_is_admin_of_user(p_nr_user bigint)",
+      "signature": "private.fn_is_admin_of_user(p_nr_user bigint)",
       "kind": "helper",
-      "grant": "authenticated (usada nas policies)",
+      "grant": "authenticated (usada nas policies; schema private, fora da API)",
       "description": "TRUE se o usuário logado administra alguma empresa em que p_nr_user está vinculado (policy de app_user)."
     },
     {

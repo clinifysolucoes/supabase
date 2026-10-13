@@ -44,6 +44,11 @@ begin
     raise exception 'FALHA: anon conseguiu chamar ad.session_context';
   exception when insufficient_privilege then null;
   end;
+  begin
+    perform private.fn_my_branches();
+    raise exception 'FALHA: anon conseguiu chamar private.fn_my_branches';
+  exception when insufficient_privilege then null;
+  end;
 end $$;
 reset role;
 
@@ -85,7 +90,7 @@ begin
   assert (select count(*) from ad.access_profile) = 2, 'perfis padrao nao criados';
   assert (select count(*) from ad.company_user) = 1, 'vinculo empresa x usuario do criador nao criado';
   assert (select count(*) from ad.branch_user_profile) = 1, 'vinculo filial x usuario x perfil do criador nao criado';
-  assert (select nr_operator from ad.company) = (select ad.fn_current_user_nr()), 'trigger de auditoria nao gravou nr_operator';
+  assert (select nr_operator from ad.company) = (select private.fn_current_user_nr()), 'trigger de auditoria nao gravou nr_operator';
 end $$;
 
 \echo '== Ana: escrita direta e function interna sao negadas'
@@ -263,7 +268,7 @@ declare
 begin
   _r := ad.branch_create(jsonb_build_object('nr_version', 1, 'nr_company', _ca, 'vc_name', 'Unidade Centro', 'vc_timezone', 'America/Manaus'));
   assert (_r ->> 'nr_branch')::int = 2, 'segunda filial deveria ser nr_branch 2';
-  assert (select count(*) from ad.fn_my_branches()) = 2, 'Ana deveria acessar 2 filiais';
+  assert (select count(*) from private.fn_my_branches()) = 2, 'Ana deveria acessar 2 filiais';
   assert (select vc_timezone from ad.branch where nr_branch = 2) = 'America/Manaus', 'timezone nao gravado';
 
   begin

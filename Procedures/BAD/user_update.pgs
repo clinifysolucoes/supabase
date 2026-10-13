@@ -38,7 +38,7 @@ declare
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'user_update');
 
-  _nr_user := ad.fn_current_user_nr();
+  _nr_user := private.fn_current_user_nr();
   if _nr_user is null then
     raise exception '%', ad.fn_message('USER_UPDATE_USER_NOT_FOUND');
   end if;

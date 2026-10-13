@@ -53,7 +53,7 @@ begin
   if _nr_company is null or _nr_branch is null then
     raise exception '%', ad.fn_message('BRANCH_UPDATE_KEY_REQUIRED');
   end if;
-  if not ad.fn_is_company_admin(_nr_company) then
+  if not private.fn_is_company_admin(_nr_company) then
     raise exception '%', ad.fn_message('BRANCH_UPDATE_FORBIDDEN');
   end if;
   if not exists (select 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch) then
