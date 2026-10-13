@@ -14,6 +14,7 @@ Pontos de atenção:
 |---|---|
 | `conf/flyway.local.conf` | Postgres local (Docker) ou `supabase start` (porta 54322) |
 | `conf/flyway.staging.conf` / `flyway.prod.conf` | projetos Supabase; conexão só por env vars |
+| `callbacks/afterMigrate__lockdown_flyway_history.sql` | roda depois de todo `migrate`: revoga `anon`/`authenticated` e liga RLS na `flyway_schema_history` (o Supabase a expõe em `public`) |
 | `init/00-supabase-stubs.sql` | roles + `auth.users` + `auth.uid()` para Postgres puro (local/CI). **Nunca** num Supabase real |
 | `scripts/generate-repeatables.sh` | gera `flyway/repeatable/` e `flyway/staged-scripts/` |
 | `scripts/validate-standards.sh` | naming, header, UTF-8, RLS em toda tabela, least privilege |
@@ -44,5 +45,8 @@ Projeto novo: `baselineOnMigrate=true` com `baselineVersion=0`. Na primeira exec
   push roda `repair` automaticamente; em prod rode o workflow com `command=repair` depois de revisar.
 - *Validate failed: Migration checksum mismatch* numa **versionada** → alguém editou um `V*.sql` já
   aplicado. Nunca edite: crie outra versionada.
+- *migrate travado para sempre* numa migration que faz `ALTER TABLE` na `flyway_schema_history` → o Flyway
+  segura `AccessShareLock` nela numa segunda conexão durante o migrate. DDL nessa tabela só em callback
+  `afterMigrate` (`flyway/callbacks/`).
 - *permission denied for schema ad* vindo do app → `ad` não está em Exposed schemas, ou a chamada veio
   como `anon` (sem sessão).
