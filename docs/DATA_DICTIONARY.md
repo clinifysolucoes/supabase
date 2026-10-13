@@ -42,11 +42,18 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`ad.company_user`](#adcompanyuser) | Empresa x Usuário | Vínculo do usuário com a empresa (multi-empresa: um usuário em N empresas). Situação do usuário DENTRO da empresa, independente da situação na plataforma. |
 | [`ad.branch_user_profile`](#adbranchuserprofile) | Filial x Usuário x Perfil | Perfis do usuário em cada filial (multi-filial). É esta tabela que dá acesso: sem linha aqui numa filial ativa, o usuário não entra na empresa (SESSION_WITHOUT_PROFILE). ON DELETE CASCADE de branch e company_user. |
 | [`ad.access_log`](#adaccesslog) | Log de acesso | Uma linha por session_context (login/restauração de sessão no app). IP e user-agent são lidos dos headers HTTP do request pelo PostgREST (request.headers). |
+| [`ad.screen`](#adscreen) | Tela do app | Catálogo GLOBAL das telas do app (não depende de empresa). O uuid é a chave da permissão e é o mesmo em todos os ambientes (seed com uuids fixos); o código é usado pelo app para rotear e o nome é o que aparece para o usuário. DASHBOARD é implícita para todo usuário logado. |
+| [`ad.access_profile_screen`](#adaccessprofilescreen) | Permissão do perfil por tela | Linha existe = o perfil pode LER a tela; id_create e id_update liberam criar e alterar. Perfil de nível 100 (administrador) ignora esta tabela: tem tudo. Substituída inteira por access_profile_save (screens). |
+| [`ad.event_log`](#adeventlog) | Log de atividades | O que aconteceu no sistema: quem, quando, em qual tela, qual ação, qual registro, resumo legível e detalhe em JSON (nunca senhas). Gravado pelas RPCs via ad.fn_event_log; o app nunca escreve. Login/acesso fica em access_log. |
 
 ## Diagrama (ERD)
 
 ```mermaid
 erDiagram
+  screen ||--o{ access_profile_screen : "liberada para perfis"
+  access_profile ||--o{ access_profile_screen : "telas do perfil"
+  app_user ||--o{ event_log : "atividades"
+  screen ||--o{ event_log : "eventos na tela"
   company ||--o{ branch : "possui filiais"
   company ||--o{ access_profile : "define perfis"
   company ||--o{ company_user : "tem usuários"
@@ -152,6 +159,35 @@ erDiagram
     varchar vc_user_agent
     varchar vc_app_version
     timestamptz dh_access
+  }
+  screen {
+    uuid uu_screen PK
+    varchar vc_code
+    varchar vc_name
+    varchar vc_group
+    smallint nr_order
+    smallint it_status
+  }
+  access_profile_screen {
+    bigint nr_company PK, FK
+    bigint nr_profile PK, FK
+    uuid uu_screen PK, FK
+    boolean id_read
+    boolean id_create
+    boolean id_update
+  }
+  event_log {
+    bigint nr_event PK
+    bigint nr_company
+    bigint nr_branch
+    bigint nr_user FK
+    uuid uu_screen FK
+    varchar vc_action
+    varchar vc_entity
+    varchar vc_key
+    varchar vc_summary
+    jsonb js_detail
+    timestamptz dh_event
   }
 ```
 
@@ -334,6 +370,71 @@ Uma linha por session_context (login/restauração de sessão no app). IP e user
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### ad.screen
+
+**Tela do app**
+
+Catálogo GLOBAL das telas do app (não depende de empresa). O uuid é a chave da permissão e é o mesmo em todos os ambientes (seed com uuids fixos); o código é usado pelo app para rotear e o nome é o que aparece para o usuário. DASHBOARD é implícita para todo usuário logado.
+
+**RLS:** SELECT: qualquer usuário logado (telas ativas). Escrita só por migration/seed.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `uu_screen` | `uuid` | PK1 | NOT NULL | `gen_random_uuid()` | Id da tela. É a chave usada em access_profile_screen e event_log. |
+| `vc_code` | `varchar(30)` |  | NOT NULL |  | Código estável da tela (DASHBOARD, USERS, PROFILES, LOGS). Único; usado pelo app para rotear. |
+| `vc_name` | `varchar(60)` |  | NOT NULL |  | Nome bonito da tela, mostrado ao usuário. |
+| `vc_group` | `varchar(30)` |  | NULL |  | Agrupamento no menu (ex.: Administração). |
+| `nr_order` | `smallint` |  | NOT NULL | `0` | Ordem no menu. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação da tela. Valores: 1 = Ativa; 90 = Inativa. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### ad.access_profile_screen
+
+**Permissão do perfil por tela**
+
+Linha existe = o perfil pode LER a tela; id_create e id_update liberam criar e alterar. Perfil de nível 100 (administrador) ignora esta tabela: tem tudo. Substituída inteira por access_profile_save (screens).
+
+**RLS:** SELECT: usuários da empresa. Escrita só via access_profile_save.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `access_profile.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_profile` | `bigint` | PK2, FK → `access_profile.nr_profile` | NOT NULL |  | Perfil de acesso. |
+| `uu_screen` | `uuid` | PK3, FK → `screen.uu_screen` | NOT NULL |  | Tela liberada. |
+| `id_read` | `boolean` |  | NOT NULL | `true` | Pode ler (sempre verdadeiro quando a linha existe; check impede criar/alterar sem ler). |
+| `id_create` | `boolean` |  | NOT NULL | `false` | Pode criar registros na tela. |
+| `id_update` | `boolean` |  | NOT NULL | `false` | Pode alterar registros na tela. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### ad.event_log
+
+**Log de atividades**
+
+O que aconteceu no sistema: quem, quando, em qual tela, qual ação, qual registro, resumo legível e detalhe em JSON (nunca senhas). Gravado pelas RPCs via ad.fn_event_log; o app nunca escreve. Login/acesso fica em access_log.
+
+**RLS:** SELECT: os próprios eventos. A tela de logs usa event_log_list (admin vê a empresa).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_event` | `bigint` | PK1 | NOT NULL | `identity` | Número do evento. |
+| `nr_company` | `bigint` |  | NULL |  | Empresa do contexto. |
+| `nr_branch` | `bigint` |  | NULL |  | Filial aberta no app quando a ação foi feita (p_json.nr_branch). |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem fez. |
+| `uu_screen` | `uuid` | FK → `screen.uu_screen` | NULL |  | Tela em que a ação aconteceu (nula para ações sem tela, ex.: empresa/filial). |
+| `vc_action` | `varchar(20)` |  | NOT NULL |  | Tipo da ação. Valores: CREATE = Criação; UPDATE = Alteração; DELETE = Exclusão; OTHER = Outra. |
+| `vc_entity` | `varchar(40)` |  | NOT NULL |  | Entidade afetada (access_profile, company_user, branch, company, app_user). |
+| `vc_key` | `varchar(60)` |  | NULL |  | Chave do registro em texto (ex.: 1/3). |
+| `vc_summary` | `varchar(200)` |  | NOT NULL |  | Resumo legível (ex.: Perfil Recepção criado). |
+| `js_detail` | `jsonb` |  | NULL |  | Detalhe da ação (campos enviados), sem dados sensíveis. |
+| `dh_event` | `timestamptz` |  | NOT NULL | `now()` | Data/hora do evento. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ## Functions
 
 Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema('ad').rpc('<nome>', params: {'p_json': {...}})`.
@@ -342,23 +443,27 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 
 | Function | Grant | Descrição |
 |---|---|---|
-| `ad.session_context(p_json jsonb)` | authenticated | Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login. |
+| `ad.session_context(p_json jsonb)` | authenticated | Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login. Cada filial traz permissions: telas que o usuário pode ler/criar/alterar (nível 100 tem todas; DASHBOARD sempre). |
 | `ad.company_create(p_json jsonb)` | authenticated | Onboarding: cria empresa, matriz (filial 1), perfis Administrador/Usuário e vincula o criador como administrador. Qualquer usuário ativo pode criar. |
 | `ad.company_update(p_json jsonb)` | authenticated | Atualização parcial dos dados cadastrais da empresa. Somente administrador. Situação/bloqueio só por service_role. |
 | `ad.branch_create(p_json jsonb)` | authenticated | Cria filial (numeração sequencial por empresa, serializada com FOR UPDATE na empresa) e vincula o criador com o seu perfil de maior nível. Somente administrador. |
 | `ad.branch_update(p_json jsonb)` | authenticated | Atualização parcial da filial, inclusive transferência de matriz (id_main). Somente administrador. |
-| `ad.access_profile_save(p_json jsonb)` | authenticated | Cria (I) ou atualiza (U) perfis de acesso da empresa. Guarda contra deixar a empresa sem administrador ativo. Somente administrador. |
-| `ad.company_user_save(p_json jsonb)` | authenticated | Vincula (I, por e-mail de usuário já cadastrado no Auth), altera (U: situação, motivo, filiais/perfis) ou remove (D) um usuário da empresa. Guarda do último administrador. Somente administrador. |
+| `ad.access_profile_save(p_json jsonb)` | authenticated | Cria (I) ou atualiza (U) perfis de acesso da empresa; screens (opcional) substitui as permissões por tela (ler/criar/alterar). Guarda contra deixar a empresa sem administrador ativo. Grava event_log. Somente administrador. |
+| `ad.company_user_save(p_json jsonb)` | authenticated | Vincula (I, por e-mail de usuário já cadastrado no Auth), altera (U: situação, motivo, filiais/perfis) ou remove (D) um usuário da empresa. Guarda do último administrador. Somente administrador. Grava event_log. |
 | `ad.user_update(p_json jsonb)` | authenticated | Autoatendimento: nome, CPF (validado), telefones e avatar do próprio usuário. E-mail/senha mudam pelo Supabase Auth. |
 | `ad.branch_list(p_json jsonb)` | authenticated | Lista as filiais da empresa: administrador vê todas, usuário comum só as filiais em que tem perfil ativo. Opção id_include_inactive. O app nunca lê ad.branch direto. |
-| `ad.access_profile_list(p_json jsonb)` | authenticated | Lista os perfis de acesso da empresa com a quantidade de usuários em cada um (qualquer usuário ativo da empresa). Opção id_include_inactive. |
+| `ad.access_profile_list(p_json jsonb)` | authenticated | Lista os perfis de acesso da empresa com a quantidade de usuários e as telas liberadas (ler/criar/alterar) de cada um. Qualquer usuário ativo da empresa. Opção id_include_inactive. |
 | `ad.company_user_list(p_json jsonb)` | authenticated | Lista paginada dos usuários da empresa com cadastro, situação e filiais × perfis; filtros por nome/e-mail, situação e filial. Somente administrador. |
 | `ad.access_log_list(p_json jsonb)` | authenticated | Log de acesso paginado no contexto da empresa (padrão: últimos 30 dias). Administrador vê os acessos à empresa e os sem empresa escolhida dos seus usuários; usuário comum só os próprios. Filtros por usuário, app e período. |
+| `ad.screen_list(p_json jsonb)` | authenticated | Catálogo de telas ativas do app na ordem do menu (uuid, código, nome, grupo). Qualquer usuário logado. |
+| `ad.event_log_list(p_json jsonb)` | authenticated | Log de atividades paginado no contexto da empresa (padrão: últimos 30 dias), pesquisável por tela, ação, usuário, texto e período. Administrador vê a empresa; usuário comum só os próprios eventos. |
+| `ad.user_create_check(p_json jsonb)` | authenticated | Pré-checagem do cadastro de usuário pela empresa, usada pela Edge Function user-create antes de criar a conta no Auth: administrador?, e-mail válido?, já vinculado?, conta já existe? |
 
 ### Helpers (regras compartilhadas / RLS)
 
 | Function | Grant | Descrição |
 |---|---|---|
+| `ad.fn_event_log(p_nr_user bigint, p_nr_company bigint, p_nr_branch bigint, p_vc_screen text, p_vc_action text, p_vc_entity text, p_vc_key text, p_vc_summary text, p_js_detail jsonb)` | interna | Grava uma linha em event_log (quem, empresa, filial, tela por código, ação, entidade, chave, resumo, detalhe). Chamada pelas RPCs que alteram dados. |
 | `private.fn_current_user_nr()` | authenticated (usada nas policies; schema private, fora da API) | auth.uid() → ad.app_user.nr_user do usuário logado e ativo; NULL sem sessão ou bloqueado. STABLE, SECURITY DEFINER. |
 | `private.fn_my_branches()` | authenticated (usada nas policies; schema private, fora da API) | Pares (nr_company, nr_branch) acessíveis agora: vínculo com perfil ativo, usuário ativo na empresa, empresa e filial ativas e não bloqueadas. |
 | `private.fn_my_companies()` | authenticated (usada nas policies; schema private, fora da API) | Empresas com pelo menos uma filial acessível (derivada de fn_my_branches). |
@@ -401,6 +506,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ACCESS_PROFILE_NAME_REQUIRED` | `access_profile_save` |  |
 | `ACCESS_PROFILE_NOT_FOUND` | `access_profile_save` |  |
 | `ACCESS_PROFILE_REQUIRED` | `access_profile_save` |  |
+| `ACCESS_PROFILE_SCREEN_INVALID` | `access_profile_save` |  |
+| `ACCESS_PROFILE_SCREENS_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_STATUS_INVALID` | `access_profile_save` |  |
 | `BRANCH_CREATE_CNPJ_IN_USE` | `branch_create` | Cnpj |
 | `BRANCH_CREATE_CNPJ_INVALID` | `branch_create` | Cnpj |
@@ -433,7 +540,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `COMPANY_UPDATE_FORBIDDEN` | `company_update` |  |
 | `COMPANY_UPDATE_NAME_REQUIRED` | `company_update` |  |
 | `COMPANY_USER_ACTION_INVALID` | `company_user_save` |  |
-| `COMPANY_USER_ALREADY_LINKED` | `company_user_save` |  |
+| `COMPANY_USER_ALREADY_LINKED` | `company_user_save`, `user_create_check` |  |
 | `COMPANY_USER_BRANCH_INVALID` | `company_user_save` | Branch |
 | `COMPANY_USER_BRANCHES_REQUIRED` | `company_user_save` |  |
 | `COMPANY_USER_COMPANY_REQUIRED` | `company_user_save` |  |
@@ -448,6 +555,11 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `COMPANY_USER_PROFILE_INVALID` | `company_user_save` | Profile |
 | `COMPANY_USER_STATUS_INVALID` | `company_user_save` |  |
 | `COMPANY_USER_USER_REQUIRED` | `company_user_save` |  |
+| `EVENT_LOG_LIST_ACTION_INVALID` | `event_log_list` |  |
+| `EVENT_LOG_LIST_COMPANY_REQUIRED` | `event_log_list` |  |
+| `EVENT_LOG_LIST_FORBIDDEN` | `event_log_list` |  |
+| `EVENT_LOG_LIST_PERIOD_INVALID` | `event_log_list` |  |
+| `SCREEN_LIST_FORBIDDEN` | `screen_list` |  |
 | `SESSION_COMPANY_BLOCKED` | `session_context` |  |
 | `SESSION_COMPANY_INACTIVE` | `session_context` |  |
 | `SESSION_USER_BLOCKED` | `session_context` | Reason |
@@ -456,9 +568,13 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SESSION_USER_INACTIVE` | `session_context` |  |
 | `SESSION_USER_NOT_FOUND` | `session_context` |  |
 | `SESSION_WITHOUT_PROFILE` | `session_context` |  |
+| `USER_CREATE_COMPANY_REQUIRED` | `user_create_check` |  |
+| `USER_CREATE_EMAIL_INVALID` | `user_create_check` |  |
+| `USER_CREATE_EMAIL_REQUIRED` | `user_create_check` |  |
+| `USER_CREATE_FORBIDDEN` | `user_create_check` |  |
 | `USER_UPDATE_CPF_IN_USE` | `user_update` | Cpf |
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check` | Function, Database, Application |
 

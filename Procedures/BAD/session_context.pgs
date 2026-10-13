@@ -33,7 +33,9 @@
     {"user": {...},
      "companies": [{"nr_company", "vc_name", "vc_cnpj", "nr_company_user", "id_admin",
                     "branches": [{"nr_branch", "vc_name", "vc_cnpj", "vc_timezone", "id_main",
-                                  "it_level", "profiles": [{"nr_profile","vc_name","it_level"}]}]}],
+                                  "it_level", "profiles": [{"nr_profile","vc_name","it_level"}],
+                                  "permissions": [{"uu_screen","vc_code","vc_name",
+                                                   "id_read","id_create","id_update"}]}]}],
      "blocked": [{"nr_company", "vc_name", "vc_reason_key", "vc_reason"}]}
 
   Errors: VERSION_MISMATCH, SESSION_USER_NOT_FOUND, SESSION_USER_INACTIVE,
@@ -98,6 +100,38 @@ begin
                                       and p.nr_profile   = bup.nr_profile
                                       and p.it_status    = 1
      group by bup.nr_company, bup.nr_branch
+  ), perm as (
+    select pr.nr_company,
+           pr.nr_branch,
+           jsonb_agg(
+             jsonb_build_object(
+               'uu_screen', s.uu_screen,
+               'vc_code',   s.vc_code,
+               'vc_name',   s.vc_name,
+               'id_read',   true,
+               'id_create', (pr.it_level >= 100 or coalesce(f.id_create, false)),
+               'id_update', (pr.it_level >= 100 or coalesce(f.id_update, false)))
+             order by s.nr_order, s.vc_code
+           ) filter (where pr.it_level >= 100 or s.vc_code = 'DASHBOARD' or coalesce(f.id_read, false)) as permissions
+      from prof pr
+      cross join ad.screen s
+      left join lateral (
+        select bool_or(aps.id_read)   as id_read,
+               bool_or(aps.id_create) as id_create,
+               bool_or(aps.id_update) as id_update
+          from ad.branch_user_profile bup
+          join ad.access_profile ap         on ap.nr_company  = bup.nr_company
+                                           and ap.nr_profile  = bup.nr_profile
+                                           and ap.it_status   = 1
+          join ad.access_profile_screen aps on aps.nr_company = ap.nr_company
+                                           and aps.nr_profile = ap.nr_profile
+                                           and aps.uu_screen  = s.uu_screen
+         where bup.nr_company = pr.nr_company
+           and bup.nr_branch  = pr.nr_branch
+           and bup.nr_user    = _u.nr_user
+      ) f on true
+     where s.it_status = 1
+     group by pr.nr_company, pr.nr_branch
   ), br as (
     select b.nr_company,
            max(prof.it_level) as it_level,
@@ -109,11 +143,13 @@ begin
                'vc_timezone', b.vc_timezone,
                'id_main',     b.id_main,
                'it_level',    prof.it_level,
-               'profiles',    prof.profiles)
+               'profiles',    prof.profiles,
+               'permissions', coalesce(perm.permissions, '[]'::jsonb))
              order by b.id_main desc, b.nr_branch
            ) as branches
       from prof
       join ad.branch b on b.nr_company = prof.nr_company and b.nr_branch = prof.nr_branch
+      left join perm   on perm.nr_company = prof.nr_company and perm.nr_branch = prof.nr_branch
      group by b.nr_company
   )
   select coalesce(jsonb_agg(

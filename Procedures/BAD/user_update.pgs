@@ -70,6 +70,10 @@ begin
   where u.nr_user = _nr_user
   returning u.* into _row;
 
+  perform ad.fn_event_log(_nr_user, (p_json ->> 'nr_company')::bigint, (p_json ->> 'nr_branch')::bigint, null,
+    'UPDATE', 'app_user', _nr_user::text, format('Cadastro de %s alterado', _row.vc_name),
+    (p_json - 'nr_version' - 'nr_company' - 'nr_branch' - 'vc_avatar_url'));
+
   return to_jsonb(_row);
 end;
 $$;

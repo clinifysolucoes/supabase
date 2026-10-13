@@ -163,6 +163,9 @@ begin
   insert into ad.branch_user_profile (nr_company, nr_branch, nr_user, nr_profile, nr_operator)
   values (_nr_company, 1, _nr_user, 1, _nr_user);
 
+  perform ad.fn_event_log(_nr_user, _nr_company, 1, null, 'CREATE', 'company', _nr_company::text,
+    format('Empresa %s criada', _vc_name), jsonb_build_object('vc_name', _vc_name, 'vc_cnpj', _vc_cnpj));
+
   return jsonb_build_object(
     'nr_company',      _nr_company,
     'nr_branch',       1,

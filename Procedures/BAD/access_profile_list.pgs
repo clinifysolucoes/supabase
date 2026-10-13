@@ -7,12 +7,13 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 14/10/2026 - devolve as telas/permissoes de cada perfil       ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Lista os perfis de acesso da empresa, com a quantidade de usuarios que
-    usam cada um. Qualquer usuario ativo da empresa pode listar (leitura);
-    criar/alterar continua em ad.access_profile_save (so administrador).
+    usam cada um e as telas liberadas (ad.access_profile_screen). Qualquer
+    usuario ativo da empresa pode listar (leitura); criar/alterar continua
+    em ad.access_profile_save (so administrador).
 
   Input p_json:
     nr_version           integer  obrigatorio = 1
@@ -21,8 +22,11 @@
 
   Output jsonb:
     {"profiles": [{"nr_profile", "vc_name", "it_level", "it_status",
-                   "qt_users", "dh_updated"}]}
-    ordenado por nivel (maior primeiro) e nome.
+                   "qt_users", "dh_updated",
+                   "screens": [{"uu_screen", "vc_code", "vc_name",
+                                "id_read", "id_create", "id_update"}]}]}
+    ordenado por nivel (maior primeiro) e nome. Perfil nivel 100 pode vir com
+    screens vazio: administrador tem todas as telas.
 
   Errors (ad.fn_message): VERSION_MISMATCH, ACCESS_PROFILE_LIST_COMPANY_REQUIRED,
     ACCESS_PROFILE_LIST_FORBIDDEN
@@ -65,7 +69,21 @@ begin
                               from ad.branch_user_profile bup
                              where bup.nr_company = p.nr_company
                                and bup.nr_profile = p.nr_profile),
-             'dh_updated', p.dh_updated)
+             'dh_updated', p.dh_updated,
+             'screens',    (select coalesce(jsonb_agg(
+                                     jsonb_build_object(
+                                       'uu_screen', s.uu_screen,
+                                       'vc_code',   s.vc_code,
+                                       'vc_name',   s.vc_name,
+                                       'id_read',   aps.id_read,
+                                       'id_create', aps.id_create,
+                                       'id_update', aps.id_update)
+                                     order by s.nr_order, s.vc_code), '[]'::jsonb)
+                              from ad.access_profile_screen aps
+                              join ad.screen s on s.uu_screen = aps.uu_screen
+                             where aps.nr_company = p.nr_company
+                               and aps.nr_profile = p.nr_profile
+                               and s.it_status    = 1))
            order by p.it_level desc, p.vc_name, p.nr_profile), '[]'::jsonb)
     into _profiles
     from ad.access_profile p

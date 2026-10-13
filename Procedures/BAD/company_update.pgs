@@ -94,6 +94,10 @@ begin
   where c.nr_company = _nr_company
   returning c.* into _row;
 
+  perform ad.fn_event_log(private.fn_current_user_nr(), _nr_company, (p_json ->> 'nr_branch')::bigint, null,
+    'UPDATE', 'company', _nr_company::text, format('Empresa %s alterada', _row.vc_name),
+    (p_json - 'nr_version' - 'nr_branch'));
+
   return to_jsonb(_row);
 end;
 $$;

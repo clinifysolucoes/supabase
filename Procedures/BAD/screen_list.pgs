@@ -1,0 +1,57 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.screen_list(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('screen_list')           ::
+  ::                (cadastro de perfis: matriz tela x permissao; filtros de log) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Catalogo de telas do app (ad.screen), ativas, na ordem do menu. E global
+    (nao depende de empresa): qualquer usuario logado e ativo pode listar.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+
+  Output jsonb:
+    {"screens": [{"uu_screen", "vc_code", "vc_name", "vc_group", "nr_order"}]}
+
+  Errors (ad.fn_message): VERSION_MISMATCH, SCREEN_LIST_FORBIDDEN (sem sessao / inativo)
+*/
+create or replace function ad.screen_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _screens jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'screen_list');
+
+  if private.fn_current_user_nr() is null then
+    raise exception '%', ad.fn_message('SCREEN_LIST_FORBIDDEN');
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'uu_screen', s.uu_screen,
+             'vc_code',   s.vc_code,
+             'vc_name',   s.vc_name,
+             'vc_group',  s.vc_group,
+             'nr_order',  s.nr_order)
+           order by s.nr_order, s.vc_code), '[]'::jsonb)
+    into _screens
+    from ad.screen s
+   where s.it_status = 1;
+
+  return jsonb_build_object('screens', _screens);
+end;
+$$;
+
+revoke all on function ad.screen_list(jsonb) from public, anon;
+grant execute on function ad.screen_list(jsonb) to authenticated;

@@ -65,3 +65,15 @@ create or replace trigger branch_user_profile_audit
 create or replace trigger access_log_audit
   before insert or update on ad.access_log
   for each row execute function ad.trg_audit();
+
+create or replace trigger screen_audit
+  before insert or update on ad.screen
+  for each row execute function ad.trg_audit();
+
+create or replace trigger access_profile_screen_audit
+  before insert or update on ad.access_profile_screen
+  for each row execute function ad.trg_audit();
+
+create or replace trigger event_log_audit
+  before insert or update on ad.event_log
+  for each row execute function ad.trg_audit();

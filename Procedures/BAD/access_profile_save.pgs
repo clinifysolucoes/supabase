@@ -6,32 +6,40 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 14/10/2026 - permissoes por tela (screens) e log de atividade ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Manutencao de perfis de acesso da empresa. Somente administrador.
       vc_action = 'I'  cria perfil (nr_profile sequencial por empresa)
       vc_action = 'U'  atualiza nome / nivel / situacao (parcial)
+    screens (opcional): quando presente, SUBSTITUI todas as permissoes do
+    perfil em ad.access_profile_screen. Linha = pode ler; id_create e
+    id_update liberam criar e alterar. Perfil nivel 100 ignora a tabela
+    (administrador tem tudo). Tela sem nenhuma permissao e ignorada.
     Guarda: a empresa nunca pode ficar sem um administrador ativo
     (ad.fn_company_has_admin) - a transacao inteira e desfeita.
+    Grava ad.event_log (CREATE/UPDATE).
 
   Input p_json:
     nr_version  integer  obrigatorio = 1
     vc_action   text     obrigatorio 'I' | 'U'
     nr_company  bigint   obrigatorio
+    nr_branch   bigint   opcional (filial aberta no app, so para o log)
     nr_profile  bigint   obrigatorio em 'U'
     vc_name     text     obrigatorio em 'I'; opcional em 'U' (ate 30)
     it_level    integer  0..100 (100 = administrador). Default 0 em 'I'
     it_status   integer  1 ativo | 90 inativo (so em 'U')
+    screens     array    opcional [{"uu_screen": "...", "id_read": true,
+                                    "id_create": false, "id_update": false}]
 
   Output jsonb: {"nr_company": 1, "nr_profile": 3}
 
   Errors: VERSION_MISMATCH, ACCESS_PROFILE_ACTION_INVALID, ACCESS_PROFILE_COMPANY_REQUIRED,
     ACCESS_PROFILE_FORBIDDEN, ACCESS_PROFILE_NAME_REQUIRED, ACCESS_PROFILE_NAME_IN_USE {Name},
     ACCESS_PROFILE_LEVEL_INVALID, ACCESS_PROFILE_REQUIRED, ACCESS_PROFILE_NOT_FOUND,
-    ACCESS_PROFILE_STATUS_INVALID, ACCESS_PROFILE_LAST_ADMIN
+    ACCESS_PROFILE_STATUS_INVALID, ACCESS_PROFILE_LAST_ADMIN,
+    ACCESS_PROFILE_SCREENS_INVALID, ACCESS_PROFILE_SCREEN_INVALID {Screen}
 */
-
 create or replace function ad.access_profile_save(p_json jsonb)
 returns jsonb
 language plpgsql
@@ -46,6 +54,10 @@ declare
   _vc_name    varchar(30);
   _it_level   smallint;
   _it_status  smallint;
+  _screens    jsonb;
+  _screen     jsonb;
+  _uu_screen  uuid;
+  _row        ad.access_profile%rowtype;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'access_profile_save');
 
@@ -85,6 +97,26 @@ begin
     end if;
   end if;
 
+  /* Telas: valida antes de gravar qualquer coisa                             */
+  if p_json ? 'screens' then
+    _screens := p_json -> 'screens';
+    if _screens is null or jsonb_typeof(_screens) <> 'array' then
+      raise exception '%', ad.fn_message('ACCESS_PROFILE_SCREENS_INVALID');
+    end if;
+    for _screen in select * from jsonb_array_elements(_screens) loop
+      begin
+        _uu_screen := (_screen ->> 'uu_screen')::uuid;
+      exception when others then
+        _uu_screen := null;
+      end;
+      if _uu_screen is null or not exists (
+           select 1 from ad.screen s where s.uu_screen = _uu_screen and s.it_status = 1) then
+        raise exception '%', ad.fn_message('ACCESS_PROFILE_SCREEN_INVALID',
+          jsonb_build_object('Screen', coalesce(_screen ->> 'uu_screen', '')));
+      end if;
+    end loop;
+  end if;
+
   /*------------------------------------------------------------------------*/
   if _vc_action = 'I' then
   /*------------------------------------------------------------------------*/
@@ -101,7 +133,8 @@ begin
      where p.nr_company = _nr_company;
 
     insert into ad.access_profile (nr_company, nr_profile, vc_name, it_level, it_status, nr_operator)
-    values (_nr_company, _nr_profile, _vc_name, _it_level, 1, _nr_user);
+    values (_nr_company, _nr_profile, _vc_name, _it_level, 1, _nr_user)
+    returning * into _row;
 
   /*------------------------------------------------------------------------*/
   else /* 'U' */
@@ -127,12 +160,44 @@ begin
       it_level  = case when p_json ? 'it_level'  then _it_level  else p.it_level end,
       it_status = case when p_json ? 'it_status' then _it_status else p.it_status end
     where p.nr_company = _nr_company
-      and p.nr_profile = _nr_profile;
-
-    if not ad.fn_company_has_admin(_nr_company) then
-      raise exception '%', ad.fn_message('ACCESS_PROFILE_LAST_ADMIN');
-    end if;
+      and p.nr_profile = _nr_profile
+    returning p.* into _row;
   end if;
+
+  /* Permissoes por tela: presente = substitui todas                         */
+  if p_json ? 'screens' then
+    delete from ad.access_profile_screen aps
+     where aps.nr_company = _nr_company
+       and aps.nr_profile = _nr_profile;
+
+    insert into ad.access_profile_screen (nr_company, nr_profile, uu_screen, id_read, id_create, id_update, nr_operator)
+    select distinct on ((s ->> 'uu_screen')::uuid)
+           _nr_company, _nr_profile, (s ->> 'uu_screen')::uuid,
+           true,
+           coalesce((s ->> 'id_create')::boolean, false),
+           coalesce((s ->> 'id_update')::boolean, false),
+           _nr_user
+      from jsonb_array_elements(_screens) s
+     where coalesce((s ->> 'id_read')::boolean, true)
+        or coalesce((s ->> 'id_create')::boolean, false)
+        or coalesce((s ->> 'id_update')::boolean, false);
+  end if;
+
+  if not ad.fn_company_has_admin(_nr_company) then
+    raise exception '%', ad.fn_message('ACCESS_PROFILE_LAST_ADMIN');
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, (p_json ->> 'nr_branch')::bigint, 'PROFILES',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'access_profile', _nr_company::text || '/' || _nr_profile::text,
+    format('Perfil %s %s', _row.vc_name, case when _vc_action = 'I' then 'criado' else 'alterado' end),
+    jsonb_build_object(
+      'vc_name',    _row.vc_name,
+      'it_level',   _row.it_level,
+      'it_status',  _row.it_status,
+      'qt_screens', (select count(*) from ad.access_profile_screen aps
+                      where aps.nr_company = _nr_company and aps.nr_profile = _nr_profile)));
 
   return jsonb_build_object('nr_company', _nr_company, 'nr_profile', _nr_profile);
 end;
