@@ -128,6 +128,7 @@ Supabase/
 ├── tests/*.sql                    # testes de RLS/functions (psql, uma transação, rollback)
 ├── flyway/
 │   ├── conf/flyway.{local,staging,prod}.conf
+│   ├── callbacks/afterMigrate__*.sql  # SQL idempotente que roda depois de todo migrate (ex.: trancar flyway_schema_history)
 │   ├── init/00-supabase-stubs.sql # roles + schema auth para Postgres puro (local/CI). NUNCA no Supabase real
 │   └── scripts/{generate-repeatables,validate-standards,deploy,local-db}.sh
 └── .github/workflows/{sql-validate,sql-deploy-staging,sql-deploy-production}.yml
@@ -153,6 +154,10 @@ Regra estrita: subpasta `YYYY/MM` obrigatória e igual ao timestamp do nome;
 descrição `[a-z0-9_]+`. Só DDL de tabelas/índices/grants/seeds. **Toda `CREATE TABLE` vem com
 `ENABLE ROW LEVEL SECURITY` no mesmo arquivo** (o validador exige) e ganha um trigger `<tabela>_audit`
 em `trg_audit.pgs` e uma entrada em `schema.json`.
+Objeto fora do schema `ad` (caso único: `public.flyway_schema_history`, trancada pelo callback
+`flyway/callbacks/afterMigrate__lockdown_flyway_history.sql`) fica fora do dicionário e é documentado no
+header do próprio arquivo. **DDL na `flyway_schema_history` nunca vai em migration**: o Flyway segura um
+lock nela numa segunda conexão durante o migrate e o `ALTER TABLE` trava; use callback `afterMigrate`.
 
 ### Dicionário de dados (sem Excel)
 
