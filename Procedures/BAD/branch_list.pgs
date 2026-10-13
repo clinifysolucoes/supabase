@@ -1,0 +1,88 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.branch_list(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('branch_list')           ::
+  ::                (cadastro de usuarios: filiais para vincular; filtros)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lista as filiais da empresa. Administrador da empresa ve todas; usuario
+    comum ve apenas as filiais em que tem perfil ativo (mesma regra da RLS).
+    O app nunca le ad.branch direto: toda leitura passa por aqui.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    id_include_inactive  boolean  opcional (default false: so filiais ativas)
+
+  Output jsonb:
+    {"branches": [{"nr_branch", "vc_name", "vc_legal_name", "vc_cnpj", "vc_city",
+                   "vc_state", "vc_timezone", "id_main", "it_status", "id_blocked",
+                   "vc_block_reason"}]}
+    ordenado por matriz primeiro, depois nome.
+
+  Errors (ad.fn_message): VERSION_MISMATCH, BRANCH_LIST_COMPANY_REQUIRED,
+    BRANCH_LIST_FORBIDDEN (sem sessao, usuario inativo ou fora da empresa)
+*/
+create or replace function ad.branch_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _id_all     boolean;
+  _id_admin   boolean;
+  _branches   jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'branch_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('BRANCH_LIST_COMPANY_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or _nr_company not in (select private.fn_my_companies()) then
+    raise exception '%', ad.fn_message('BRANCH_LIST_FORBIDDEN');
+  end if;
+
+  _id_all   := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _id_admin := private.fn_is_company_admin(_nr_company);
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_branch',       b.nr_branch,
+             'vc_name',         b.vc_name,
+             'vc_legal_name',   b.vc_legal_name,
+             'vc_cnpj',         b.vc_cnpj,
+             'vc_city',         b.vc_city,
+             'vc_state',        b.vc_state,
+             'vc_timezone',     b.vc_timezone,
+             'id_main',         b.id_main,
+             'it_status',       b.it_status,
+             'id_blocked',      b.id_blocked,
+             'vc_block_reason', b.vc_block_reason)
+           order by b.id_main desc, b.vc_name, b.nr_branch), '[]'::jsonb)
+    into _branches
+    from ad.branch b
+   where b.nr_company = _nr_company
+     and (_id_all or b.it_status = 1)
+     and (_id_admin
+          or (b.nr_company, b.nr_branch) in (select m.nr_company, m.nr_branch
+                                               from private.fn_my_branches() m));
+
+  return jsonb_build_object('branches', _branches);
+end;
+$$;
+
+revoke all on function ad.branch_list(jsonb) from public, anon;
+grant execute on function ad.branch_list(jsonb) to authenticated;

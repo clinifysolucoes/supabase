@@ -1031,6 +1031,57 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "branch_list",
+      "signature": "ad.branch_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Lista as filiais da empresa: administrador vê todas, usuário comum só as filiais em que tem perfil ativo. Opção id_include_inactive. O app nunca lê ad.branch direto.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "BRANCH_LIST_COMPANY_REQUIRED",
+        "BRANCH_LIST_FORBIDDEN"
+      ]
+    },
+    {
+      "name": "access_profile_list",
+      "signature": "ad.access_profile_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Lista os perfis de acesso da empresa com a quantidade de usuários em cada um (qualquer usuário ativo da empresa). Opção id_include_inactive.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "ACCESS_PROFILE_LIST_COMPANY_REQUIRED",
+        "ACCESS_PROFILE_LIST_FORBIDDEN"
+      ]
+    },
+    {
+      "name": "company_user_list",
+      "signature": "ad.company_user_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Lista paginada dos usuários da empresa com cadastro, situação e filiais × perfis; filtros por nome/e-mail, situação e filial. Somente administrador.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "COMPANY_USER_LIST_COMPANY_REQUIRED",
+        "COMPANY_USER_LIST_FORBIDDEN",
+        "COMPANY_USER_LIST_STATUS_INVALID"
+      ]
+    },
+    {
+      "name": "access_log_list",
+      "signature": "ad.access_log_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Log de acesso paginado no contexto da empresa (padrão: últimos 30 dias). Administrador vê os acessos à empresa e os sem empresa escolhida dos seus usuários; usuário comum só os próprios. Filtros por usuário, app e período.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "ACCESS_LOG_LIST_COMPANY_REQUIRED",
+        "ACCESS_LOG_LIST_FORBIDDEN",
+        "ACCESS_LOG_LIST_APP_INVALID",
+        "ACCESS_LOG_LIST_PERIOD_INVALID"
+      ]
+    },
+    {
       "name": "fn_current_user_nr",
       "signature": "private.fn_current_user_nr()",
       "kind": "helper",

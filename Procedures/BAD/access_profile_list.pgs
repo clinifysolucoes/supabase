@@ -1,0 +1,80 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.access_profile_list(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('access_profile_list')   ::
+  ::                (tela de perfis; combos de perfil no cadastro de usuarios)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lista os perfis de acesso da empresa, com a quantidade de usuarios que
+    usam cada um. Qualquer usuario ativo da empresa pode listar (leitura);
+    criar/alterar continua em ad.access_profile_save (so administrador).
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    id_include_inactive  boolean  opcional (default false: so perfis ativos)
+
+  Output jsonb:
+    {"profiles": [{"nr_profile", "vc_name", "it_level", "it_status",
+                   "qt_users", "dh_updated"}]}
+    ordenado por nivel (maior primeiro) e nome.
+
+  Errors (ad.fn_message): VERSION_MISMATCH, ACCESS_PROFILE_LIST_COMPANY_REQUIRED,
+    ACCESS_PROFILE_LIST_FORBIDDEN
+*/
+create or replace function ad.access_profile_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _id_all     boolean;
+  _profiles   jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'access_profile_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('ACCESS_PROFILE_LIST_COMPANY_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or _nr_company not in (select private.fn_my_companies()) then
+    raise exception '%', ad.fn_message('ACCESS_PROFILE_LIST_FORBIDDEN');
+  end if;
+
+  _id_all := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_profile', p.nr_profile,
+             'vc_name',    p.vc_name,
+             'it_level',   p.it_level,
+             'it_status',  p.it_status,
+             'qt_users',   (select count(distinct bup.nr_user)
+                              from ad.branch_user_profile bup
+                             where bup.nr_company = p.nr_company
+                               and bup.nr_profile = p.nr_profile),
+             'dh_updated', p.dh_updated)
+           order by p.it_level desc, p.vc_name, p.nr_profile), '[]'::jsonb)
+    into _profiles
+    from ad.access_profile p
+   where p.nr_company = _nr_company
+     and (_id_all or p.it_status = 1);
+
+  return jsonb_build_object('profiles', _profiles);
+end;
+$$;
+
+revoke all on function ad.access_profile_list(jsonb) from public, anon;
+grant execute on function ad.access_profile_list(jsonb) to authenticated;
