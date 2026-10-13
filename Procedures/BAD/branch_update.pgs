@@ -1,0 +1,131 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.branch_update(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('branch_update')         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Atualizacao parcial dos dados da filial (somente administrador da empresa).
+    Chave presente = atualiza (null limpa); ausente = intocado.
+    id_main = true transfere a condicao de matriz para esta filial.
+    Situacao/bloqueio sao operacoes de plataforma (service_role).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company   bigint   obrigatorio
+    nr_branch    bigint   obrigatorio
+    vc_name, vc_legal_name, vc_cnpj, vc_email, vc_phone, it_size, it_tax_regime,
+    vc_state_registration, vc_city_registration,
+    vc_address, vc_address_number, vc_address_extra, vc_district, vc_city,
+    vc_state, vc_zip_code, vc_timezone, id_main        opcionais (parciais)
+
+  Output jsonb: linha completa de ad.branch.
+
+  Errors: VERSION_MISMATCH, BRANCH_UPDATE_KEY_REQUIRED, BRANCH_UPDATE_FORBIDDEN,
+    BRANCH_UPDATE_NOT_FOUND, BRANCH_UPDATE_NAME_REQUIRED, BRANCH_UPDATE_CNPJ_INVALID {Cnpj},
+    BRANCH_UPDATE_CNPJ_IN_USE {Cnpj}, BRANCH_UPDATE_EMAIL_INVALID {Email},
+    BRANCH_UPDATE_TIMEZONE_INVALID {Timezone}
+*/
+
+create or replace function ad.branch_update(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company  bigint;
+  _nr_branch   bigint;
+  _vc_name     varchar(60);
+  _vc_cnpj     varchar(14);
+  _vc_email    varchar(200);
+  _vc_timezone varchar(60);
+  _row         ad.branch%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'branch_update');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('BRANCH_UPDATE_KEY_REQUIRED');
+  end if;
+  if not ad.fn_is_company_admin(_nr_company) then
+    raise exception '%', ad.fn_message('BRANCH_UPDATE_FORBIDDEN');
+  end if;
+  if not exists (select 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch) then
+    raise exception '%', ad.fn_message('BRANCH_UPDATE_NOT_FOUND');
+  end if;
+
+  if p_json ? 'vc_name' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 60);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('BRANCH_UPDATE_NAME_REQUIRED');
+    end if;
+  end if;
+
+  if p_json ? 'vc_cnpj' then
+    _vc_cnpj := ad.fn_cnpj_normalize(p_json ->> 'vc_cnpj');
+    if _vc_cnpj is not null and not ad.fn_cnpj_is_valid(_vc_cnpj) then
+      raise exception '%', ad.fn_message('BRANCH_UPDATE_CNPJ_INVALID', jsonb_build_object('Cnpj', _vc_cnpj));
+    end if;
+    if _vc_cnpj is not null and exists (
+         select 1 from ad.branch b
+          where b.vc_cnpj = _vc_cnpj
+            and (b.nr_company <> _nr_company or b.nr_branch <> _nr_branch)) then
+      raise exception '%', ad.fn_message('BRANCH_UPDATE_CNPJ_IN_USE', jsonb_build_object('Cnpj', _vc_cnpj));
+    end if;
+  end if;
+
+  if p_json ? 'vc_email' then
+    _vc_email := left(nullif(lower(trim(p_json ->> 'vc_email')), ''), 200);
+    if _vc_email is not null and not ad.fn_email_is_valid(_vc_email) then
+      raise exception '%', ad.fn_message('BRANCH_UPDATE_EMAIL_INVALID', jsonb_build_object('Email', _vc_email));
+    end if;
+  end if;
+
+  if p_json ? 'vc_timezone' then
+    _vc_timezone := coalesce(left(nullif(trim(p_json ->> 'vc_timezone'), ''), 60), 'America/Sao_Paulo');
+    if not exists (select 1 from pg_catalog.pg_timezone_names tz where tz.name = _vc_timezone) then
+      raise exception '%', ad.fn_message('BRANCH_UPDATE_TIMEZONE_INVALID', jsonb_build_object('Timezone', _vc_timezone));
+    end if;
+  end if;
+
+  /* Transferencia de matriz: so uma filial id_main por empresa (indice unico) */
+  if coalesce((p_json ->> 'id_main')::boolean, false) then
+    update ad.branch b set id_main = false
+     where b.nr_company = _nr_company and b.id_main and b.nr_branch <> _nr_branch;
+  end if;
+
+  update ad.branch b set
+    vc_name               = case when p_json ? 'vc_name'               then _vc_name     else b.vc_name end,
+    vc_legal_name         = case when p_json ? 'vc_legal_name'         then left(nullif(trim(p_json ->> 'vc_legal_name'), ''), 80)         else b.vc_legal_name end,
+    vc_cnpj               = case when p_json ? 'vc_cnpj'               then _vc_cnpj     else b.vc_cnpj end,
+    vc_email              = case when p_json ? 'vc_email'              then _vc_email    else b.vc_email end,
+    vc_phone              = case when p_json ? 'vc_phone'              then left(nullif(trim(p_json ->> 'vc_phone'), ''), 20)              else b.vc_phone end,
+    it_size               = case when p_json ? 'it_size'               then (p_json ->> 'it_size')::smallint                               else b.it_size end,
+    it_tax_regime         = case when p_json ? 'it_tax_regime'         then (p_json ->> 'it_tax_regime')::smallint                         else b.it_tax_regime end,
+    vc_state_registration = case when p_json ? 'vc_state_registration' then left(nullif(trim(p_json ->> 'vc_state_registration'), ''), 20) else b.vc_state_registration end,
+    vc_city_registration  = case when p_json ? 'vc_city_registration'  then left(nullif(trim(p_json ->> 'vc_city_registration'), ''), 20)  else b.vc_city_registration end,
+    vc_address            = case when p_json ? 'vc_address'            then left(nullif(trim(p_json ->> 'vc_address'), ''), 60)            else b.vc_address end,
+    vc_address_number     = case when p_json ? 'vc_address_number'     then left(nullif(trim(p_json ->> 'vc_address_number'), ''), 10)     else b.vc_address_number end,
+    vc_address_extra      = case when p_json ? 'vc_address_extra'      then left(nullif(trim(p_json ->> 'vc_address_extra'), ''), 60)      else b.vc_address_extra end,
+    vc_district           = case when p_json ? 'vc_district'           then left(nullif(trim(p_json ->> 'vc_district'), ''), 30)           else b.vc_district end,
+    vc_city               = case when p_json ? 'vc_city'               then left(nullif(trim(p_json ->> 'vc_city'), ''), 30)               else b.vc_city end,
+    vc_state              = case when p_json ? 'vc_state'              then upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2))        else b.vc_state end,
+    vc_zip_code           = case when p_json ? 'vc_zip_code'           then nullif(regexp_replace(coalesce(p_json ->> 'vc_zip_code', ''), '[^0-9]', '', 'g'), '') else b.vc_zip_code end,
+    vc_timezone           = case when p_json ? 'vc_timezone'           then _vc_timezone else b.vc_timezone end,
+    id_main               = case when coalesce((p_json ->> 'id_main')::boolean, false) then true else b.id_main end
+  where b.nr_company = _nr_company
+    and b.nr_branch  = _nr_branch
+  returning b.* into _row;
+
+  return to_jsonb(_row);
+end;
+$$;
+
+revoke all on function ad.branch_update(jsonb) from public, anon;
+grant execute on function ad.branch_update(jsonb) to authenticated;

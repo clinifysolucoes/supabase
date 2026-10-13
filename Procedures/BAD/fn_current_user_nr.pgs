@@ -1,0 +1,35 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_current_user_nr()                                       ::
+  ::  UsedBy      : RLS policies, ad.trg_audit, functions RPC                     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Traduz o usuario do JWT (auth.uid(), uuid do Supabase Auth) para o
+    ad.app_user.nr_user. Retorna NULL se nao houver
+    sessao, se o usuario nao existir ou se estiver bloqueado/inativo - e NULL
+    em policy significa "nao enxerga nada".
+
+    STABLE: avaliada uma vez por statement. SECURITY DEFINER: le ad.app_user
+    sem passar pela RLS (evita recursao, pois a policy de app_user usa esta fn).
+*/
+
+create or replace function ad.fn_current_user_nr()
+returns bigint
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select u.nr_user
+    from ad.app_user u
+   where u.uu_auth = (select auth.uid())
+     and u.it_status = 1;
+$$;
+
+revoke all on function ad.fn_current_user_nr() from public, anon;
+grant execute on function ad.fn_current_user_nr() to authenticated;

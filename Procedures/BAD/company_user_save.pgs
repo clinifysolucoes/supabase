@@ -1,0 +1,162 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.company_user_save(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('company_user_save')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Manutencao de usuarios da empresa. Somente administrador.
+      'I' vincula um usuario JA CADASTRADO no Supabase Auth (localizado pelo
+          e-mail) a empresa, com as filiais/perfis informados.
+          Convite de e-mail ainda nao cadastrado e feito por Edge Function
+          (auth.admin.inviteUserByEmail) - fora do banco.
+      'U' altera situacao/motivo e/ou substitui as filiais/perfis.
+      'D' remove o vinculo (e os vinculos de filial, por cascade).
+    Guarda: a empresa nunca fica sem administrador ativo (ad.fn_company_has_admin).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     obrigatorio 'I' | 'U' | 'D'
+    nr_company   bigint   obrigatorio
+    vc_email     text     obrigatorio em 'I'
+    nr_user      bigint   obrigatorio em 'U' e 'D'
+    it_status    integer  1 ativo | 80 bloqueado | 90 inativo (so em 'U')
+    vc_block_reason text  opcional (motivo do bloqueio)
+    branches     array    [{"nr_branch": 1, "nr_profile": 2}, ...]
+                          obrigatorio em 'I'; opcional em 'U' (presente = substitui todos)
+
+  Output jsonb: {"nr_company": 1, "nr_user": 7, "nr_company_user": 3}
+
+  Errors: VERSION_MISMATCH, COMPANY_USER_ACTION_INVALID, COMPANY_USER_COMPANY_REQUIRED,
+    COMPANY_USER_FORBIDDEN, COMPANY_USER_EMAIL_REQUIRED, COMPANY_USER_EMAIL_NOT_FOUND {Email},
+    COMPANY_USER_ALREADY_LINKED, COMPANY_USER_USER_REQUIRED, COMPANY_USER_NOT_FOUND,
+    COMPANY_USER_STATUS_INVALID, COMPANY_USER_BRANCHES_REQUIRED,
+    COMPANY_USER_BRANCH_INVALID {Branch}, COMPANY_USER_PROFILE_INVALID {Profile},
+    COMPANY_USER_LAST_ADMIN
+*/
+
+create or replace function ad.company_user_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_admin        bigint;
+  _vc_action       text;
+  _nr_company      bigint;
+  _nr_user         bigint;
+  _nr_company_user bigint;
+  _vc_email        varchar(200);
+  _it_status       smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'company_user_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U', 'D') then
+    raise exception '%', ad.fn_message('COMPANY_USER_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('COMPANY_USER_COMPANY_REQUIRED');
+  end if;
+
+  _nr_admin := ad.fn_current_user_nr();
+  if _nr_admin is null or not ad.fn_is_company_admin(_nr_company) then
+    raise exception '%', ad.fn_message('COMPANY_USER_FORBIDDEN');
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+  /*------------------------------------------------------------------------*/
+    _vc_email := left(nullif(lower(trim(p_json ->> 'vc_email')), ''), 200);
+    if _vc_email is null then
+      raise exception '%', ad.fn_message('COMPANY_USER_EMAIL_REQUIRED');
+    end if;
+
+    select u.nr_user into _nr_user
+      from ad.app_user u
+     where u.vc_email = _vc_email;
+    if _nr_user is null then
+      raise exception '%', ad.fn_message('COMPANY_USER_EMAIL_NOT_FOUND', jsonb_build_object('Email', _vc_email));
+    end if;
+
+    if exists (select 1 from ad.company_user cu
+                where cu.nr_company = _nr_company and cu.nr_user = _nr_user) then
+      raise exception '%', ad.fn_message('COMPANY_USER_ALREADY_LINKED');
+    end if;
+
+    /* Serializa a numeracao do usuario na empresa                   */
+    perform 1 from ad.company c where c.nr_company = _nr_company for update;
+
+    select coalesce(max(cu.nr_company_user), 0) + 1
+      into _nr_company_user
+      from ad.company_user cu
+     where cu.nr_company = _nr_company;
+
+    insert into ad.company_user (nr_company, nr_user, nr_company_user, it_status, nr_operator)
+    values (_nr_company, _nr_user, _nr_company_user, 1, _nr_admin);
+
+    perform ad.fn_set_user_branches(_nr_company, _nr_user, p_json -> 'branches', _nr_admin);
+
+  /*------------------------------------------------------------------------*/
+  else /* 'U' ou 'D' */
+  /*------------------------------------------------------------------------*/
+    _nr_user := (p_json ->> 'nr_user')::bigint;
+    if _nr_user is null then
+      raise exception '%', ad.fn_message('COMPANY_USER_USER_REQUIRED');
+    end if;
+
+    select cu.nr_company_user into _nr_company_user
+      from ad.company_user cu
+     where cu.nr_company = _nr_company and cu.nr_user = _nr_user;
+    if _nr_company_user is null then
+      raise exception '%', ad.fn_message('COMPANY_USER_NOT_FOUND');
+    end if;
+
+    if _vc_action = 'D' then
+      delete from ad.company_user cu
+       where cu.nr_company = _nr_company and cu.nr_user = _nr_user;
+    else
+      if p_json ? 'it_status' then
+        _it_status := (p_json ->> 'it_status')::smallint;
+        if _it_status not in (1, 80, 90) then
+          raise exception '%', ad.fn_message('COMPANY_USER_STATUS_INVALID');
+        end if;
+      end if;
+
+      update ad.company_user cu set
+        it_status       = case when p_json ? 'it_status' then _it_status else cu.it_status end,
+        vc_block_reason = case
+                            when p_json ? 'vc_block_reason' then left(nullif(trim(p_json ->> 'vc_block_reason'), ''), 200)
+                            when p_json ? 'it_status' and _it_status = 1 then null
+                            else cu.vc_block_reason
+                          end
+      where cu.nr_company = _nr_company
+        and cu.nr_user    = _nr_user;
+
+      if p_json ? 'branches' then
+        perform ad.fn_set_user_branches(_nr_company, _nr_user, p_json -> 'branches', _nr_admin);
+      end if;
+    end if;
+
+    if not ad.fn_company_has_admin(_nr_company) then
+      raise exception '%', ad.fn_message('COMPANY_USER_LAST_ADMIN');
+    end if;
+  end if;
+
+  return jsonb_build_object(
+    'nr_company',      _nr_company,
+    'nr_user',         _nr_user,
+    'nr_company_user', _nr_company_user
+  );
+end;
+$$;
+
+revoke all on function ad.company_user_save(jsonb) from public, anon;
+grant execute on function ad.company_user_save(jsonb) to authenticated;

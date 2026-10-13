@@ -1,0 +1,28 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_my_companies()                                          ::
+  ::  UsedBy      : RLS policies (company, access_profile)                        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Empresas em que o usuario logado tem pelo menos uma filial acessivel.
+    Derivada de ad.fn_my_branches() para manter uma unica fonte de regra.
+*/
+
+create or replace function ad.fn_my_companies()
+returns setof bigint
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select distinct mb.nr_company
+    from ad.fn_my_branches() mb;
+$$;
+
+revoke all on function ad.fn_my_companies() from public, anon;
+grant execute on function ad.fn_my_companies() to authenticated;

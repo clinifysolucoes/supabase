@@ -1,0 +1,63 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.trg_auth_user_sync() + trigger app_user_sync em auth.users ::
+  ::  UsedBy      : Supabase Auth (signUp, invite, updateUser)                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Mantem ad.app_user espelhado em auth.users:
+      INSERT  cria o app_user com nome vindo de raw_user_meta_data.name (o
+              Flutter envia em signUp(data: {'name': ...})), ou full_name
+              (login social), ou a parte local do e-mail.
+      UPDATE  de e-mail replica em vc_email.
+    SECURITY DEFINER e obrigatorio: quem dispara e o role supabase_auth_admin,
+    que nao tem privilegios no schema ad.
+    Se esta function falhar, o signup falha ("Database error saving new user"):
+    mantenha-a simples e sem validacoes de negocio.
+*/
+
+create or replace function ad.trg_auth_user_sync()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _vc_name  varchar(60);
+  _vc_email varchar(200);
+begin
+  _vc_email := left(nullif(lower(trim(new.email)), ''), 200);
+
+  if tg_op = 'INSERT' then
+    _vc_name := left(coalesce(
+                  nullif(trim(new.raw_user_meta_data ->> 'name'), ''),
+                  nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''),
+                  nullif(split_part(coalesce(new.email, ''), '@', 1), ''),
+                  'Usuário'), 60);
+
+    insert into ad.app_user (uu_auth, vc_name, vc_email)
+    values (new.id, _vc_name, _vc_email)
+    on conflict (uu_auth) do nothing;
+
+  elsif tg_op = 'UPDATE' then
+    update ad.app_user u
+       set vc_email = _vc_email
+     where u.uu_auth = new.id
+       and u.vc_email is distinct from _vc_email;
+  end if;
+
+  return new;
+end;
+$$;
+
+revoke all on function ad.trg_auth_user_sync() from public, anon, authenticated;
+grant execute on function ad.trg_auth_user_sync() to supabase_auth_admin;
+grant usage on schema ad to supabase_auth_admin;
+
+create or replace trigger app_user_sync
+  after insert or update of email on auth.users
+  for each row execute function ad.trg_auth_user_sync();

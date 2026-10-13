@@ -1,0 +1,62 @@
+# Guarda os PRs para main (promocao staging -> producao).
+#
+# 1. Autor na allowlist: variavel MAIN_PR_ALLOWED_AUTHORS (repo ou org).
+#    Formato: usernames do GitHub separados por virgula, sem @ e sem espaco.
+#    Ex.: zeoliveirajunior,outro_dev
+#    Onde: Settings -> Secrets and variables -> Actions -> Variables.
+# 2. Branch de origem: so "staging" pode abrir PR para main.
+#    Hotfix entra em staging primeiro; depois staging e promovida para main.
+#
+# Os dois jobs sao "required status checks" na protecao da branch main:
+#   "Verify PR author is in allowlist" e "Verify PR source is staging".
+# Mudar o name: de um job quebra a protecao.
+
+name: Guard PRs to main
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-author:
+    name: Verify PR author is in allowlist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check author against allowlist
+        env:
+          ALLOWED: ${{ vars.MAIN_PR_ALLOWED_AUTHORS }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if [ -z "$ALLOWED" ]; then
+            echo "::error title=Allowlist not configured::Variable MAIN_PR_ALLOWED_AUTHORS is empty or unset."
+            echo "::error::Set it in: Settings -> Secrets and variables -> Actions -> Variables (repo or org level)."
+            echo "::error::Format: comma-separated GitHub usernames (no @, no spaces)."
+            exit 1
+          fi
+          if [[ ",${ALLOWED}," == *",${AUTHOR},"* ]]; then
+            echo "OK: Author @${AUTHOR} is authorized to merge into main"
+            exit 0
+          fi
+          echo "::error title=Unauthorized PR author::User @${AUTHOR} is not in the allowlist for main branch merges."
+          echo "Allowed authors: ${ALLOWED//,/ }"
+          exit 1
+
+  verify-source-branch:
+    name: Verify PR source is staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check source branch
+        env:
+          SOURCE: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ "$SOURCE" = "staging" ]; then
+            echo "OK: PR source branch is staging"
+            exit 0
+          fi
+          echo "::error title=Invalid source branch::PRs to main must come from 'staging'. This PR comes from '$SOURCE'."
+          echo "::error::All changes must merge into staging first, then staging is promoted to main."
+          exit 1

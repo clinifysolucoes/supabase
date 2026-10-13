@@ -1,0 +1,176 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.company_create(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('company_create')        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Onboarding: o usuario logado cria a sua empresa. Numa unica transacao:
+      1. ad.company
+      2. ad.branch 1 = matriz
+      3. ad.access_profile 1 = Administrador (nivel 100) e 2 = Usuario (nivel 0)
+      4. ad.company_user: criador = usuario 1 da empresa
+      5. ad.branch_user_profile: criador x matriz x Administrador
+    Qualquer usuario autenticado e ativo pode criar empresas (modelo SaaS).
+
+  Input p_json:
+    nr_version        integer  obrigatorio = 1
+    vc_name           text     obrigatorio (nome da empresa)
+    vc_cnpj           text     opcional (14 posicoes, com ou sem pontuacao; alfanumerico ok)
+    vc_email          text     opcional
+    vc_phone          text     opcional
+    it_size           integer  opcional (10 MEI, 20 ME, 30 EPP, 40 medio, 50 grande)
+    vc_address, vc_address_number, vc_address_extra, vc_district, vc_city,
+    vc_state (UF), vc_zip_code (CEP 8 digitos)        opcionais
+    vc_branch_name    text     opcional (nome fantasia da matriz; default = vc_name)
+    vc_legal_name     text     opcional (razao social da matriz)
+    vc_timezone       text     opcional (default America/Sao_Paulo)
+
+  Output jsonb: {"nr_company": 1, "nr_branch": 1, "nr_profile": 1, "nr_company_user": 1}
+
+  Errors (ad.fn_message): VERSION_MISMATCH, COMPANY_CREATE_USER_NOT_FOUND,
+    COMPANY_CREATE_USER_INACTIVE, COMPANY_CREATE_NAME_REQUIRED,
+    COMPANY_CREATE_CNPJ_INVALID {Cnpj}, COMPANY_CREATE_CNPJ_IN_USE {Cnpj},
+    COMPANY_CREATE_EMAIL_INVALID {Email}, COMPANY_CREATE_TIMEZONE_INVALID {Timezone}
+*/
+
+create or replace function ad.company_create(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user      bigint;
+  _it_status    smallint;
+  _nr_company   bigint;
+  _vc_name      varchar(60);
+  _vc_cnpj      varchar(14);
+  _vc_email     varchar(200);
+  _vc_phone     varchar(20);
+  _vc_branch    varchar(60);
+  _vc_timezone  varchar(60);
+  _vc_zip_code  varchar(8);
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'company_create');
+
+  /*------------------------------------------------------------------------*/
+  /* Operador: existe em ad.app_user (trigger do signup) e esta ativo        */
+  /*------------------------------------------------------------------------*/
+  select u.nr_user, u.it_status
+    into _nr_user, _it_status
+    from ad.app_user u
+   where u.uu_auth = (select auth.uid());
+
+  if _nr_user is null then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_USER_NOT_FOUND');
+  end if;
+  if _it_status <> 1 then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_USER_INACTIVE');
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  /* Consistencias                                                          */
+  /*------------------------------------------------------------------------*/
+  _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 60);
+  if _vc_name is null then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_NAME_REQUIRED');
+  end if;
+
+  _vc_cnpj := ad.fn_cnpj_normalize(p_json ->> 'vc_cnpj');
+  if _vc_cnpj is not null and not ad.fn_cnpj_is_valid(_vc_cnpj) then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_CNPJ_INVALID', jsonb_build_object('Cnpj', _vc_cnpj));
+  end if;
+  if _vc_cnpj is not null and (
+       exists (select 1 from ad.company c where c.vc_cnpj = _vc_cnpj)
+    or exists (select 1 from ad.branch  b where b.vc_cnpj = _vc_cnpj)) then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_CNPJ_IN_USE', jsonb_build_object('Cnpj', _vc_cnpj));
+  end if;
+
+  _vc_email := left(nullif(lower(trim(p_json ->> 'vc_email')), ''), 200);
+  if _vc_email is not null and not ad.fn_email_is_valid(_vc_email) then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_EMAIL_INVALID', jsonb_build_object('Email', _vc_email));
+  end if;
+
+  _vc_timezone := coalesce(left(nullif(trim(p_json ->> 'vc_timezone'), ''), 60), 'America/Sao_Paulo');
+  if not exists (select 1 from pg_catalog.pg_timezone_names tz where tz.name = _vc_timezone) then
+    raise exception '%', ad.fn_message('COMPANY_CREATE_TIMEZONE_INVALID', jsonb_build_object('Timezone', _vc_timezone));
+  end if;
+
+  _vc_phone    := left(nullif(trim(p_json ->> 'vc_phone'), ''), 20);
+  _vc_zip_code := nullif(regexp_replace(coalesce(p_json ->> 'vc_zip_code', ''), '[^0-9]', '', 'g'), '');
+
+  /*------------------------------------------------------------------------*/
+  /* 1. Empresa                                                             */
+  /*------------------------------------------------------------------------*/
+  insert into ad.company (
+    vc_name, vc_cnpj, vc_email, vc_phone, it_size,
+    vc_address, vc_address_number, vc_address_extra, vc_district, vc_city, vc_state, vc_zip_code,
+    nr_operator
+  ) values (
+    _vc_name, _vc_cnpj, _vc_email, _vc_phone, (p_json ->> 'it_size')::smallint,
+    left(nullif(trim(p_json ->> 'vc_address'), ''), 60),
+    left(nullif(trim(p_json ->> 'vc_address_number'), ''), 10),
+    left(nullif(trim(p_json ->> 'vc_address_extra'), ''), 60),
+    left(nullif(trim(p_json ->> 'vc_district'), ''), 30),
+    left(nullif(trim(p_json ->> 'vc_city'), ''), 30),
+    upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2)),
+    _vc_zip_code,
+    _nr_user
+  )
+  returning nr_company into _nr_company;
+
+  /*------------------------------------------------------------------------*/
+  /* 2. Matriz = filial 1                                                   */
+  /*------------------------------------------------------------------------*/
+  _vc_branch := coalesce(left(nullif(trim(p_json ->> 'vc_branch_name'), ''), 60), _vc_name);
+
+  insert into ad.branch (
+    nr_company, nr_branch, vc_name, vc_legal_name, vc_cnpj, vc_email, vc_phone,
+    vc_address, vc_address_number, vc_address_extra, vc_district, vc_city, vc_state, vc_zip_code,
+    vc_timezone, id_main, nr_operator
+  ) values (
+    _nr_company, 1, _vc_branch,
+    left(nullif(trim(p_json ->> 'vc_legal_name'), ''), 80),
+    _vc_cnpj, _vc_email, _vc_phone,
+    left(nullif(trim(p_json ->> 'vc_address'), ''), 60),
+    left(nullif(trim(p_json ->> 'vc_address_number'), ''), 10),
+    left(nullif(trim(p_json ->> 'vc_address_extra'), ''), 60),
+    left(nullif(trim(p_json ->> 'vc_district'), ''), 30),
+    left(nullif(trim(p_json ->> 'vc_city'), ''), 30),
+    upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2)),
+    _vc_zip_code,
+    _vc_timezone, true, _nr_user
+  );
+
+  /*------------------------------------------------------------------------*/
+  /* 3. Perfis padrao                                                       */
+  /*------------------------------------------------------------------------*/
+  insert into ad.access_profile (nr_company, nr_profile, vc_name, it_level, nr_operator) values
+    (_nr_company, 1, 'Administrador', 100, _nr_user),
+    (_nr_company, 2, 'Usuário',         0, _nr_user);
+
+  /*------------------------------------------------------------------------*/
+  /* 4 e 5. Vinculo do criador                                              */
+  /*------------------------------------------------------------------------*/
+  insert into ad.company_user (nr_company, nr_user, nr_company_user, it_status, nr_operator)
+  values (_nr_company, _nr_user, 1, 1, _nr_user);
+
+  insert into ad.branch_user_profile (nr_company, nr_branch, nr_user, nr_profile, nr_operator)
+  values (_nr_company, 1, _nr_user, 1, _nr_user);
+
+  return jsonb_build_object(
+    'nr_company',      _nr_company,
+    'nr_branch',       1,
+    'nr_profile',      1,
+    'nr_company_user', 1
+  );
+end;
+$$;
+
+revoke all on function ad.company_create(jsonb) from public, anon;
+grant execute on function ad.company_create(jsonb) to authenticated;

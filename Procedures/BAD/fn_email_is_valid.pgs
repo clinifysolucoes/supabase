@@ -1,0 +1,28 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_email_is_valid(text)                                    ::
+  ::  UsedBy      : company_create, company_update, branch_create, branch_update  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Validacao sintatica minima de e-mail (algo@dominio.tld, sem espacos).
+    O e-mail de LOGIN e validado pelo Supabase Auth; esta function serve para
+    e-mails de contato (empresa, filial).
+*/
+
+create or replace function ad.fn_email_is_valid(p_vc_email text)
+returns boolean
+language sql
+immutable
+set search_path = ''
+as $$
+  select p_vc_email is not null
+     and length(p_vc_email) <= 200
+     and p_vc_email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$';
+$$;
+
+revoke all on function ad.fn_email_is_valid(text) from public, anon, authenticated;

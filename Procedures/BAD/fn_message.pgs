@@ -1,0 +1,34 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_message(text, jsonb)                                    ::
+  ::  UsedBy      : todas as functions (RAISE EXCEPTION '%', ad.fn_message(...))  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Gera a mensagem de erro padrao em JSON para o front traduzir (i18n):
+      {"Message": "CHAVE", "Parameters": {"Nome": "valor"}}
+    O Flutter recebe a string em PostgrestException.message, faz jsonDecode e
+    traduz a chave. Nunca grave esta string em tela sem traduzir.
+*/
+
+create or replace function ad.fn_message(
+  p_vc_key    text,
+  p_jb_params jsonb default null
+)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select (
+    jsonb_build_object('Message', p_vc_key)
+    || case when p_jb_params is null then '{}'::jsonb
+            else jsonb_build_object('Parameters', p_jb_params) end
+  )::text;
+$$;
+
+revoke all on function ad.fn_message(text, jsonb) from public, anon, authenticated;

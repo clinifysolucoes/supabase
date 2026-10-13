@@ -1,0 +1,90 @@
+# Valida SQL no PR - nao toca em nenhum banco real.
+#
+# Jobs:
+#   standards  -> padroes do projeto (validate-standards.sh) + dicionario
+#                 regenerado e commitado (gen-dictionary.mjs --check)
+#   compile    -> Postgres 16 efemero + stubs do Supabase + flyway migrate de verdade
+#                 (versionadas E repeatables) + testes SQL de RLS (tests/*.sql)
+#                 + segundo migrate (tem que dizer "No migration necessary":
+#                 garante que as repeatables sao idempotentes)
+name: Validate SQL
+
+on:
+  pull_request:
+    branches: [staging, main]
+  workflow_dispatch:
+
+jobs:
+  standards:
+    name: Padroes (naming, header, UTF-8, RLS, least privilege) + dicionario
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: validate-standards.sh
+        run: |
+          chmod +x flyway/scripts/*.sh
+          flyway/scripts/validate-standards.sh
+      - name: Dicionario de dados regenerado (DATA_DICTIONARY.md e schema.js em dia com schema.json)
+        run: node tools/gen-dictionary.mjs --check
+
+  compile:
+    name: Flyway migrate em Postgres efemero + testes de RLS
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: postgres
+      FLYWAY_URL: jdbc:postgresql://localhost:5432/postgres
+      FLYWAY_USER: postgres
+      FLYWAY_PASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Stubs do Supabase (roles, schema auth, auth.uid)
+        run: psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f flyway/init/00-supabase-stubs.sql
+
+      - name: Gera flyway/repeatable e flyway/staged-scripts
+        run: |
+          chmod +x flyway/scripts/*.sh
+          flyway/scripts/generate-repeatables.sh
+
+      - name: flyway migrate (versionadas + repeatables)
+        run: |
+          docker run --rm --network host \
+            -v "$PWD:/workspace" -w /workspace \
+            -e FLYWAY_URL -e FLYWAY_USER -e FLYWAY_PASSWORD \
+            redgate/flyway:11 -configFiles=flyway/conf/flyway.local.conf info migrate
+
+      - name: Testes SQL (RLS, functions, dicionario)
+        run: |
+          for f in tests/*.sql; do
+            echo "==> $f"
+            psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Segundo migrate deve ser no-op (repeatables idempotentes)
+        run: |
+          OUT=$(docker run --rm --network host \
+            -v "$PWD:/workspace" -w /workspace \
+            -e FLYWAY_URL -e FLYWAY_USER -e FLYWAY_PASSWORD \
+            redgate/flyway:11 -configFiles=flyway/conf/flyway.local.conf migrate)
+          echo "$OUT"
+          echo "$OUT" | grep -q "No migration necessary" || { echo "::error::segundo migrate aplicou algo - repeatable com checksum instavel"; exit 1; }

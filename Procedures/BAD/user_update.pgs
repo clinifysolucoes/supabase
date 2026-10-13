@@ -1,0 +1,78 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.user_update(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('user_update')           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Autoatendimento: o usuario logado atualiza o proprio cadastro (parcial).
+    E-mail e senha mudam pelo Supabase Auth (supabase.auth.updateUser); o
+    trigger ad.trg_auth_user_sync replica o e-mail. it_level / it_status
+    nao sao alteraveis aqui (plataforma).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_name, vc_cpf, vc_phone, vc_mobile, vc_avatar_url   opcionais (parciais)
+
+  Output jsonb: linha completa de ad.app_user.
+
+  Errors: VERSION_MISMATCH, USER_UPDATE_USER_NOT_FOUND, USER_UPDATE_NAME_REQUIRED,
+    USER_UPDATE_CPF_INVALID {Cpf}, USER_UPDATE_CPF_IN_USE {Cpf}
+*/
+
+create or replace function ad.user_update(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user bigint;
+  _vc_name varchar(60);
+  _vc_cpf  varchar(11);
+  _row     ad.app_user%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'user_update');
+
+  _nr_user := ad.fn_current_user_nr();
+  if _nr_user is null then
+    raise exception '%', ad.fn_message('USER_UPDATE_USER_NOT_FOUND');
+  end if;
+
+  if p_json ? 'vc_name' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 60);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('USER_UPDATE_NAME_REQUIRED');
+    end if;
+  end if;
+
+  if p_json ? 'vc_cpf' then
+    _vc_cpf := nullif(regexp_replace(coalesce(p_json ->> 'vc_cpf', ''), '[^0-9]', '', 'g'), '');
+    if _vc_cpf is not null and not ad.fn_cpf_is_valid(_vc_cpf) then
+      raise exception '%', ad.fn_message('USER_UPDATE_CPF_INVALID', jsonb_build_object('Cpf', _vc_cpf));
+    end if;
+    if _vc_cpf is not null and exists (
+         select 1 from ad.app_user u where u.vc_cpf = _vc_cpf and u.nr_user <> _nr_user) then
+      raise exception '%', ad.fn_message('USER_UPDATE_CPF_IN_USE', jsonb_build_object('Cpf', _vc_cpf));
+    end if;
+  end if;
+
+  update ad.app_user u set
+    vc_name       = case when p_json ? 'vc_name'       then _vc_name else u.vc_name end,
+    vc_cpf        = case when p_json ? 'vc_cpf'        then _vc_cpf  else u.vc_cpf end,
+    vc_phone      = case when p_json ? 'vc_phone'      then left(nullif(trim(p_json ->> 'vc_phone'), ''), 20)  else u.vc_phone end,
+    vc_mobile     = case when p_json ? 'vc_mobile'     then left(nullif(trim(p_json ->> 'vc_mobile'), ''), 20) else u.vc_mobile end,
+    vc_avatar_url = case when p_json ? 'vc_avatar_url' then nullif(trim(p_json ->> 'vc_avatar_url'), '')        else u.vc_avatar_url end
+  where u.nr_user = _nr_user
+  returning u.* into _row;
+
+  return to_jsonb(_row);
+end;
+$$;
+
+revoke all on function ad.user_update(jsonb) from public, anon;
+grant execute on function ad.user_update(jsonb) to authenticated;

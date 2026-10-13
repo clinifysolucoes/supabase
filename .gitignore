@@ -1,0 +1,23 @@
+# Pastas geradas por flyway/scripts/generate-repeatables.sh
+# Source of truth: Procedures/**/*.pgs (repeatables), Scripts/YYYY/MM/V*.sql (versionadas)
+# e docs/dictionary/schema.json (comentarios).
+flyway/repeatable/
+flyway/staged-scripts/
+
+# Credenciais / ambiente local
+.env
+.env.*
+*.local.env
+
+# Supabase CLI (se usar `supabase init` local)
+supabase/.temp/
+supabase/.branches/
+
+# Editor / SO
+.vscode/settings.json
+.idea/
+Thumbs.db
+.DS_Store
+
+# Node (gerador do dicionario nao tem dependencias, mas por seguranca)
+node_modules/

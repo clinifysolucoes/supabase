@@ -1,0 +1,70 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : RLS policies de todas as tabelas do schema ad                 ::
+  ::  UsedBy      : PostgREST (toda leitura do app passa por aqui)                ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Regras de LEITURA por linha para o role authenticated. Repeatable: ao
+    mudar uma policy, edite aqui e o Flyway reaplica (drop + create).
+
+    Nao existe policy de INSERT/UPDATE/DELETE de proposito: o role
+    authenticated so tem GRANT SELECT. Toda escrita passa pelas functions
+    SECURITY DEFINER (company_create, company_user_save...), que validam e
+    gravam como owner. anon nao tem USAGE no schema: nenhuma policy para ele.
+
+    Regras:
+      company / access_profile  -> empresas com pelo menos uma filial acessivel
+      branch                    -> filiais acessiveis (ad.fn_my_branches)
+      company_user / branch_user_profile -> proprios vinculos, ou todos da empresa
+                                   se for administrador dela
+      app_user                  -> proprio cadastro, ou cadastro de quem esta numa
+                                   empresa que o usuario administra
+      access_log                -> proprios acessos
+*/
+
+-- ad.company
+drop policy if exists company_select on ad.company;
+create policy company_select on ad.company
+  for select to authenticated
+  using (nr_company in (select ad.fn_my_companies()));
+
+-- ad.branch
+drop policy if exists branch_select on ad.branch;
+create policy branch_select on ad.branch
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from ad.fn_my_branches() mb));
+
+-- ad.access_profile
+drop policy if exists access_profile_select on ad.access_profile;
+create policy access_profile_select on ad.access_profile
+  for select to authenticated
+  using (nr_company in (select ad.fn_my_companies()));
+
+-- ad.company_user
+drop policy if exists company_user_select on ad.company_user;
+create policy company_user_select on ad.company_user
+  for select to authenticated
+  using (nr_user = ad.fn_current_user_nr() or ad.fn_is_company_admin(nr_company));
+
+-- ad.branch_user_profile
+drop policy if exists branch_user_profile_select on ad.branch_user_profile;
+create policy branch_user_profile_select on ad.branch_user_profile
+  for select to authenticated
+  using (nr_user = ad.fn_current_user_nr() or ad.fn_is_company_admin(nr_company));
+
+-- ad.app_user
+drop policy if exists app_user_select on ad.app_user;
+create policy app_user_select on ad.app_user
+  for select to authenticated
+  using (uu_auth = (select auth.uid()) or ad.fn_is_admin_of_user(nr_user));
+
+-- ad.access_log
+drop policy if exists access_log_select on ad.access_log;
+create policy access_log_select on ad.access_log
+  for select to authenticated
+  using (nr_user = ad.fn_current_user_nr());

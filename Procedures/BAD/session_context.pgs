@@ -1,0 +1,198 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.session_context(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('session_context')       ::
+  ::                logo apos signIn / restore de sessao                          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    "Login" do app depois que o Supabase Auth ja autenticou. Devolve, numa
+    chamada:
+      user       dados do usuario
+      companies  empresas -> filiais -> perfis ACESSIVEIS agora, com it_level
+                 (max do perfil) por filial e id_admin por empresa
+      blocked    vinculos SEM acesso e o motivo (empresa bloqueada/inativa,
+                 usuario bloqueado/inativo na empresa, sem perfil em filial ativa)
+    companies = [] e blocked = [] significa "primeiro acesso": o app mostra a
+    tela de criar empresa (ad.company_create).
+    Grava ad.access_log com IP e user-agent lidos dos headers do
+    request (PostgREST) e atualiza dh_last_login.
+
+  Input p_json (todos opcionais):
+    nr_version      integer  default 1
+    it_app          integer  1 web | 2 android | 3 ios | 9 outro
+    vc_device       text     modelo/nome do dispositivo (ate 200)
+    vc_app_version  text     versao do app (ate 30)
+    nr_company, nr_branch    filial que o app vai abrir (quando ja escolhida)
+
+  Output jsonb:
+    {"user": {...},
+     "companies": [{"nr_company", "vc_name", "vc_cnpj", "nr_company_user", "id_admin",
+                    "branches": [{"nr_branch", "vc_name", "vc_cnpj", "vc_timezone", "id_main",
+                                  "it_level", "profiles": [{"nr_profile","vc_name","it_level"}]}]}],
+     "blocked": [{"nr_company", "vc_name", "vc_reason_key", "vc_reason"}]}
+
+  Errors: VERSION_MISMATCH, SESSION_USER_NOT_FOUND, SESSION_USER_INACTIVE,
+    SESSION_USER_BLOCKED {Reason}
+  Reason keys em blocked: SESSION_COMPANY_BLOCKED, SESSION_COMPANY_INACTIVE,
+    SESSION_USER_COMPANY_BLOCKED, SESSION_USER_COMPANY_INACTIVE, SESSION_WITHOUT_PROFILE
+*/
+
+create or replace function ad.session_context(p_json jsonb default '{}'::jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _u          ad.app_user%rowtype;
+  _headers    jsonb;
+  _companies  jsonb;
+  _blocked    jsonb;
+  _nr_company bigint;
+  _nr_branch  bigint;
+begin
+  perform ad.fn_check_version(coalesce((p_json ->> 'nr_version')::integer, 1), 1, 'session_context');
+
+  /*------------------------------------------------------------------------*/
+  /* Usuario                                                                */
+  /*------------------------------------------------------------------------*/
+  select * into _u
+    from ad.app_user u
+   where u.uu_auth = (select auth.uid());
+
+  if not found then
+    raise exception '%', ad.fn_message('SESSION_USER_NOT_FOUND');
+  end if;
+  if _u.it_status = 90 then
+    raise exception '%', ad.fn_message('SESSION_USER_INACTIVE');
+  end if;
+  if _u.it_status = 80 then
+    raise exception '%', ad.fn_message('SESSION_USER_BLOCKED',
+      jsonb_build_object('Reason', coalesce(_u.vc_block_reason, '')));
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  /* Empresas / filiais / perfis acessiveis                                 */
+  /*------------------------------------------------------------------------*/
+  with mb as (
+    select m.nr_company, m.nr_branch
+      from ad.fn_my_branches() m
+  ), prof as (
+    select bup.nr_company,
+           bup.nr_branch,
+           max(p.it_level) as it_level,
+           jsonb_agg(
+             jsonb_build_object('nr_profile', p.nr_profile, 'vc_name', p.vc_name, 'it_level', p.it_level)
+             order by p.it_level desc, p.nr_profile
+           ) as profiles
+      from mb
+      join ad.branch_user_profile bup on bup.nr_company = mb.nr_company
+                                      and bup.nr_branch  = mb.nr_branch
+                                      and bup.nr_user    = _u.nr_user
+      join ad.access_profile p        on p.nr_company   = bup.nr_company
+                                      and p.nr_profile   = bup.nr_profile
+                                      and p.it_status    = 1
+     group by bup.nr_company, bup.nr_branch
+  ), br as (
+    select b.nr_company,
+           max(prof.it_level) as it_level,
+           jsonb_agg(
+             jsonb_build_object(
+               'nr_branch',   b.nr_branch,
+               'vc_name',     b.vc_name,
+               'vc_cnpj',     b.vc_cnpj,
+               'vc_timezone', b.vc_timezone,
+               'id_main',     b.id_main,
+               'it_level',    prof.it_level,
+               'profiles',    prof.profiles)
+             order by b.id_main desc, b.nr_branch
+           ) as branches
+      from prof
+      join ad.branch b on b.nr_company = prof.nr_company and b.nr_branch = prof.nr_branch
+     group by b.nr_company
+  )
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_company',      c.nr_company,
+             'vc_name',         c.vc_name,
+             'vc_cnpj',         c.vc_cnpj,
+             'nr_company_user', cu.nr_company_user,
+             'id_admin',        br.it_level >= 100,
+             'branches',        br.branches)
+           order by c.vc_name, c.nr_company), '[]'::jsonb)
+    into _companies
+    from br
+    join ad.company      c  on c.nr_company  = br.nr_company
+    join ad.company_user cu on cu.nr_company = c.nr_company and cu.nr_user = _u.nr_user;
+
+  /*------------------------------------------------------------------------*/
+  /* Vinculos sem acesso + motivo (diagnostico)                             */
+  /*------------------------------------------------------------------------*/
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_company',    c.nr_company,
+             'vc_name',       c.vc_name,
+             'vc_reason_key', r.vc_key,
+             'vc_reason',     r.vc_reason)
+           order by c.vc_name, c.nr_company), '[]'::jsonb)
+    into _blocked
+    from ad.company_user cu
+    join ad.company c on c.nr_company = cu.nr_company
+    cross join lateral (
+      select case
+               when c.id_blocked      then 'SESSION_COMPANY_BLOCKED'
+               when c.it_status <> 1  then 'SESSION_COMPANY_INACTIVE'
+               when cu.it_status = 80 then 'SESSION_USER_COMPANY_BLOCKED'
+               when cu.it_status <> 1 then 'SESSION_USER_COMPANY_INACTIVE'
+               else                        'SESSION_WITHOUT_PROFILE'
+             end as vc_key,
+             case
+               when c.id_blocked      then c.vc_block_reason
+               when cu.it_status = 80 then cu.vc_block_reason
+             end as vc_reason
+    ) r
+   where cu.nr_user = _u.nr_user
+     and cu.nr_company not in (select m.nr_company from ad.fn_my_branches() m);
+
+  /*------------------------------------------------------------------------*/
+  /* Log de acesso: IP e user-agent vem dos headers do PostgREST             */
+  /*------------------------------------------------------------------------*/
+  _headers    := coalesce(nullif(current_setting('request.headers', true), '')::jsonb, '{}'::jsonb);
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+
+  insert into ad.access_log (
+    nr_user, nr_company, nr_branch, it_app, vc_ip, vc_device, vc_user_agent, vc_app_version, nr_operator
+  ) values (
+    _u.nr_user, _nr_company, _nr_branch,
+    (p_json ->> 'it_app')::smallint,
+    left(nullif(trim(split_part(coalesce(_headers ->> 'x-forwarded-for', _headers ->> 'cf-connecting-ip', ''), ',', 1)), ''), 60),
+    left(nullif(trim(p_json ->> 'vc_device'), ''), 200),
+    left(_headers ->> 'user-agent', 800),
+    left(nullif(trim(p_json ->> 'vc_app_version'), ''), 30),
+    _u.nr_user
+  );
+
+  update ad.app_user u set dh_last_login = now() where u.nr_user = _u.nr_user;
+
+  return jsonb_build_object(
+    'user', jsonb_build_object(
+      'nr_user',       _u.nr_user,
+      'vc_name',       _u.vc_name,
+      'vc_email',      _u.vc_email,
+      'vc_avatar_url', _u.vc_avatar_url,
+      'it_level',      _u.it_level,
+      'dh_last_login', _u.dh_last_login),
+    'companies', _companies,
+    'blocked',   _blocked
+  );
+end;
+$$;
+
+revoke all on function ad.session_context(jsonb) from public, anon;
+grant execute on function ad.session_context(jsonb) to authenticated;

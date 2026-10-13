@@ -1,0 +1,54 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_cpf_is_valid(text)                                      ::
+  ::  UsedBy      : user_update                                                   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Valida os digitos verificadores do CPF (11 digitos). Pontuacao e removida.
+    Sequencias repetidas (111.111.111-11) sao rejeitadas.
+*/
+
+create or replace function ad.fn_cpf_is_valid(p_vc_cpf text)
+returns boolean
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  _s   text;
+  _sum integer;
+  _d1  integer;
+  _d2  integer;
+  _i   integer;
+begin
+  _s := regexp_replace(coalesce(p_vc_cpf, ''), '[^0-9]', '', 'g');
+
+  if _s !~ '^[0-9]{11}$' or _s ~ '^([0-9])\1{10}$' then
+    return false;
+  end if;
+
+  _sum := 0;
+  for _i in 1..9 loop
+    _sum := _sum + substr(_s, _i, 1)::integer * (11 - _i);
+  end loop;
+  _d1 := (_sum * 10) % 11;
+  if _d1 = 10 then _d1 := 0; end if;
+
+  _sum := 0;
+  for _i in 1..10 loop
+    _sum := _sum + substr(_s, _i, 1)::integer * (12 - _i);
+  end loop;
+  _d2 := (_sum * 10) % 11;
+  if _d2 = 10 then _d2 := 0; end if;
+
+  return substr(_s, 10, 1)::integer = _d1
+     and substr(_s, 11, 1)::integer = _d2;
+end;
+$$;
+
+revoke all on function ad.fn_cpf_is_valid(text) from public, anon, authenticated;

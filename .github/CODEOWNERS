@@ -1,0 +1,3 @@
+# Code owners: aprovacao obrigatoria (require_code_owner_reviews) nos PRs para staging e main.
+# Conta apenas quem tem permissao de escrita no repositorio.
+* @zeoliveirajunior @cloudfysystems @cfyluispereira @cfyrogermonich

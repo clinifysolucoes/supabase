@@ -1,0 +1,44 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_company_has_admin(bigint)                               ::
+  ::  UsedBy      : access_profile_save, company_user_save (guarda do ultimo adm) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    TRUE se a empresa ainda possui pelo menos um usuario ATIVO (no app e na
+    empresa) com perfil ATIVO de nivel >= 100 numa filial ativa.
+    Chamada ao final de alteracoes de perfil/vinculo: se retornar FALSE a
+    function chamadora faz RAISE e a transacao inteira volta atras, evitando
+    que a empresa fique sem administrador (lockout).
+
+    Uso interno: nao e concedida a authenticated.
+*/
+
+create or replace function ad.fn_company_has_admin(p_nr_company bigint)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1
+      from ad.branch_user_profile bup
+      join ad.access_profile p  on p.nr_company  = bup.nr_company and p.nr_profile = bup.nr_profile
+      join ad.company_user   cu on cu.nr_company = bup.nr_company and cu.nr_user   = bup.nr_user
+      join ad.app_user       u  on u.nr_user     = bup.nr_user
+      join ad.branch         b  on b.nr_company  = bup.nr_company and b.nr_branch  = bup.nr_branch
+     where bup.nr_company = p_nr_company
+       and p.it_level  >= 100
+       and p.it_status  = 1
+       and cu.it_status = 1
+       and u.it_status  = 1
+       and b.it_status  = 1 and not b.id_blocked
+  );
+$$;
+
+revoke all on function ad.fn_company_has_admin(bigint) from public, anon, authenticated;

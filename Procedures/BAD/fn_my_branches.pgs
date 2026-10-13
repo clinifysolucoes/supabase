@@ -1,0 +1,43 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_my_branches()                                           ::
+  ::  UsedBy      : RLS policies (branch e tabelas de negocio futuras)            ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Pares (nr_company, nr_branch) que o usuario logado pode acessar AGORA.
+    Regras:
+      - vinculo em ad.branch_user_profile com perfil ativo
+      - usuario ativo na empresa (ad.company_user.it_status = 1)
+      - empresa ativa e nao bloqueada
+      - filial ativa e nao bloqueada
+    Toda tabela de negocio futura (agenda, pacientes...) usa:
+      using ((nr_company, nr_branch) in (select nr_company, nr_branch from ad.fn_my_branches()))
+*/
+
+create or replace function ad.fn_my_branches()
+returns table (nr_company bigint, nr_branch bigint)
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select distinct bup.nr_company, bup.nr_branch
+    from ad.branch_user_profile bup
+    join ad.company_user   cu on cu.nr_company = bup.nr_company and cu.nr_user    = bup.nr_user
+    join ad.company        c  on c.nr_company  = bup.nr_company
+    join ad.branch         b  on b.nr_company  = bup.nr_company and b.nr_branch   = bup.nr_branch
+    join ad.access_profile p  on p.nr_company  = bup.nr_company and p.nr_profile  = bup.nr_profile
+   where bup.nr_user = ad.fn_current_user_nr()
+     and cu.it_status = 1
+     and c.it_status  = 1 and not c.id_blocked
+     and b.it_status  = 1 and not b.id_blocked
+     and p.it_status  = 1;
+$$;
+
+revoke all on function ad.fn_my_branches() from public, anon;
+grant execute on function ad.fn_my_branches() to authenticated;

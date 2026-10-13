@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dicionário de dados</title>
+<meta name="description" content="Dicionário de dados interativo do schema ad: tabelas, colunas, relações (ERD), functions e chaves de mensagem. Gerado de schema.json.">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1f2328; --muted: #656d76; --line: #d0d7de;
+    --accent: #0969da; --accent-soft: #ddf4ff; --code-bg: #eff1f3; --pk: #8250df; --fk: #1a7f37; --uk: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8b949e; --line: #30363d;
+      --accent: #58a6ff; --accent-soft: #0c2d6b; --code-bg: #21262d; --pk: #d2a8ff; --fk: #3fb950; --uk: #d29922;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117; --panel: #161b22; --text: #e6edf3; --muted: #8b949e; --line: #30363d;
+    --accent: #58a6ff; --accent-soft: #0c2d6b; --code-bg: #21262d; --pk: #d2a8ff; --fk: #3fb950; --uk: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  header { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 56px); }
+  nav { border-right: 1px solid var(--line); background: var(--panel); padding: 12px; overflow: auto; }
+  nav input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  nav h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 6px; }
+  nav button { display: block; width: 100%; text-align: left; padding: 7px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; font: inherit; }
+  nav button:hover { background: var(--code-bg); }
+  nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  nav button small { display: block; color: var(--muted); font-weight: 400; }
+  .filter { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 12.5px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .filter button { display: inline-block; width: auto; padding: 1px 8px; border: 1px solid var(--accent); color: var(--accent); background: transparent; border-radius: 10px; font-size: 12px; }
+  main { padding: 20px 24px; max-width: 1200px; }
+  h2 { margin: 0 0 4px; font-size: 22px; }
+  .meta { color: var(--muted); margin-bottom: 12px; }
+  .desc { margin: 0 0 14px; }
+  .rls { background: var(--accent-soft); border-left: 3px solid var(--accent); padding: 8px 12px; border-radius: 4px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--code-bg); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  tr:last-child td { border-bottom: 0; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 10px; margin-right: 4px; color: #fff; }
+  .tag.pk { background: var(--pk); } .tag.fk { background: var(--fk); } .tag.uk { background: var(--uk); }
+  .values { color: var(--muted); font-size: 12.5px; }
+  .hl { background: #fff3b0; color: #1f2328; border-radius: 2px; }
+  #erd { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; }
+  #erd svg { max-width: 100%; height: auto; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } nav { border-right: 0; border-bottom: 1px solid var(--line); } main { padding: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Dicionário de dados</h1>
+  <span class="sub" id="subtitle"></span>
+</header>
+<div class="layout">
+  <nav>
+    <input id="search" type="search" placeholder="Buscar tabela, coluna, function…" autocomplete="off">
+    <div id="filter" class="filter" hidden>Filtro ativo: <code id="filter-q"></code> <button type="button" id="filter-clear">limpar</button></div>
+    <h3>Visão geral</h3>
+    <button data-view="erd">Diagrama (ERD)</button>
+    <button data-view="prefixes">Convenções</button>
+    <button data-view="functions">Functions</button>
+    <button data-view="messages">Chaves de mensagem</button>
+    <h3>Tabelas</h3>
+    <div id="tables"></div>
+  </nav>
+  <main id="main"></main>
+</div>
+<script src="schema.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+(function () {
+  const D = window.DICTIONARY;
+  if (!D) { document.getElementById('main').textContent = 'schema.js não encontrado. Rode: node tools/gen-dictionary.mjs'; return; }
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  let query = '';
+  let current = null;
+  const hl = (s) => { s = esc(s); if (!query) return s; const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'); return s.replace(re, '<span class="hl">$1</span>'); };
+
+  $('#title').textContent = 'Dicionário de dados — ' + D.project;
+  $('#subtitle').textContent = D.subtitle + ' · schema ' + D.schema + ' · ' + D.updated;
+
+  const dark = () => document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: dark() ? 'dark' : 'default', securityLevel: 'loose' });
+
+  function navTables() {
+    const q = query.toLowerCase();
+    const box = $('#tables'); box.innerHTML = '';
+    for (const t of D.tables) {
+      const hit = !q || t.name.includes(q) || t.title.toLowerCase().includes(q)
+        || t.columns.some((c) => c.name.includes(q) || (c.description || '').toLowerCase().includes(q));
+      if (!hit) continue;
+      const b = document.createElement('button');
+      b.dataset.table = t.name;
+      b.innerHTML = '<code>ad.' + esc(t.name) + '</code><small>' + esc(t.title) + '</small>';
+      b.onclick = () => show({ table: t.name });
+      box.appendChild(b);
+    }
+  }
+
+  function keyTags(c) {
+    let h = '';
+    if (c.pk) h += '<span class="tag pk">PK' + c.pk + '</span>';
+    if (c.uk) h += '<span class="tag uk" title="' + esc(c.uk) + '">UK</span>';
+    if (c.fk) h += '<span class="tag fk" title="' + esc(c.fk) + '">FK</span>';
+    return h;
+  }
+
+  function renderTable(t) {
+    const q = query.toLowerCase();
+    const cols = t.columns.filter((c) => !q || c.name.includes(q) || (c.description || '').toLowerCase().includes(q) || t.name.includes(q) || t.title.toLowerCase().includes(q));
+    let h = '<h2><code>ad.' + esc(t.name) + '</code> ' + esc(t.title) + '</h2>';
+    h += '<div class="meta">' + t.columns.length + ' colunas</div>';
+    h += '<p class="desc">' + hl(t.description) + '</p>';
+    if (q) h += '<div class="rls"><strong>Filtro ativo:</strong> <code>' + esc(query) + '</code> — mostrando ' + cols.length + ' de ' + t.columns.length + ' colunas. Limpe a busca para ver todas.</div>';
+    if (t.rls) h += '<div class="rls"><strong>RLS.</strong> ' + hl(t.rls) + '</div>';
+    h += '<table><thead><tr><th>Coluna</th><th>Tipo</th><th>Chave</th><th>Nulo</th><th>Default</th><th>Descrição</th></tr></thead><tbody>';
+    for (const c of cols) {
+      const vals = c.values ? '<div class="values">' + Object.entries(c.values).map(([k, v]) => '<code>' + esc(k) + '</code> ' + esc(v)).join(' · ') + '</div>' : '';
+      h += '<tr><td><code>' + hl(c.name) + '</code></td><td><code>' + esc(c.type) + '</code></td><td>' + keyTags(c) + (c.fk ? '<br><small>→ <code>' + esc(c.fk) + '</code></small>' : '') + '</td>'
+        + '<td>' + (c.nullable === false ? 'NOT NULL' : '<span class="values">NULL</span>') + '</td><td>' + (c.default ? '<code>' + esc(c.default) + '</code>' : '') + '</td>'
+        + '<td>' + hl(c.description) + vals + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    return h;
+  }
+
+  function renderPrefixes() {
+    let h = '<h2>Convenções</h2><p class="desc">Colunas no formato <code>&lt;prefixo&gt;_&lt;nome&gt;</code> em inglês, sem o prefixo da tabela. A mesma coluna tem o mesmo nome em todas as tabelas.</p>';
+    h += '<table><thead><tr><th>Prefixo</th><th>Significado</th></tr></thead><tbody>';
+    for (const [p, d] of Object.entries(D.prefixes)) h += '<tr><td><code>' + esc(p) + '</code></td><td>' + esc(d) + '</td></tr>';
+    h += '</tbody></table><h2 style="margin-top:20px">Auditoria (toda tabela)</h2><table><thead><tr><th>Coluna</th><th>Tipo</th><th>Descrição</th></tr></thead><tbody>';
+    for (const c of D.audit_columns) h += '<tr><td><code>' + esc(c.name) + '</code></td><td><code>' + esc(c.type) + '</code></td><td>' + esc(c.description) + '</td></tr>';
+    return h + '</tbody></table>';
+  }
+
+  function renderFunctions() {
+    const q = query.toLowerCase();
+    let h = '<h2>Functions</h2><p class="desc">RPC: <code>supabase.schema(\'ad\').rpc(\'nome\', params: {\'p_json\': {...}})</code>. Entrada <code>p_json</code> sempre com <code>nr_version</code>; erros em JSON <code>{"Message": "CHAVE", "Parameters": {...}}</code>.</p>';
+    for (const [kind, title] of [['rpc', 'RPC (expostas ao app)'], ['helper', 'Helpers'], ['trigger', 'Triggers']]) {
+      const fns = D.functions.filter((f) => f.kind === kind && (!q || f.name.includes(q) || f.description.toLowerCase().includes(q) || (f.errors || []).some((e) => e.toLowerCase().includes(q))));
+      if (!fns.length) continue;
+      h += '<h3>' + title + '</h3><table><thead><tr><th>Function</th><th>Grant</th><th>Descrição</th><th>Erros</th></tr></thead><tbody>';
+      for (const f of fns) h += '<tr><td><code>' + hl(f.signature) + '</code></td><td>' + esc(f.grant) + '</td><td>' + hl(f.description) + '</td><td>' + (f.errors || []).map((e) => '<code>' + hl(e) + '</code>').join(' ') + '</td></tr>';
+      h += '</tbody></table>';
+    }
+    return h;
+  }
+
+  function renderMessages() {
+    const q = query.toLowerCase();
+    const map = new Map();
+    for (const f of D.functions) for (const e of f.errors || []) { if (!map.has(e)) map.set(e, []); map.get(e).push(f.name); }
+    let h = '<h2>Chaves de mensagem</h2><p class="desc">Base para o arquivo de i18n do Flutter. Cada chave chega em <code>PostgrestException.message</code> como JSON.</p><table><thead><tr><th>Chave</th><th>Functions</th></tr></thead><tbody>';
+    for (const [k, fns] of [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (q && !k.toLowerCase().includes(q)) continue;
+      h += '<tr><td><code>' + hl(k) + '</code></td><td>' + fns.map((n) => '<code>' + esc(n) + '</code>').join(' ') + '</td></tr>';
+    }
+    return h + '</tbody></table>';
+  }
+
+  async function renderErd() {
+    $('#main').innerHTML = '<h2>Diagrama (ERD)</h2><div class="grid-2">'
+      + '<div class="card"><h4>Tabelas</h4>' + D.tables.length + '</div>'
+      + '<div class="card"><h4>Relações</h4>' + D.relations.length + '</div>'
+      + '<div class="card"><h4>Functions</h4>' + D.functions.length + '</div></div><div id="erd">renderizando…</div>';
+    if (!window.mermaid) { $('#erd').textContent = 'Mermaid não carregou (sem internet?). ERD em texto:\n\n' + D.mermaid; $('#erd').style.whiteSpace = 'pre'; return; }
+    try {
+      const { svg } = await mermaid.render('erdsvg', D.mermaid);
+      $('#erd').innerHTML = svg;
+    } catch (e) {
+      $('#erd').textContent = 'Erro ao renderizar: ' + e.message + '\n\n' + D.mermaid; $('#erd').style.whiteSpace = 'pre';
+    }
+  }
+
+  function show(state) {
+    current = state;
+    document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active',
+      !!((state.table && b.dataset.table === state.table) || (state.view && b.dataset.view === state.view))));
+    if (state.table) {
+      const t = D.tables.find((x) => x.name === state.table);
+      $('#main').innerHTML = t ? renderTable(t) : 'Tabela não encontrada.';
+      location.hash = 'table=' + state.table;
+      return;
+    }
+    location.hash = 'view=' + state.view;
+    if (state.view === 'erd') return renderErd();
+    if (state.view === 'prefixes') $('#main').innerHTML = renderPrefixes();
+    if (state.view === 'functions') $('#main').innerHTML = renderFunctions();
+    if (state.view === 'messages') $('#main').innerHTML = renderMessages();
+  }
+
+  document.querySelectorAll('nav button[data-view]').forEach((b) => (b.onclick = () => show({ view: b.dataset.view })));
+  $('#search').addEventListener('input', (e) => {
+    query = e.target.value.trim();
+    $('#filter').hidden = !query;
+    $('#filter-q').textContent = query;
+    navTables();
+    if (current) show(current);
+  });
+  $('#filter-clear').onclick = () => {
+    $('#search').value = '';
+    $('#search').dispatchEvent(new Event('input'));
+    $('#search').focus();
+  };
+
+  function fromHash() {
+    const h = new URLSearchParams(location.hash.slice(1));
+    if (h.get('table')) show({ table: h.get('table') });
+    else show({ view: h.get('view') || 'erd' });
+  }
+  window.addEventListener('hashchange', () => {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const now = current ? (current.table ? 'table=' + current.table : 'view=' + current.view) : '';
+    const wanted = h.get('table') ? 'table=' + h.get('table') : 'view=' + (h.get('view') || 'erd');
+    if (now !== wanted) fromHash();
+  });
+
+  navTables();
+  fromHash();
+})();
+</script>
+</body>
+</html>

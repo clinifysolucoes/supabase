@@ -1,0 +1,102 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.company_update(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('company_update')        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Atualizacao parcial dos dados cadastrais da empresa. Somente administrador
+    da empresa. Chave presente no JSON = campo atualizado (null limpa);
+    chave ausente = campo intocado.
+    Situacao/bloqueio (it_status, id_blocked) NAO sao alteraveis aqui: sao
+    operacoes de plataforma (service_role), para um admin nao trancar a propria
+    empresa por engano.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company   bigint   obrigatorio
+    vc_name, vc_cnpj, vc_email, vc_phone, it_size,
+    vc_address, vc_address_number, vc_address_extra, vc_district, vc_city,
+    vc_state, vc_zip_code                              opcionais (parciais)
+
+  Output jsonb: linha completa de ad.company.
+
+  Errors: VERSION_MISMATCH, COMPANY_UPDATE_COMPANY_REQUIRED, COMPANY_UPDATE_FORBIDDEN,
+    COMPANY_UPDATE_NAME_REQUIRED, COMPANY_UPDATE_CNPJ_INVALID {Cnpj},
+    COMPANY_UPDATE_CNPJ_IN_USE {Cnpj}, COMPANY_UPDATE_EMAIL_INVALID {Email}
+*/
+
+create or replace function ad.company_update(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _vc_name    varchar(60);
+  _vc_cnpj    varchar(14);
+  _vc_email   varchar(200);
+  _row        ad.company%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'company_update');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('COMPANY_UPDATE_COMPANY_REQUIRED');
+  end if;
+  if not ad.fn_is_company_admin(_nr_company) then
+    raise exception '%', ad.fn_message('COMPANY_UPDATE_FORBIDDEN');
+  end if;
+
+  if p_json ? 'vc_name' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 60);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_NAME_REQUIRED');
+    end if;
+  end if;
+
+  if p_json ? 'vc_cnpj' then
+    _vc_cnpj := ad.fn_cnpj_normalize(p_json ->> 'vc_cnpj');
+    if _vc_cnpj is not null and not ad.fn_cnpj_is_valid(_vc_cnpj) then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_CNPJ_INVALID', jsonb_build_object('Cnpj', _vc_cnpj));
+    end if;
+    if _vc_cnpj is not null and exists (
+         select 1 from ad.company c where c.vc_cnpj = _vc_cnpj and c.nr_company <> _nr_company) then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_CNPJ_IN_USE', jsonb_build_object('Cnpj', _vc_cnpj));
+    end if;
+  end if;
+
+  if p_json ? 'vc_email' then
+    _vc_email := left(nullif(lower(trim(p_json ->> 'vc_email')), ''), 200);
+    if _vc_email is not null and not ad.fn_email_is_valid(_vc_email) then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_EMAIL_INVALID', jsonb_build_object('Email', _vc_email));
+    end if;
+  end if;
+
+  update ad.company c set
+    vc_name           = case when p_json ? 'vc_name'           then _vc_name  else c.vc_name end,
+    vc_cnpj           = case when p_json ? 'vc_cnpj'           then _vc_cnpj  else c.vc_cnpj end,
+    vc_email          = case when p_json ? 'vc_email'          then _vc_email else c.vc_email end,
+    vc_phone          = case when p_json ? 'vc_phone'          then left(nullif(trim(p_json ->> 'vc_phone'), ''), 20)          else c.vc_phone end,
+    it_size           = case when p_json ? 'it_size'           then (p_json ->> 'it_size')::smallint                           else c.it_size end,
+    vc_address        = case when p_json ? 'vc_address'        then left(nullif(trim(p_json ->> 'vc_address'), ''), 60)        else c.vc_address end,
+    vc_address_number = case when p_json ? 'vc_address_number' then left(nullif(trim(p_json ->> 'vc_address_number'), ''), 10) else c.vc_address_number end,
+    vc_address_extra  = case when p_json ? 'vc_address_extra'  then left(nullif(trim(p_json ->> 'vc_address_extra'), ''), 60)  else c.vc_address_extra end,
+    vc_district       = case when p_json ? 'vc_district'       then left(nullif(trim(p_json ->> 'vc_district'), ''), 30)       else c.vc_district end,
+    vc_city           = case when p_json ? 'vc_city'           then left(nullif(trim(p_json ->> 'vc_city'), ''), 30)           else c.vc_city end,
+    vc_state          = case when p_json ? 'vc_state'          then upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2))    else c.vc_state end,
+    vc_zip_code       = case when p_json ? 'vc_zip_code'       then nullif(regexp_replace(coalesce(p_json ->> 'vc_zip_code', ''), '[^0-9]', '', 'g'), '') else c.vc_zip_code end
+  where c.nr_company = _nr_company
+  returning c.* into _row;
+
+  return to_jsonb(_row);
+end;
+$$;
+
+revoke all on function ad.company_update(jsonb) from public, anon;
+grant execute on function ad.company_update(jsonb) to authenticated;

@@ -1,0 +1,26 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_cnpj_normalize(text)                                    ::
+  ::  UsedBy      : company_create, company_update, branch_create, branch_update  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Normaliza o CNPJ para a forma armazenada: remove pontuacao, maiusculas
+    (CNPJ alfanumerico), e devolve NULL para string vazia.
+    Nao valida digitos: use ad.fn_cnpj_is_valid depois.
+*/
+
+create or replace function ad.fn_cnpj_normalize(p_vc_cnpj text)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select nullif(upper(regexp_replace(coalesce(p_vc_cnpj, ''), '[^A-Za-z0-9]', '', 'g')), '');
+$$;
+
+revoke all on function ad.fn_cnpj_normalize(text) from public, anon, authenticated;

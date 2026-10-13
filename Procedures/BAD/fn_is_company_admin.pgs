@@ -1,0 +1,45 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_is_company_admin(bigint)                                ::
+  ::  UsedBy      : RLS policies, company_update, branch_*, access_profile_save,  ::
+  ::                company_user_save                                             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    TRUE se o usuario logado tem, em alguma filial ACESSIVEL da empresa, um
+    perfil ativo com it_level >= 100 (administrador da empresa).
+
+    plpgsql de proposito: as repeatables sao aplicadas em ordem alfabetica e
+    esta function e criada antes de ad.fn_my_branches; plpgsql so resolve as
+    referencias em tempo de execucao.
+*/
+
+create or replace function ad.fn_is_company_admin(p_nr_company bigint)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  return exists (
+    select 1
+      from ad.fn_my_branches() mb
+      join ad.branch_user_profile bup on bup.nr_company = mb.nr_company
+                                      and bup.nr_branch  = mb.nr_branch
+      join ad.access_profile p        on p.nr_company   = bup.nr_company
+                                      and p.nr_profile   = bup.nr_profile
+     where mb.nr_company = p_nr_company
+       and bup.nr_user   = ad.fn_current_user_nr()
+       and p.it_level   >= 100
+       and p.it_status   = 1
+  );
+end;
+$$;
+
+revoke all on function ad.fn_is_company_admin(bigint) from public, anon;
+grant execute on function ad.fn_is_company_admin(bigint) to authenticated;

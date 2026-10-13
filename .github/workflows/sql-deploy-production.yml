@@ -1,0 +1,112 @@
+# Deploy SQL no projeto Supabase de PRODUCAO (branch main) via Flyway (Docker).
+#
+# Trigger:
+#   - push em main (= PR de staging mergeado em main): info + migrate
+#     (SEM repair automatico: divergencia em prod deve falhar e ser olhada)
+#   - workflow_dispatch: confirmar digitando DEPLOY + comando
+#
+# Protecao: environment "production" com Required reviewer e deployment branch
+# policy = main. O job deploy so roda depois da aprovacao e so a partir de main
+# (o job guard tambem recusa qualquer outra ref no workflow_dispatch).
+#
+# Pre-requisitos - GitHub environment "production":
+#   Variable SUPABASE_DB_HOST      -> host do POOLER do projeto de producao
+#   Variable SUPABASE_DB_PORT      -> 5432 (modo SESSION)
+#   Variable SUPABASE_DB_USER      -> postgres.<project-ref>
+#   Secret   SUPABASE_DB_PASSWORD  -> senha do banco
+
+name: Deploy SQL -> production (main)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Procedures/**'
+      - 'Scripts/**'
+      - 'docs/dictionary/schema.json'
+      - 'flyway/**'
+      - 'tools/**'
+      - '.github/workflows/sql-deploy-production.yml'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Digite DEPLOY para confirmar a execucao manual em PRODUCAO'
+        required: true
+        type: string
+      command:
+        description: 'Comando Flyway'
+        required: true
+        type: choice
+        default: info
+        options: [info, migrate, validate, repair]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sql-deploy-production
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard (ref main + confirmacao manual)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verifica que a ref e main
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Este workflow so roda a partir da branch main (ref atual: ${{ github.ref }})."
+            exit 1
+          fi
+      - name: Confirmacao manual
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DEPLOY" ]; then
+            echo "::error::Confirmacao invalida. Digite DEPLOY."
+            exit 1
+          fi
+
+  deploy:
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      FLYWAY_URL: jdbc:postgresql://${{ vars.SUPABASE_DB_HOST }}:${{ vars.SUPABASE_DB_PORT }}/postgres?sslmode=require
+      FLYWAY_USER: ${{ vars.SUPABASE_DB_USER }}
+      FLYWAY_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Valida configuracao do environment
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [ -n "${{ vars.SUPABASE_DB_HOST }}" ]       || fail "vars.SUPABASE_DB_HOST vazio"
+          [ -n "${{ vars.SUPABASE_DB_PORT }}" ]       || fail "vars.SUPABASE_DB_PORT vazio (use 5432)"
+          [ "${{ vars.SUPABASE_DB_PORT }}" != "6543" ] || fail "porta 6543 (transaction mode) nao serve para Flyway; use 5432"
+          [ -n "${{ vars.SUPABASE_DB_USER }}" ]       || fail "vars.SUPABASE_DB_USER vazio (postgres.<project-ref>)"
+          [ -n "${{ secrets.SUPABASE_DB_PASSWORD }}" ] || fail "secrets.SUPABASE_DB_PASSWORD vazio"
+          echo "config ok"
+
+      - name: Padroes do projeto
+        run: |
+          chmod +x flyway/scripts/*.sh
+          flyway/scripts/validate-standards.sh
+
+      - name: Gera flyway/repeatable e flyway/staged-scripts
+        run: flyway/scripts/generate-repeatables.sh
+
+      - name: Flyway
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            CMDS="info migrate"
+          else
+            CMDS="info ${{ github.event.inputs.command }}"
+          fi
+          echo "flyway $CMDS"
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e FLYWAY_URL -e FLYWAY_USER -e FLYWAY_PASSWORD \
+            redgate/flyway:11 -configFiles=flyway/conf/flyway.prod.conf $CMDS

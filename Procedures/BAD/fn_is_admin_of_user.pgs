@@ -1,0 +1,35 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_is_admin_of_user(bigint)                                ::
+  ::  UsedBy      : RLS policy de ad.app_user                                     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    TRUE se o usuario logado e administrador de alguma empresa em que o
+    usuario p_nr_user esta vinculado. Permite ao admin ver o cadastro
+    (nome, e-mail, telefone) das pessoas da sua equipe - e so delas.
+*/
+
+create or replace function ad.fn_is_admin_of_user(p_nr_user bigint)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  return exists (
+    select 1
+      from ad.company_user cu
+     where cu.nr_user = p_nr_user
+       and ad.fn_is_company_admin(cu.nr_company)
+  );
+end;
+$$;
+
+revoke all on function ad.fn_is_admin_of_user(bigint) from public, anon;
+grant execute on function ad.fn_is_admin_of_user(bigint) to authenticated;

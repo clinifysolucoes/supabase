@@ -1,0 +1,41 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_check_version(integer, integer, text)                   ::
+  ::  UsedBy      : todas as functions RPC (primeira linha do BEGIN)              ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Garante que a versao do contrato enviada pelo app (p_json ->> 'nr_version')
+    bate com a versao da function no banco. Quando o contrato de entrada/saida
+    de uma RPC muda de forma incompativel, incrementa-se o numero esperado na
+    function e no app. App antigo recebe VERSION_MISMATCH em vez de dados errados.
+*/
+
+create or replace function ad.fn_check_version(
+  p_nr_version  integer,
+  p_nr_expected integer,
+  p_vc_function text
+)
+returns void
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if p_nr_version is distinct from p_nr_expected then
+    raise exception '%', ad.fn_message(
+      'VERSION_MISMATCH',
+      jsonb_build_object(
+        'Function',    p_vc_function,
+        'Database',    p_nr_expected,
+        'Application', coalesce(p_nr_version::text, 'null')
+      )
+    );
+  end if;
+end;
+$$;
+
+revoke all on function ad.fn_check_version(integer, integer, text) from public, anon, authenticated;
