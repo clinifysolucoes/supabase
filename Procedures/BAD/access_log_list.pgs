@@ -1,0 +1,144 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.access_log_list(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('access_log_list')       ::
+  ::                (tela de logs de acesso)                                      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lista o log de acesso (ad.access_log, gravado por session_context) no
+    contexto de uma empresa, paginado e do mais recente para o mais antigo.
+      Administrador da empresa: acessos que abriram essa empresa
+        (nr_company = empresa) e acessos sem empresa escolhida
+        (nr_company nulo) de usuarios vinculados a ela. Nunca ve o que o
+        mesmo usuario fez em OUTRA empresa.
+      Usuario comum: apenas os proprios acessos, com a mesma regra de empresa.
+    Periodo default: ultimos 30 dias.
+
+  Input p_json:
+    nr_version    integer      obrigatorio = 1
+    nr_company    bigint       obrigatorio
+    nr_user       bigint       opcional (ignorado para usuario comum: sempre ele mesmo)
+    it_app        integer      opcional 1 web | 2 android | 3 ios | 9 outro
+    dh_from       timestamptz  opcional (default now() - 30 dias)
+    dh_to         timestamptz  opcional (default now()), inclusivo
+    nr_page       integer      opcional (default 1)
+    qt_page_size  integer      opcional (default 50, maximo 200)
+
+  Output jsonb:
+    {"qt_total": n, "nr_page": 1, "qt_page_size": 50,
+     "logs": [{"nr_access", "nr_user", "vc_user", "vc_email", "nr_company",
+               "nr_branch", "vc_branch", "it_app", "vc_ip", "vc_device",
+               "vc_user_agent", "vc_app_version", "dh_access"}]}
+
+  Errors (ad.fn_message): VERSION_MISMATCH, ACCESS_LOG_LIST_COMPANY_REQUIRED,
+    ACCESS_LOG_LIST_FORBIDDEN, ACCESS_LOG_LIST_APP_INVALID,
+    ACCESS_LOG_LIST_PERIOD_INVALID (dh_from depois de dh_to)
+*/
+create or replace function ad.access_log_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _id_admin   boolean;
+  _nr_user_f  bigint;
+  _it_app     smallint;
+  _dh_from    timestamptz;
+  _dh_to      timestamptz;
+  _nr_page    integer;
+  _qt_page    integer;
+  _qt_total   bigint;
+  _logs       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'access_log_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('ACCESS_LOG_LIST_COMPANY_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or _nr_company not in (select private.fn_my_companies()) then
+    raise exception '%', ad.fn_message('ACCESS_LOG_LIST_FORBIDDEN');
+  end if;
+
+  _id_admin  := private.fn_is_company_admin(_nr_company);
+  _nr_user_f := case when _id_admin then (p_json ->> 'nr_user')::bigint else _nr_user end;
+
+  if nullif(p_json ->> 'it_app', '') is not null then
+    _it_app := (p_json ->> 'it_app')::smallint;
+    if _it_app not in (1, 2, 3, 9) then
+      raise exception '%', ad.fn_message('ACCESS_LOG_LIST_APP_INVALID');
+    end if;
+  end if;
+
+  _dh_from := coalesce((p_json ->> 'dh_from')::timestamptz, now() - interval '30 days');
+  _dh_to   := coalesce((p_json ->> 'dh_to')::timestamptz, now());
+  if _dh_from > _dh_to then
+    raise exception '%', ad.fn_message('ACCESS_LOG_LIST_PERIOD_INVALID');
+  end if;
+
+  _nr_page := greatest(coalesce((p_json ->> 'nr_page')::integer, 1), 1);
+  _qt_page := least(greatest(coalesce((p_json ->> 'qt_page_size')::integer, 50), 1), 200);
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_access',      x.nr_access,
+             'nr_user',        x.nr_user,
+             'vc_user',        x.vc_user,
+             'vc_email',       x.vc_email,
+             'nr_company',     x.nr_company,
+             'nr_branch',      x.nr_branch,
+             'vc_branch',      x.vc_branch,
+             'it_app',         x.it_app,
+             'vc_ip',          x.vc_ip,
+             'vc_device',      x.vc_device,
+             'vc_user_agent',  x.vc_user_agent,
+             'vc_app_version', x.vc_app_version,
+             'dh_access',      x.dh_access)
+           order by x.dh_access desc, x.nr_access desc), '[]'::jsonb),
+         coalesce(max(x.qt_total), 0)
+    into _logs, _qt_total
+    from (
+      select l.nr_access, l.nr_user, u.vc_name as vc_user, u.vc_email,
+             l.nr_company, l.nr_branch, b.vc_name as vc_branch,
+             l.it_app, l.vc_ip, l.vc_device, l.vc_user_agent, l.vc_app_version,
+             l.dh_access,
+             count(*) over () as qt_total
+        from ad.access_log l
+        join ad.app_user u on u.nr_user = l.nr_user
+        left join ad.branch b on b.nr_company = l.nr_company
+                             and b.nr_branch  = l.nr_branch
+       where l.dh_access >= _dh_from
+         and l.dh_access <= _dh_to
+         and (l.nr_company = _nr_company
+              or (l.nr_company is null
+                  and exists (select 1 from ad.company_user cu
+                               where cu.nr_company = _nr_company
+                                 and cu.nr_user    = l.nr_user)))
+         and (_nr_user_f is null or l.nr_user = _nr_user_f)
+         and (_it_app is null or l.it_app = _it_app)
+       order by l.dh_access desc, l.nr_access desc
+       limit _qt_page offset (_nr_page - 1) * _qt_page
+    ) x;
+
+  return jsonb_build_object(
+    'qt_total',     _qt_total,
+    'nr_page',      _nr_page,
+    'qt_page_size', _qt_page,
+    'logs',         _logs);
+end;
+$$;
+
+revoke all on function ad.access_log_list(jsonb) from public, anon;
+grant execute on function ad.access_log_list(jsonb) to authenticated;

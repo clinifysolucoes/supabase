@@ -350,6 +350,10 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.access_profile_save(p_json jsonb)` | authenticated | Cria (I) ou atualiza (U) perfis de acesso da empresa. Guarda contra deixar a empresa sem administrador ativo. Somente administrador. |
 | `ad.company_user_save(p_json jsonb)` | authenticated | Vincula (I, por e-mail de usuário já cadastrado no Auth), altera (U: situação, motivo, filiais/perfis) ou remove (D) um usuário da empresa. Guarda do último administrador. Somente administrador. |
 | `ad.user_update(p_json jsonb)` | authenticated | Autoatendimento: nome, CPF (validado), telefones e avatar do próprio usuário. E-mail/senha mudam pelo Supabase Auth. |
+| `ad.branch_list(p_json jsonb)` | authenticated | Lista as filiais da empresa: administrador vê todas, usuário comum só as filiais em que tem perfil ativo. Opção id_include_inactive. O app nunca lê ad.branch direto. |
+| `ad.access_profile_list(p_json jsonb)` | authenticated | Lista os perfis de acesso da empresa com a quantidade de usuários em cada um (qualquer usuário ativo da empresa). Opção id_include_inactive. |
+| `ad.company_user_list(p_json jsonb)` | authenticated | Lista paginada dos usuários da empresa com cadastro, situação e filiais × perfis; filtros por nome/e-mail, situação e filial. Somente administrador. |
+| `ad.access_log_list(p_json jsonb)` | authenticated | Log de acesso paginado no contexto da empresa (padrão: últimos 30 dias). Administrador vê os acessos à empresa e os sem empresa escolhida dos seus usuários; usuário comum só os próprios. Filtros por usuário, app e período. |
 
 ### Helpers (regras compartilhadas / RLS)
 
@@ -382,11 +386,17 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 
 | Chave | Function | Parâmetros |
 |---|---|---|
+| `ACCESS_LOG_LIST_APP_INVALID` | `access_log_list` |  |
+| `ACCESS_LOG_LIST_COMPANY_REQUIRED` | `access_log_list` |  |
+| `ACCESS_LOG_LIST_FORBIDDEN` | `access_log_list` |  |
+| `ACCESS_LOG_LIST_PERIOD_INVALID` | `access_log_list` |  |
 | `ACCESS_PROFILE_ACTION_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_COMPANY_REQUIRED` | `access_profile_save` |  |
 | `ACCESS_PROFILE_FORBIDDEN` | `access_profile_save` |  |
 | `ACCESS_PROFILE_LAST_ADMIN` | `access_profile_save` |  |
 | `ACCESS_PROFILE_LEVEL_INVALID` | `access_profile_save` |  |
+| `ACCESS_PROFILE_LIST_COMPANY_REQUIRED` | `access_profile_list` |  |
+| `ACCESS_PROFILE_LIST_FORBIDDEN` | `access_profile_list` |  |
 | `ACCESS_PROFILE_NAME_IN_USE` | `access_profile_save` | Name |
 | `ACCESS_PROFILE_NAME_REQUIRED` | `access_profile_save` |  |
 | `ACCESS_PROFILE_NOT_FOUND` | `access_profile_save` |  |
@@ -399,6 +409,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `BRANCH_CREATE_FORBIDDEN` | `branch_create` |  |
 | `BRANCH_CREATE_NAME_REQUIRED` | `branch_create` |  |
 | `BRANCH_CREATE_TIMEZONE_INVALID` | `branch_create` | Timezone |
+| `BRANCH_LIST_COMPANY_REQUIRED` | `branch_list` |  |
+| `BRANCH_LIST_FORBIDDEN` | `branch_list` |  |
 | `BRANCH_UPDATE_CNPJ_IN_USE` | `branch_update` | Cnpj |
 | `BRANCH_UPDATE_CNPJ_INVALID` | `branch_update` | Cnpj |
 | `BRANCH_UPDATE_EMAIL_INVALID` | `branch_update` | Email |
@@ -429,6 +441,9 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `COMPANY_USER_EMAIL_REQUIRED` | `company_user_save` |  |
 | `COMPANY_USER_FORBIDDEN` | `company_user_save` |  |
 | `COMPANY_USER_LAST_ADMIN` | `company_user_save` |  |
+| `COMPANY_USER_LIST_COMPANY_REQUIRED` | `company_user_list` |  |
+| `COMPANY_USER_LIST_FORBIDDEN` | `company_user_list` |  |
+| `COMPANY_USER_LIST_STATUS_INVALID` | `company_user_list` |  |
 | `COMPANY_USER_NOT_FOUND` | `company_user_save` |  |
 | `COMPANY_USER_PROFILE_INVALID` | `company_user_save` | Profile |
 | `COMPANY_USER_STATUS_INVALID` | `company_user_save` |  |
@@ -445,5 +460,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list` | Function, Database, Application |
 

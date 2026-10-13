@@ -1,0 +1,153 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.company_user_list(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('company_user_list')     ::
+  ::                (tela de cadastro de usuarios da empresa)                     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 13/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lista os usuarios vinculados a empresa, com cadastro (ad.app_user),
+    situacao na empresa e as filiais x perfis de cada um. Somente
+    administrador da empresa (expoe e-mail, CPF e telefones de terceiros).
+    Paginado. Alteracoes continuam em ad.company_user_save.
+
+  Input p_json:
+    nr_version    integer  obrigatorio = 1
+    nr_company    bigint   obrigatorio
+    vc_search     text     opcional: trecho do nome ou do e-mail (ilike)
+    it_status     integer  opcional: 1 ativo | 80 bloqueado | 90 inativo
+    nr_branch     bigint   opcional: so usuarios com perfil nessa filial
+    nr_page       integer  opcional (default 1)
+    qt_page_size  integer  opcional (default 50, maximo 200)
+
+  Output jsonb:
+    {"qt_total": n, "nr_page": 1, "qt_page_size": 50,
+     "users": [{"nr_user", "nr_company_user", "vc_name", "vc_email", "vc_cpf",
+                "vc_phone", "vc_mobile", "vc_avatar_url", "it_status",
+                "vc_block_reason", "dh_last_login", "dh_updated", "id_admin",
+                "branches": [{"nr_branch", "vc_branch", "id_main",
+                              "nr_profile", "vc_profile", "it_level"}]}]}
+    ordenado por nome.
+
+  Errors (ad.fn_message): VERSION_MISMATCH, COMPANY_USER_LIST_COMPANY_REQUIRED,
+    COMPANY_USER_LIST_FORBIDDEN, COMPANY_USER_LIST_STATUS_INVALID
+*/
+create or replace function ad.company_user_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _vc_search  text;
+  _it_status  smallint;
+  _nr_branch  bigint;
+  _nr_page    integer;
+  _qt_page    integer;
+  _qt_total   bigint;
+  _users      jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'company_user_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('COMPANY_USER_LIST_COMPANY_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null or not private.fn_is_company_admin(_nr_company) then
+    raise exception '%', ad.fn_message('COMPANY_USER_LIST_FORBIDDEN');
+  end if;
+
+  _vc_search := nullif(trim(p_json ->> 'vc_search'), '');
+  if nullif(p_json ->> 'it_status', '') is not null then
+    _it_status := (p_json ->> 'it_status')::smallint;
+    if _it_status not in (1, 80, 90) then
+      raise exception '%', ad.fn_message('COMPANY_USER_LIST_STATUS_INVALID');
+    end if;
+  end if;
+  _nr_branch := (p_json ->> 'nr_branch')::bigint;
+  _nr_page   := greatest(coalesce((p_json ->> 'nr_page')::integer, 1), 1);
+  _qt_page   := least(greatest(coalesce((p_json ->> 'qt_page_size')::integer, 50), 1), 200);
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_user',         x.nr_user,
+             'nr_company_user', x.nr_company_user,
+             'vc_name',         x.vc_name,
+             'vc_email',        x.vc_email,
+             'vc_cpf',          x.vc_cpf,
+             'vc_phone',        x.vc_phone,
+             'vc_mobile',       x.vc_mobile,
+             'vc_avatar_url',   x.vc_avatar_url,
+             'it_status',       x.it_status,
+             'vc_block_reason', x.vc_block_reason,
+             'dh_last_login',   x.dh_last_login,
+             'dh_updated',      x.dh_updated,
+             'id_admin',        x.id_admin,
+             'branches', (select coalesce(jsonb_agg(
+                                   jsonb_build_object(
+                                     'nr_branch',  bup.nr_branch,
+                                     'vc_branch',  b.vc_name,
+                                     'id_main',    b.id_main,
+                                     'nr_profile', bup.nr_profile,
+                                     'vc_profile', p.vc_name,
+                                     'it_level',   p.it_level)
+                                   order by b.id_main desc, b.vc_name, bup.nr_branch), '[]'::jsonb)
+                            from ad.branch_user_profile bup
+                            join ad.branch         b on b.nr_company = bup.nr_company
+                                                    and b.nr_branch  = bup.nr_branch
+                            join ad.access_profile p on p.nr_company = bup.nr_company
+                                                    and p.nr_profile = bup.nr_profile
+                           where bup.nr_company = x.nr_company
+                             and bup.nr_user    = x.nr_user))
+           order by x.vc_name, x.nr_user), '[]'::jsonb),
+         coalesce(max(x.qt_total), 0)
+    into _users, _qt_total
+    from (
+      select cu.nr_company, cu.nr_user, cu.nr_company_user, cu.it_status,
+             cu.vc_block_reason, cu.dh_updated,
+             u.vc_name, u.vc_email, u.vc_cpf, u.vc_phone, u.vc_mobile,
+             u.vc_avatar_url, u.dh_last_login,
+             exists (select 1
+                       from ad.branch_user_profile bup
+                       join ad.access_profile p on p.nr_company = bup.nr_company
+                                               and p.nr_profile = bup.nr_profile
+                      where bup.nr_company = cu.nr_company
+                        and bup.nr_user    = cu.nr_user
+                        and p.it_level    >= 100
+                        and p.it_status    = 1) as id_admin,
+             count(*) over () as qt_total
+        from ad.company_user cu
+        join ad.app_user u on u.nr_user = cu.nr_user
+       where cu.nr_company = _nr_company
+         and (_it_status is null or cu.it_status = _it_status)
+         and (_vc_search is null
+              or u.vc_name  ilike '%' || _vc_search || '%'
+              or u.vc_email ilike '%' || _vc_search || '%')
+         and (_nr_branch is null
+              or exists (select 1 from ad.branch_user_profile bup
+                          where bup.nr_company = cu.nr_company
+                            and bup.nr_user    = cu.nr_user
+                            and bup.nr_branch  = _nr_branch))
+       order by u.vc_name, cu.nr_user
+       limit _qt_page offset (_nr_page - 1) * _qt_page
+    ) x;
+
+  return jsonb_build_object(
+    'qt_total',     _qt_total,
+    'nr_page',      _nr_page,
+    'qt_page_size', _qt_page,
+    'users',        _users);
+end;
+$$;
+
+revoke all on function ad.company_user_list(jsonb) from public, anon;
+grant execute on function ad.company_user_list(jsonb) to authenticated;
