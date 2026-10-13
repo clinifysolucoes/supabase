@@ -70,7 +70,7 @@ push direto nelas, nem a Claude. A branch default do repositório é `staging`.
 | Para | Vem de | Checks no PR | No merge |
 |---|---|---|---|
 | `staging` | `<dev>_(feature|bugfix|hotfix)_<desc>` | `sql-validate.yml` (padrões + Flyway em Postgres efêmero + testes) | `sql-deploy-staging.yml` publica no projeto Supabase de **homologação** (environment `staging`) |
-| `main` | **somente `staging`** | `main-author-allowlist.yml`: autor na variável `MAIN_PR_ALLOWED_AUTHORS` **e** origem = `staging` (os dois são required status checks) | `sql-deploy-production.yml` publica no projeto Supabase de **produção** (environment `production`: aprovação do reviewer obrigatória e só a partir de `main`) |
+| `main` | **somente `staging`** | `main-author-allowlist.yml`: autor na variável `MAIN_PR_ALLOWED_AUTHORS` **e** origem = `staging` (os dois são required status checks) | `sql-deploy-production.yml` publica no projeto Supabase de **produção** automaticamente (environment `production`, só a partir de `main`, sem aprovação manual) |
 
 - Hotfix nunca vai direto para `main`: entra em `staging` por PR e depois `staging` é promovida.
 - Fluxo da Claude: branch a partir de `origin/staging` → commits → `git push -u origin <branch>` →
@@ -287,7 +287,7 @@ node tools/gen-dictionary.mjs
 
 A CI (`sql-validate.yml`) faz exatamente isso e ainda roda um segundo `migrate` que precisa dizer
 *No migration necessary*. Deploy: push em `staging` → `sql-deploy-staging.yml` (info + repair + migrate);
-push em `main` → `sql-deploy-production.yml` (info + migrate; environment com required reviewers).
+push em `main` → `sql-deploy-production.yml` (info + migrate, automático; sem repair).
 
 ### Conexão do Flyway com o Supabase
 

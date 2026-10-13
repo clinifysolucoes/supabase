@@ -43,8 +43,8 @@ export FLYWAY_PASSWORD="<senha>"
 
 4. CI/CD: os GitHub environments `staging` e `production` guardam a conexão de cada projeto
    (`SUPABASE_DB_HOST`, `SUPABASE_DB_PORT=5432`, `SUPABASE_DB_USER` e o secret `SUPABASE_DB_PASSWORD`).
-   Merge em `staging` publica em homologação; merge em `main` publica em produção, depois da
-   aprovação obrigatória no environment.
+   Merge em `staging` publica em homologação; merge em `main` publica em produção. Os dois são
+   automáticos, sem aprovação manual.
 
 ## Fluxo de publicação
 

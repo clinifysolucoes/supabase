@@ -5,9 +5,9 @@
 #     (SEM repair automatico: divergencia em prod deve falhar e ser olhada)
 #   - workflow_dispatch: confirmar digitando DEPLOY + comando
 #
-# Protecao: environment "production" com Required reviewer e deployment branch
-# policy = main. O job deploy so roda depois da aprovacao e so a partir de main
-# (o job guard tambem recusa qualquer outra ref no workflow_dispatch).
+# Protecao: environment "production" com deployment branch policy = main; o job
+# guard recusa qualquer outra ref no workflow_dispatch. Sem aprovacao manual:
+# o merge do PR staging -> main ja publica.
 #
 # Pre-requisitos - GitHub environment "production":
 #   Variable SUPABASE_DB_HOST      -> host do POOLER do projeto de producao
