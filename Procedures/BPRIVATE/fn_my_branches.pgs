@@ -1,7 +1,7 @@
 /*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
   ::  Schema      : PRIVATE - helpers de RLS, fora da API                         ::
-  ::  Object      : private.fn_my_branches()                                           ::
+  ::  Object      : private.fn_my_branches()                                      ::
   ::  UsedBy      : RLS policies (branch e tabelas de negocio futuras)            ::
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::

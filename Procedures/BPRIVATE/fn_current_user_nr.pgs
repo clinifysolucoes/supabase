@@ -1,7 +1,7 @@
 /*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
   ::  Schema      : PRIVATE - helpers de RLS, fora da API                         ::
-  ::  Object      : private.fn_current_user_nr()                                       ::
+  ::  Object      : private.fn_current_user_nr()                                  ::
   ::  UsedBy      : RLS policies, ad.trg_audit, functions RPC                     ::
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::

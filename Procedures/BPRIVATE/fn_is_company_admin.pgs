@@ -1,7 +1,7 @@
 /*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
   ::  Schema      : PRIVATE - helpers de RLS, fora da API                         ::
-  ::  Object      : private.fn_is_company_admin(bigint)                                ::
+  ::  Object      : private.fn_is_company_admin(bigint)                           ::
   ::  UsedBy      : RLS policies, company_update, branch_*, access_profile_save,  ::
   ::                company_user_save                                             ::
   ::----------------------------------------------------------------------------::
