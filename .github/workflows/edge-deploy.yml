@@ -1,0 +1,50 @@
+# Deploy das Edge Functions (supabase/functions/**) no projeto Supabase do ambiente.
+#   push em staging -> environment staging (homologacao)
+#   push em main    -> environment production
+#
+# Pre-requisitos por environment:
+#   Variable SUPABASE_PROJECT_REF   -> ref do projeto (wnmu... homologacao / ppzs... producao)
+#   Secret   SUPABASE_ACCESS_TOKEN  -> token pessoal da Supabase (Account > Access Tokens),
+#                                      usado pelo CLI para fazer o deploy
+name: Deploy Edge Functions
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'supabase/functions/**'
+      - '.github/workflows/edge-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: supabase functions deploy -> ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Valida configuracao do environment
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [ -n "$PROJECT_REF" ]           || fail "vars.SUPABASE_PROJECT_REF vazio"
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || fail "secrets.SUPABASE_ACCESS_TOKEN vazio (token pessoal da Supabase: Account > Access Tokens)"
+          echo "project_ref=$PROJECT_REF"
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy de todas as functions
+        run: supabase functions deploy --project-ref "$PROJECT_REF"

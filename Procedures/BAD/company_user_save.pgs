@@ -3,25 +3,28 @@
   ::  Schema      : AD - Administrative                                           ::
   ::  Object      : ad.company_user_save(jsonb)                                   ::
   ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('company_user_save')     ::
+  ::                Edge Function user-create (depois de criar a conta no Auth)   ::
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 14/10/2026 - log de atividade (ad.event_log)                  ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Manutencao de usuarios da empresa. Somente administrador.
       'I' vincula um usuario JA CADASTRADO no Supabase Auth (localizado pelo
-          e-mail) a empresa, com as filiais/perfis informados.
-          Convite de e-mail ainda nao cadastrado e feito por Edge Function
-          (auth.admin.inviteUserByEmail) - fora do banco.
+          e-mail) a empresa, com as filiais/perfis informados. Criar a conta
+          de quem ainda nao existe e papel da Edge Function user-create, que
+          chama esta RPC em seguida.
       'U' altera situacao/motivo e/ou substitui as filiais/perfis.
       'D' remove o vinculo (e os vinculos de filial, por cascade).
     Guarda: a empresa nunca fica sem administrador ativo (ad.fn_company_has_admin).
+    Grava ad.event_log (CREATE/UPDATE/DELETE).
 
   Input p_json:
     nr_version   integer  obrigatorio = 1
     vc_action    text     obrigatorio 'I' | 'U' | 'D'
     nr_company   bigint   obrigatorio
+    nr_branch    bigint   opcional (filial aberta no app, so para o log)
     vc_email     text     obrigatorio em 'I'
     nr_user      bigint   obrigatorio em 'U' e 'D'
     it_status    integer  1 ativo | 80 bloqueado | 90 inativo (so em 'U')
@@ -38,7 +41,6 @@
     COMPANY_USER_BRANCH_INVALID {Branch}, COMPANY_USER_PROFILE_INVALID {Profile},
     COMPANY_USER_LAST_ADMIN
 */
-
 create or replace function ad.company_user_save(p_json jsonb)
 returns jsonb
 language plpgsql
@@ -49,9 +51,11 @@ declare
   _nr_admin        bigint;
   _vc_action       text;
   _nr_company      bigint;
+  _nr_branch_ctx   bigint;
   _nr_user         bigint;
   _nr_company_user bigint;
   _vc_email        varchar(200);
+  _vc_user_name    varchar(60);
   _it_status       smallint;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'company_user_save');
@@ -65,6 +69,7 @@ begin
   if _nr_company is null then
     raise exception '%', ad.fn_message('COMPANY_USER_COMPANY_REQUIRED');
   end if;
+  _nr_branch_ctx := (p_json ->> 'nr_branch')::bigint;
 
   _nr_admin := private.fn_current_user_nr();
   if _nr_admin is null or not private.fn_is_company_admin(_nr_company) then
@@ -79,7 +84,7 @@ begin
       raise exception '%', ad.fn_message('COMPANY_USER_EMAIL_REQUIRED');
     end if;
 
-    select u.nr_user into _nr_user
+    select u.nr_user, u.vc_name into _nr_user, _vc_user_name
       from ad.app_user u
      where u.vc_email = _vc_email;
     if _nr_user is null then
@@ -104,6 +109,13 @@ begin
 
     perform ad.fn_set_user_branches(_nr_company, _nr_user, p_json -> 'branches', _nr_admin);
 
+    perform ad.fn_event_log(
+      _nr_admin, _nr_company, _nr_branch_ctx, 'USERS', 'CREATE', 'company_user',
+      _nr_company::text || '/' || _nr_user::text,
+      format('Usuário %s vinculado à empresa', _vc_user_name),
+      jsonb_build_object('vc_email', _vc_email, 'nr_company_user', _nr_company_user,
+                         'branches', p_json -> 'branches'));
+
   /*------------------------------------------------------------------------*/
   else /* 'U' ou 'D' */
   /*------------------------------------------------------------------------*/
@@ -112,8 +124,9 @@ begin
       raise exception '%', ad.fn_message('COMPANY_USER_USER_REQUIRED');
     end if;
 
-    select cu.nr_company_user into _nr_company_user
+    select cu.nr_company_user, u.vc_name into _nr_company_user, _vc_user_name
       from ad.company_user cu
+      join ad.app_user u on u.nr_user = cu.nr_user
      where cu.nr_company = _nr_company and cu.nr_user = _nr_user;
     if _nr_company_user is null then
       raise exception '%', ad.fn_message('COMPANY_USER_NOT_FOUND');
@@ -122,6 +135,12 @@ begin
     if _vc_action = 'D' then
       delete from ad.company_user cu
        where cu.nr_company = _nr_company and cu.nr_user = _nr_user;
+
+      perform ad.fn_event_log(
+        _nr_admin, _nr_company, _nr_branch_ctx, 'USERS', 'DELETE', 'company_user',
+        _nr_company::text || '/' || _nr_user::text,
+        format('Vínculo de %s removido da empresa', _vc_user_name),
+        jsonb_build_object('nr_company_user', _nr_company_user));
     else
       if p_json ? 'it_status' then
         _it_status := (p_json ->> 'it_status')::smallint;
@@ -143,6 +162,12 @@ begin
       if p_json ? 'branches' then
         perform ad.fn_set_user_branches(_nr_company, _nr_user, p_json -> 'branches', _nr_admin);
       end if;
+
+      perform ad.fn_event_log(
+        _nr_admin, _nr_company, _nr_branch_ctx, 'USERS', 'UPDATE', 'company_user',
+        _nr_company::text || '/' || _nr_user::text,
+        format('Usuário %s alterado', _vc_user_name),
+        (p_json - 'nr_version' - 'vc_action' - 'nr_company' - 'nr_branch'));
     end if;
 
     if not ad.fn_company_has_admin(_nr_company) then

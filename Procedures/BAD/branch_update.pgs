@@ -123,6 +123,10 @@ begin
     and b.nr_branch  = _nr_branch
   returning b.* into _row;
 
+  perform ad.fn_event_log(private.fn_current_user_nr(), _nr_company, _nr_branch, null, 'UPDATE', 'branch',
+    _nr_company::text || '/' || _nr_branch::text, format('Filial %s alterada', _row.vc_name),
+    (p_json - 'nr_version'));
+
   return to_jsonb(_row);
 end;
 $$;

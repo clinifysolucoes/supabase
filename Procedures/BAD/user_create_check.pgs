@@ -1,0 +1,85 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.user_create_check(jsonb)                                   ::
+  ::  UsedBy      : Edge Function user-create (antes de criar o usuario no Auth)  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Pre-checagem do cadastro de usuario pela empresa. Garante, ANTES de a
+    Edge Function criar a conta no Supabase Auth (service_role), que quem
+    chama e administrador da empresa, que o e-mail e valido e que o usuario
+    ainda nao esta vinculado. Diz se a conta ja existe no Auth (ai basta
+    vincular com company_user_save).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    vc_email    text     obrigatorio
+
+  Output jsonb: {"id_auth_exists": bool, "nr_user": bigint|null, "vc_email": "..."}
+
+  Errors (ad.fn_message): VERSION_MISMATCH, USER_CREATE_COMPANY_REQUIRED,
+    USER_CREATE_FORBIDDEN, USER_CREATE_EMAIL_REQUIRED, USER_CREATE_EMAIL_INVALID {Email},
+    COMPANY_USER_ALREADY_LINKED
+*/
+create or replace function ad.user_create_check(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_admin   bigint;
+  _nr_company bigint;
+  _vc_email   varchar(200);
+  _uu_auth    uuid;
+  _nr_user    bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'user_create_check');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('USER_CREATE_COMPANY_REQUIRED');
+  end if;
+
+  _nr_admin := private.fn_current_user_nr();
+  if _nr_admin is null or not private.fn_is_company_admin(_nr_company) then
+    raise exception '%', ad.fn_message('USER_CREATE_FORBIDDEN');
+  end if;
+
+  _vc_email := left(nullif(lower(trim(p_json ->> 'vc_email')), ''), 200);
+  if _vc_email is null then
+    raise exception '%', ad.fn_message('USER_CREATE_EMAIL_REQUIRED');
+  end if;
+  if not ad.fn_email_is_valid(_vc_email) then
+    raise exception '%', ad.fn_message('USER_CREATE_EMAIL_INVALID', jsonb_build_object('Email', _vc_email));
+  end if;
+
+  select u.id into _uu_auth
+    from auth.users u
+   where lower(u.email) = _vc_email;
+
+  select a.nr_user into _nr_user
+    from ad.app_user a
+   where a.vc_email = _vc_email;
+
+  if _nr_user is not null and exists (
+       select 1 from ad.company_user cu
+        where cu.nr_company = _nr_company and cu.nr_user = _nr_user) then
+    raise exception '%', ad.fn_message('COMPANY_USER_ALREADY_LINKED');
+  end if;
+
+  return jsonb_build_object(
+    'id_auth_exists', _uu_auth is not null,
+    'nr_user',        _nr_user,
+    'vc_email',       _vc_email);
+end;
+$$;
+
+revoke all on function ad.user_create_check(jsonb) from public, anon;
+grant execute on function ad.user_create_check(jsonb) to authenticated;

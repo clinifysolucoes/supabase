@@ -1,0 +1,153 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.event_log_list(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('event_log_list')        ::
+  ::                (tela de logs, aba "Atividades")                              ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    O que aconteceu no sistema (ad.event_log), no contexto de uma empresa,
+    paginado, do mais recente para o mais antigo. Pesquisa por tela, por tipo
+    de acao, por usuario, por texto do resumo e por periodo.
+      Administrador da empresa: todos os eventos da empresa.
+      Usuario comum: apenas os proprios eventos na empresa.
+    Periodo default: ultimos 30 dias.
+
+  Input p_json:
+    nr_version    integer      obrigatorio = 1
+    nr_company    bigint       obrigatorio
+    uu_screen     uuid         opcional (tela)
+    vc_action     text         opcional CREATE | UPDATE | DELETE | OTHER
+    nr_user       bigint       opcional (ignorado para usuario comum)
+    vc_search     text         opcional (trecho do resumo, da entidade ou da chave)
+    dh_from       timestamptz  opcional (default now() - 30 dias)
+    dh_to         timestamptz  opcional (default now()), inclusivo
+    nr_page       integer      opcional (default 1)
+    qt_page_size  integer      opcional (default 50, maximo 200)
+
+  Output jsonb:
+    {"qt_total": n, "nr_page": 1, "qt_page_size": 50,
+     "events": [{"nr_event", "nr_user", "vc_user", "uu_screen", "vc_screen_code",
+                 "vc_screen", "vc_action", "vc_entity", "vc_key", "vc_summary",
+                 "js_detail", "nr_branch", "vc_branch", "dh_event"}]}
+
+  Errors (ad.fn_message): VERSION_MISMATCH, EVENT_LOG_LIST_COMPANY_REQUIRED,
+    EVENT_LOG_LIST_FORBIDDEN, EVENT_LOG_LIST_ACTION_INVALID, EVENT_LOG_LIST_PERIOD_INVALID
+*/
+create or replace function ad.event_log_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _id_admin   boolean;
+  _nr_user_f  bigint;
+  _uu_screen  uuid;
+  _vc_action  text;
+  _vc_search  text;
+  _dh_from    timestamptz;
+  _dh_to      timestamptz;
+  _nr_page    integer;
+  _qt_page    integer;
+  _qt_total   bigint;
+  _events     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'event_log_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  if _nr_company is null then
+    raise exception '%', ad.fn_message('EVENT_LOG_LIST_COMPANY_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or _nr_company not in (select private.fn_my_companies()) then
+    raise exception '%', ad.fn_message('EVENT_LOG_LIST_FORBIDDEN');
+  end if;
+
+  _id_admin  := private.fn_is_company_admin(_nr_company);
+  _nr_user_f := case when _id_admin then (p_json ->> 'nr_user')::bigint else _nr_user end;
+
+  begin
+    _uu_screen := nullif(p_json ->> 'uu_screen', '')::uuid;
+  exception when others then
+    _uu_screen := null;
+  end;
+
+  _vc_action := upper(nullif(trim(p_json ->> 'vc_action'), ''));
+  if _vc_action is not null and _vc_action not in ('CREATE', 'UPDATE', 'DELETE', 'OTHER') then
+    raise exception '%', ad.fn_message('EVENT_LOG_LIST_ACTION_INVALID');
+  end if;
+
+  _vc_search := nullif(trim(p_json ->> 'vc_search'), '');
+  _dh_from   := coalesce((p_json ->> 'dh_from')::timestamptz, now() - interval '30 days');
+  _dh_to     := coalesce((p_json ->> 'dh_to')::timestamptz, now());
+  if _dh_from > _dh_to then
+    raise exception '%', ad.fn_message('EVENT_LOG_LIST_PERIOD_INVALID');
+  end if;
+
+  _nr_page := greatest(coalesce((p_json ->> 'nr_page')::integer, 1), 1);
+  _qt_page := least(greatest(coalesce((p_json ->> 'qt_page_size')::integer, 50), 1), 200);
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_event',       x.nr_event,
+             'nr_user',        x.nr_user,
+             'vc_user',        x.vc_user,
+             'uu_screen',      x.uu_screen,
+             'vc_screen_code', x.vc_screen_code,
+             'vc_screen',      x.vc_screen,
+             'vc_action',      x.vc_action,
+             'vc_entity',      x.vc_entity,
+             'vc_key',         x.vc_key,
+             'vc_summary',     x.vc_summary,
+             'js_detail',      x.js_detail,
+             'nr_branch',      x.nr_branch,
+             'vc_branch',      x.vc_branch,
+             'dh_event',       x.dh_event)
+           order by x.dh_event desc, x.nr_event desc), '[]'::jsonb),
+         coalesce(max(x.qt_total), 0)
+    into _events, _qt_total
+    from (
+      select e.nr_event, e.nr_user, u.vc_name as vc_user,
+             e.uu_screen, s.vc_code as vc_screen_code, s.vc_name as vc_screen,
+             e.vc_action, e.vc_entity, e.vc_key, e.vc_summary, e.js_detail,
+             e.nr_branch, b.vc_name as vc_branch, e.dh_event,
+             count(*) over () as qt_total
+        from ad.event_log e
+        join ad.app_user u     on u.nr_user = e.nr_user
+        left join ad.screen s  on s.uu_screen = e.uu_screen
+        left join ad.branch b  on b.nr_company = e.nr_company
+                              and b.nr_branch  = e.nr_branch
+       where e.nr_company = _nr_company
+         and e.dh_event >= _dh_from
+         and e.dh_event <= _dh_to
+         and (_nr_user_f is null or e.nr_user = _nr_user_f)
+         and (_uu_screen is null or e.uu_screen = _uu_screen)
+         and (_vc_action is null or e.vc_action = _vc_action)
+         and (_vc_search is null
+              or e.vc_summary ilike '%' || _vc_search || '%'
+              or e.vc_entity  ilike '%' || _vc_search || '%'
+              or e.vc_key     ilike '%' || _vc_search || '%')
+       order by e.dh_event desc, e.nr_event desc
+       limit _qt_page offset (_nr_page - 1) * _qt_page
+    ) x;
+
+  return jsonb_build_object(
+    'qt_total',     _qt_total,
+    'nr_page',      _nr_page,
+    'qt_page_size', _qt_page,
+    'events',       _events);
+end;
+$$;
+
+revoke all on function ad.event_log_list(jsonb) from public, anon;
+grant execute on function ad.event_log_list(jsonb) to authenticated;

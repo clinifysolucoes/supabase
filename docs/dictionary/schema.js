@@ -821,6 +821,259 @@ window.DICTIONARY = {
           "description": "Data/hora da última atualização (trigger ad.trg_audit)."
         }
       ]
+    },
+    {
+      "name": "screen",
+      "title": "Tela do app",
+      "description": "Catálogo GLOBAL das telas do app (não depende de empresa). O uuid é a chave da permissão e é o mesmo em todos os ambientes (seed com uuids fixos); o código é usado pelo app para rotear e o nome é o que aparece para o usuário. DASHBOARD é implícita para todo usuário logado.",
+      "rls": "SELECT: qualquer usuário logado (telas ativas). Escrita só por migration/seed.",
+      "columns": [
+        {
+          "name": "uu_screen",
+          "type": "uuid",
+          "pk": 1,
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "description": "Id da tela. É a chave usada em access_profile_screen e event_log."
+        },
+        {
+          "name": "vc_code",
+          "type": "varchar(30)",
+          "nullable": false,
+          "description": "Código estável da tela (DASHBOARD, USERS, PROFILES, LOGS). Único; usado pelo app para rotear."
+        },
+        {
+          "name": "vc_name",
+          "type": "varchar(60)",
+          "nullable": false,
+          "description": "Nome bonito da tela, mostrado ao usuário."
+        },
+        {
+          "name": "vc_group",
+          "type": "varchar(30)",
+          "nullable": true,
+          "description": "Agrupamento no menu (ex.: Administração)."
+        },
+        {
+          "name": "nr_order",
+          "type": "smallint",
+          "nullable": false,
+          "default": "0",
+          "description": "Ordem no menu."
+        },
+        {
+          "name": "it_status",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Situação da tela.",
+          "values": {
+            "1": "Ativa",
+            "90": "Inativa"
+          }
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "name": "access_profile_screen",
+      "title": "Permissão do perfil por tela",
+      "description": "Linha existe = o perfil pode LER a tela; id_create e id_update liberam criar e alterar. Perfil de nível 100 (administrador) ignora esta tabela: tem tudo. Substituída inteira por access_profile_save (screens).",
+      "rls": "SELECT: usuários da empresa. Escrita só via access_profile_save.",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "access_profile.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_profile",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "access_profile.nr_profile",
+          "nullable": false,
+          "description": "Perfil de acesso."
+        },
+        {
+          "name": "uu_screen",
+          "type": "uuid",
+          "pk": 3,
+          "fk": "screen.uu_screen",
+          "nullable": false,
+          "description": "Tela liberada."
+        },
+        {
+          "name": "id_read",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true",
+          "description": "Pode ler (sempre verdadeiro quando a linha existe; check impede criar/alterar sem ler)."
+        },
+        {
+          "name": "id_create",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "description": "Pode criar registros na tela."
+        },
+        {
+          "name": "id_update",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "description": "Pode alterar registros na tela."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "name": "event_log",
+      "title": "Log de atividades",
+      "description": "O que aconteceu no sistema: quem, quando, em qual tela, qual ação, qual registro, resumo legível e detalhe em JSON (nunca senhas). Gravado pelas RPCs via ad.fn_event_log; o app nunca escreve. Login/acesso fica em access_log.",
+      "rls": "SELECT: os próprios eventos. A tela de logs usa event_log_list (admin vê a empresa).",
+      "columns": [
+        {
+          "name": "nr_event",
+          "type": "bigint",
+          "pk": 1,
+          "nullable": false,
+          "default": "identity",
+          "description": "Número do evento."
+        },
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "nullable": true,
+          "description": "Empresa do contexto."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "nullable": true,
+          "description": "Filial aberta no app quando a ação foi feita (p_json.nr_branch)."
+        },
+        {
+          "name": "nr_user",
+          "type": "bigint",
+          "fk": "app_user.nr_user",
+          "nullable": false,
+          "description": "Quem fez."
+        },
+        {
+          "name": "uu_screen",
+          "type": "uuid",
+          "fk": "screen.uu_screen",
+          "nullable": true,
+          "description": "Tela em que a ação aconteceu (nula para ações sem tela, ex.: empresa/filial)."
+        },
+        {
+          "name": "vc_action",
+          "type": "varchar(20)",
+          "nullable": false,
+          "description": "Tipo da ação.",
+          "values": {
+            "CREATE": "Criação",
+            "UPDATE": "Alteração",
+            "DELETE": "Exclusão",
+            "OTHER": "Outra"
+          }
+        },
+        {
+          "name": "vc_entity",
+          "type": "varchar(40)",
+          "nullable": false,
+          "description": "Entidade afetada (access_profile, company_user, branch, company, app_user)."
+        },
+        {
+          "name": "vc_key",
+          "type": "varchar(60)",
+          "nullable": true,
+          "description": "Chave do registro em texto (ex.: 1/3)."
+        },
+        {
+          "name": "vc_summary",
+          "type": "varchar(200)",
+          "nullable": false,
+          "description": "Resumo legível (ex.: Perfil Recepção criado)."
+        },
+        {
+          "name": "js_detail",
+          "type": "jsonb",
+          "nullable": true,
+          "description": "Detalhe da ação (campos enviados), sem dados sensíveis."
+        },
+        {
+          "name": "dh_event",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora do evento."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
     }
   ],
   "external_entities": [
@@ -831,6 +1084,30 @@ window.DICTIONARY = {
     }
   ],
   "relations": [
+    {
+      "from": "screen",
+      "to": "access_profile_screen",
+      "card": "||--o{",
+      "label": "liberada para perfis"
+    },
+    {
+      "from": "access_profile",
+      "to": "access_profile_screen",
+      "card": "||--o{",
+      "label": "telas do perfil"
+    },
+    {
+      "from": "app_user",
+      "to": "event_log",
+      "card": "||--o{",
+      "label": "atividades"
+    },
+    {
+      "from": "screen",
+      "to": "event_log",
+      "card": "||--o{",
+      "label": "eventos na tela"
+    },
     {
       "from": "company",
       "to": "branch",
@@ -892,7 +1169,7 @@ window.DICTIONARY = {
       "signature": "ad.session_context(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login.",
+      "description": "Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login. Cada filial traz permissions: telas que o usuário pode ler/criar/alterar (nível 100 tem todas; DASHBOARD sempre).",
       "errors": [
         "VERSION_MISMATCH",
         "SESSION_USER_NOT_FOUND",
@@ -978,7 +1255,7 @@ window.DICTIONARY = {
       "signature": "ad.access_profile_save(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Cria (I) ou atualiza (U) perfis de acesso da empresa. Guarda contra deixar a empresa sem administrador ativo. Somente administrador.",
+      "description": "Cria (I) ou atualiza (U) perfis de acesso da empresa; screens (opcional) substitui as permissões por tela (ler/criar/alterar). Guarda contra deixar a empresa sem administrador ativo. Grava event_log. Somente administrador.",
       "errors": [
         "VERSION_MISMATCH",
         "ACCESS_PROFILE_ACTION_INVALID",
@@ -990,7 +1267,9 @@ window.DICTIONARY = {
         "ACCESS_PROFILE_REQUIRED",
         "ACCESS_PROFILE_NOT_FOUND",
         "ACCESS_PROFILE_STATUS_INVALID",
-        "ACCESS_PROFILE_LAST_ADMIN"
+        "ACCESS_PROFILE_LAST_ADMIN",
+        "ACCESS_PROFILE_SCREENS_INVALID",
+        "ACCESS_PROFILE_SCREEN_INVALID"
       ]
     },
     {
@@ -998,7 +1277,7 @@ window.DICTIONARY = {
       "signature": "ad.company_user_save(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Vincula (I, por e-mail de usuário já cadastrado no Auth), altera (U: situação, motivo, filiais/perfis) ou remove (D) um usuário da empresa. Guarda do último administrador. Somente administrador.",
+      "description": "Vincula (I, por e-mail de usuário já cadastrado no Auth), altera (U: situação, motivo, filiais/perfis) ou remove (D) um usuário da empresa. Guarda do último administrador. Somente administrador. Grava event_log.",
       "errors": [
         "VERSION_MISMATCH",
         "COMPANY_USER_ACTION_INVALID",
@@ -1047,7 +1326,7 @@ window.DICTIONARY = {
       "signature": "ad.access_profile_list(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Lista os perfis de acesso da empresa com a quantidade de usuários em cada um (qualquer usuário ativo da empresa). Opção id_include_inactive.",
+      "description": "Lista os perfis de acesso da empresa com a quantidade de usuários e as telas liberadas (ler/criar/alterar) de cada um. Qualquer usuário ativo da empresa. Opção id_include_inactive.",
       "errors": [
         "VERSION_MISMATCH",
         "ACCESS_PROFILE_LIST_COMPANY_REQUIRED",
@@ -1080,6 +1359,53 @@ window.DICTIONARY = {
         "ACCESS_LOG_LIST_APP_INVALID",
         "ACCESS_LOG_LIST_PERIOD_INVALID"
       ]
+    },
+    {
+      "name": "screen_list",
+      "signature": "ad.screen_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Catálogo de telas ativas do app na ordem do menu (uuid, código, nome, grupo). Qualquer usuário logado.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "SCREEN_LIST_FORBIDDEN"
+      ]
+    },
+    {
+      "name": "event_log_list",
+      "signature": "ad.event_log_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Log de atividades paginado no contexto da empresa (padrão: últimos 30 dias), pesquisável por tela, ação, usuário, texto e período. Administrador vê a empresa; usuário comum só os próprios eventos.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "EVENT_LOG_LIST_COMPANY_REQUIRED",
+        "EVENT_LOG_LIST_FORBIDDEN",
+        "EVENT_LOG_LIST_ACTION_INVALID",
+        "EVENT_LOG_LIST_PERIOD_INVALID"
+      ]
+    },
+    {
+      "name": "user_create_check",
+      "signature": "ad.user_create_check(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Pré-checagem do cadastro de usuário pela empresa, usada pela Edge Function user-create antes de criar a conta no Auth: administrador?, e-mail válido?, já vinculado?, conta já existe?",
+      "errors": [
+        "VERSION_MISMATCH",
+        "USER_CREATE_COMPANY_REQUIRED",
+        "USER_CREATE_FORBIDDEN",
+        "USER_CREATE_EMAIL_REQUIRED",
+        "USER_CREATE_EMAIL_INVALID",
+        "COMPANY_USER_ALREADY_LINKED"
+      ]
+    },
+    {
+      "name": "fn_event_log",
+      "signature": "ad.fn_event_log(p_nr_user bigint, p_nr_company bigint, p_nr_branch bigint, p_vc_screen text, p_vc_action text, p_vc_entity text, p_vc_key text, p_vc_summary text, p_js_detail jsonb)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "Grava uma linha em event_log (quem, empresa, filial, tela por código, ação, entidade, chave, resumo, detalhe). Chamada pelas RPCs que alteram dados."
     },
     {
       "name": "fn_current_user_nr",
@@ -1187,5 +1513,5 @@ window.DICTIONARY = {
       "description": "AFTER INSERT OR UPDATE OF email em auth.users: cria/sincroniza ad.app_user."
     }
   ],
-  "mermaid": "erDiagram\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }"
+  "mermaid": "erDiagram\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }"
 };

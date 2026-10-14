@@ -131,6 +131,10 @@ begin
     values (_nr_company, _nr_branch, _nr_user, _nr_profile, _nr_user);
   end if;
 
+  perform ad.fn_event_log(_nr_user, _nr_company, _nr_branch, null, 'CREATE', 'branch',
+    _nr_company::text || '/' || _nr_branch::text, format('Filial %s criada', _vc_name),
+    jsonb_build_object('vc_name', _vc_name, 'vc_cnpj', _vc_cnpj));
+
   return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch);
 end;
 $$;

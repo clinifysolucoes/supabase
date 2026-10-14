@@ -68,3 +68,21 @@ drop policy if exists access_log_select on ad.access_log;
 create policy access_log_select on ad.access_log
   for select to authenticated
   using (nr_user = private.fn_current_user_nr());
+
+-- ad.screen (catalogo global: todo usuario logado le as telas ativas)
+drop policy if exists screen_select on ad.screen;
+create policy screen_select on ad.screen
+  for select to authenticated
+  using (it_status = 1);
+
+-- ad.access_profile_screen
+drop policy if exists access_profile_screen_select on ad.access_profile_screen;
+create policy access_profile_screen_select on ad.access_profile_screen
+  for select to authenticated
+  using (nr_company in (select private.fn_my_companies()));
+
+-- ad.event_log (proprios eventos; a tela de logs usa event_log_list)
+drop policy if exists event_log_select on ad.event_log;
+create policy event_log_select on ad.event_log
+  for select to authenticated
+  using (nr_user = private.fn_current_user_nr());

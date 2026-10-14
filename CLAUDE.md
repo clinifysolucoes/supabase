@@ -25,7 +25,12 @@ Objetos principais:
 | `ad.branch_user_profile` | usuário x filial x perfil (multi-filial); é o que dá acesso |
 | `ad.app_user` | usuário; senha/token/2FA são do Supabase Auth (`auth.users`) |
 | `ad.access_log` | log de sessão, gravado por `session_context` |
-| `ad.session_context(jsonb)` | login no app: usuário, empresas → filiais → perfis, bloqueios |
+| `ad.screen` | catálogo global de telas: uuid fixo (chave da permissão), código (`vc_code`) e nome bonito |
+| `ad.access_profile_screen` | permissão do perfil por tela: linha = ler; `id_create`, `id_update` |
+| `ad.event_log` / `ad.fn_event_log` | log de atividades (o que aconteceu, em qual tela); gravado pelas RPCs |
+| `ad.screen_list` / `ad.event_log_list` | catálogo de telas; pesquisa do log de atividades |
+| `ad.user_create_check` + Edge Function `user-create` | cadastro de usuário pela empresa (cria no Auth com service_role e vincula) |
+| `ad.session_context(jsonb)` | login no app: usuário, empresas → filiais → perfis → **permissions** (telas × ler/criar/alterar), bloqueios |
 | `ad.company_create` / `ad.company_update` | empresa (onboarding e cadastro) |
 | `ad.company_user_save` / `ad.user_update` | usuários da empresa / próprio cadastro |
 | `ad.fn_check_version` | versão do contrato (`nr_version` dentro do `p_json`) |
@@ -234,7 +239,12 @@ preenchidas pelo trigger `ad.trg_audit` (não precisa setar nas functions).
    (`Procedures/BPRIVATE/`): as policies rodam como o usuário, então `authenticated` precisa de `EXECUTE`
    neles, e em `ad` eles apareceriam em `/rest/v1/rpc/` (lint 0029 da Supabase). `private` nunca entra em
    Exposed schemas.
-8. **Anti-lockout**: operações que mexem em perfis/vínculos terminam com `ad.fn_company_has_admin` e
+8. **Permissão por tela**: `ad.screen` é o catálogo (uuid fixo por tela, seed na versionada);
+   `ad.access_profile_screen` diz o que cada perfil pode (ler / criar / alterar). Perfil nível 100
+   ignora a tabela. `session_context` entrega as permissões efetivas por filial e o app esconde o que
+   o usuário não pode. **Tela nova = linha nova em `ad.screen`** (versionada) com uuid fixo.
+   Toda RPC que altera dados grava `ad.fn_event_log(...)` com o código da tela.
+8b. **Anti-lockout**: operações que mexem em perfis/vínculos terminam com `ad.fn_company_has_admin` e
    desfazem a transação se a empresa ficaria sem administrador ativo.
 9. **Situação e bloqueio** (`it_status`, `id_blocked`) de empresa/filial/usuário são operações de
    plataforma (service_role). Admin de empresa não altera isso pelo app.
@@ -324,6 +334,14 @@ O repo versiona `.mcp.json` com o servidor `supabase` (HTTP, `project_ref` do pr
 - Ao abrir o projeto no Supabase pela primeira vez, conferir com o MCP os advisors (nenhum aviso de
   RLS desligada ou `search_path mutable`) e se `ad` está em Exposed schemas.
 
+### Edge Functions (`supabase/functions/<nome>/index.ts`)
+
+Código versionado aqui; deploy pelo workflow `edge-deploy.yml` (push em `staging`/`main`, precisa do
+secret `SUPABASE_ACCESS_TOKEN` e da var `SUPABASE_PROJECT_REF` no environment). Enquanto o token não
+existir, o deploy em **homologação** pode ser feito pelo MCP (`deploy_edge_function`) com o mesmo
+conteúdo do arquivo; nunca em produção. Edge Function é o único lugar onde `service_role` é usado, e
+sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
+
 ### Setup do projeto Supabase (uma vez por ambiente)
 
 1. Dashboard → **Project Settings → API → Exposed schemas**: adicionar `ad` (senão o PostgREST não enxerga).
@@ -363,8 +381,8 @@ final filiais = await sb.schema('ad').from('branch').select('nr_company, nr_bran
 
 - Telas Flutter (login, criar empresa, escolher filial).
 - Transações/telas e permissão por tela: hoje o acesso é só por nível do perfil.
-- Convite de e-mail ainda não cadastrado (Edge Function com `auth.admin.inviteUserByEmail`);
-  `company_user_save` só vincula quem já existe no Auth.
+- Convite por e-mail (`auth.admin.inviteUserByEmail`): hoje a Edge Function `user-create` cria a conta
+  com senha inicial definida pelo administrador.
 - Operações de plataforma (bloquear empresa, inativar usuário): fazer por service_role ou futura RPC
   restrita a `app_user.it_level = 100`.
 - Empresa ativa no JWT (Auth Hook de custom claims) para policies sem subquery — só se a performance pedir.

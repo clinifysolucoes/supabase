@@ -29,6 +29,7 @@ as $$
 declare
   _vc_name  varchar(60);
   _vc_email varchar(200);
+  _vc_cpf   varchar(11);
 begin
   _vc_email := left(nullif(lower(trim(new.email)), ''), 200);
 
@@ -39,8 +40,19 @@ begin
                   nullif(split_part(coalesce(new.email, ''), '@', 1), ''),
                   'Usuário'), 60);
 
-    insert into ad.app_user (uu_auth, vc_name, vc_email)
-    values (new.id, _vc_name, _vc_email)
+    /* cpf / telefones vindos da metadata (Edge Function user-create). CPF
+       invalido ou ja usado e ignorado: nunca falha o cadastro no Auth.       */
+    _vc_cpf := nullif(regexp_replace(coalesce(new.raw_user_meta_data ->> 'cpf', ''), '[^0-9]', '', 'g'), '');
+    if _vc_cpf is not null and (
+         not ad.fn_cpf_is_valid(_vc_cpf)
+         or exists (select 1 from ad.app_user u where u.vc_cpf = _vc_cpf)) then
+      _vc_cpf := null;
+    end if;
+
+    insert into ad.app_user (uu_auth, vc_name, vc_email, vc_cpf, vc_phone, vc_mobile)
+    values (new.id, _vc_name, _vc_email, _vc_cpf,
+            left(nullif(trim(new.raw_user_meta_data ->> 'phone'), ''), 20),
+            left(nullif(trim(new.raw_user_meta_data ->> 'mobile'), ''), 20))
     on conflict (uu_auth) do nothing;
 
   elsif tg_op = 'UPDATE' then

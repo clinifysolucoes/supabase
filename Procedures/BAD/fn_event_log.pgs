@@ -1,0 +1,71 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_event_log(bigint, bigint, bigint, text, text, text,     ::
+  ::                text, text, jsonb)                                            ::
+  ::  UsedBy      : RPCs que alteram dados (access_profile_save, company_user_save, ::
+  ::                branch_*, company_*, user_update)                             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava uma linha em ad.event_log: o que aconteceu no sistema. Helper
+    interno (sem grant): so as RPCs chamam, nunca o app.
+  Input:
+    p_nr_user     quem fez (ad.app_user.nr_user)
+    p_nr_company  empresa do contexto (pode ser null)
+    p_nr_branch   filial do contexto (pode ser null; vem do app em p_json.nr_branch)
+    p_vc_screen   codigo da tela (ad.screen.vc_code) ou null
+    p_vc_action   CREATE | UPDATE | DELETE | OTHER
+    p_vc_entity   entidade afetada (access_profile, company_user, branch, company, app_user)
+    p_vc_key      chave do registro em texto (ex.: '1/3')
+    p_vc_summary  resumo legivel (ate 200)
+    p_js_detail   detalhe em jsonb (nunca senhas)
+  Output: void
+*/
+create or replace function ad.fn_event_log(
+  p_nr_user    bigint,
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_vc_screen  text,
+  p_vc_action  text,
+  p_vc_entity  text,
+  p_vc_key     text,
+  p_vc_summary text,
+  p_js_detail  jsonb default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _uu_screen uuid;
+begin
+  if p_nr_user is null then
+    return;
+  end if;
+
+  if p_vc_screen is not null then
+    select s.uu_screen into _uu_screen
+      from ad.screen s
+     where s.vc_code = upper(p_vc_screen);
+  end if;
+
+  insert into ad.event_log (
+    nr_company, nr_branch, nr_user, uu_screen, vc_action, vc_entity, vc_key, vc_summary, js_detail, nr_operator
+  ) values (
+    p_nr_company, p_nr_branch, p_nr_user, _uu_screen,
+    case when upper(coalesce(p_vc_action, '')) in ('CREATE', 'UPDATE', 'DELETE') then upper(p_vc_action) else 'OTHER' end,
+    left(coalesce(p_vc_entity, 'other'), 40),
+    left(p_vc_key, 60),
+    left(coalesce(nullif(trim(p_vc_summary), ''), p_vc_entity), 200),
+    p_js_detail,
+    p_nr_user
+  );
+end;
+$$;
+
+revoke all on function ad.fn_event_log(bigint, bigint, bigint, text, text, text, text, text, jsonb) from public, anon, authenticated;
