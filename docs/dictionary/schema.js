@@ -522,7 +522,7 @@ window.DICTIONARY = {
     {
       "name": "access_profile",
       "title": "Perfil de acesso",
-      "description": "Perfil de acesso da empresa (Administrador, Dentista, Recepção...). Numeração sequencial por empresa. company_create cria 1 = Administrador (nível 100) e 2 = Usuário (nível 0). A ligação perfil x telas ainda não existe neste projeto.",
+      "description": "Perfil de acesso da empresa (Administrador, Dentista, Recepção...). Numeração sequencial por empresa. company_create cria 1 = Administrador (nível 100) e 2 = Usuário (nível 0). A permissão por tela fica em ad.access_profile_screen; perfil de nível 100 ignora essa tabela e tem acesso a todas as telas.",
       "rls": "SELECT: perfis das empresas acessíveis (private.fn_my_companies). Escrita só via access_profile_save.",
       "columns": [
         {
