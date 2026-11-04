@@ -1,0 +1,171 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_entry_list(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_entry_list')        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Contas a receber (it_kind 1) ou a pagar (it_kind 2) da filial num periodo:
+      vc_status  open      em aberto (vencidas ou nao) -> periodo pelo vencimento
+                 overdue   em aberto e vencidas (antes de hoje, fuso da filial)
+                 paid      pagas -> periodo pela data do pagamento
+                 cancelled canceladas
+                 all       todas -> periodo pelo vencimento (default)
+    Filtros: conta, categoria, fornecedor, paciente, busca na descricao. No
+    maximo 1000 linhas, por vencimento. Totais do resultado: em aberto,
+    vencido, pago e, para despesas, por tipo de custo.
+    Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company   bigint   obrigatorio
+    nr_branch    bigint   obrigatorio
+    it_kind      integer  obrigatorio 1 receber | 2 pagar
+    dt_from      date     obrigatorio
+    dt_to        date     obrigatorio (periodo de ate 400 dias)
+    vc_status    text     opcional (default all)
+    nr_account, nr_category, nr_supplier, nr_patient  bigint  opcionais
+    vc_search    text     opcional
+
+  Output jsonb:
+    {"entries": [{"nr_entry", "it_kind", "nr_category", "vc_category", "it_cost_type",
+                  "nr_account", "vc_account", "nr_supplier", "vc_supplier", "nr_patient", "vc_patient",
+                  "vc_description", "vl_amount", "dt_due", "dt_competence", "it_payment_method",
+                  "dt_paid", "vl_paid", "it_status", "id_overdue", "uu_group", "nr_installment",
+                  "qt_installments", "id_recurring", "vc_notes"}],
+     "totals": {"vl_open", "vl_overdue", "vl_paid", "vl_cancelled", "qt_total",
+                "by_cost_type": {"1": n, "2": n, "3": n, "4": n}},
+     "dt_today": "YYYY-MM-DD"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.fin_entry_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       smallint;
+  _from       date;
+  _to         date;
+  _status     text := lower(coalesce(nullif(trim(p_json ->> 'vc_status'), ''), 'all'));
+  _account    bigint;
+  _category   bigint;
+  _supplier   bigint;
+  _patient    bigint;
+  _search     text := nullif(trim(p_json ->> 'vc_search'), '');
+  _today      date;
+  _rows       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_entry_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+
+  begin
+    _kind     := (p_json ->> 'it_kind')::smallint;
+    _from     := (p_json ->> 'dt_from')::date;
+    _to       := (p_json ->> 'dt_to')::date;
+    _account  := (p_json ->> 'nr_account')::bigint;
+    _category := (p_json ->> 'nr_category')::bigint;
+    _supplier := (p_json ->> 'nr_supplier')::bigint;
+    _patient  := (p_json ->> 'nr_patient')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _kind is null or _kind not in (1, 2) or _from is null or _to is null or _to < _from
+     or _to - _from > 400 or _status not in ('open', 'overdue', 'paid', 'cancelled', 'all') then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+
+  select (now() at time zone b.vc_timezone)::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  with base as (
+    select e.*,
+           (e.it_status = 1 and e.dt_due < _today) as id_overdue
+      from od.fin_entry e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_kind = _kind
+       and case _status
+             when 'paid' then e.it_status = 2 and e.dt_paid between _from and _to
+             when 'open' then e.it_status = 1 and e.dt_due between _from and _to
+             when 'overdue' then e.it_status = 1 and e.dt_due < _today and e.dt_due between _from and _to
+             when 'cancelled' then e.it_status = 90 and e.dt_due between _from and _to
+             else e.dt_due between _from and _to
+           end
+       and (_account is null or e.nr_account = _account)
+       and (_category is null or e.nr_category = _category)
+       and (_supplier is null or e.nr_supplier = _supplier)
+       and (_patient is null or e.nr_patient = _patient)
+       and (_search is null or e.vc_description ilike '%' || _search || '%')
+     order by e.dt_due, e.nr_entry
+     limit 1000
+  )
+  select jsonb_build_object(
+           'entries', coalesce(jsonb_agg(
+                        jsonb_build_object(
+                          'nr_entry',          b.nr_entry,
+                          'it_kind',           b.it_kind,
+                          'nr_category',       b.nr_category,
+                          'vc_category',       c.vc_name,
+                          'it_cost_type',      c.it_cost_type,
+                          'nr_account',        b.nr_account,
+                          'vc_account',        a.vc_name,
+                          'nr_supplier',       b.nr_supplier,
+                          'vc_supplier',       s.vc_name,
+                          'nr_patient',        b.nr_patient,
+                          'vc_patient',        p.vc_name,
+                          'vc_description',    b.vc_description,
+                          'vl_amount',         b.vl_amount,
+                          'dt_due',            b.dt_due,
+                          'dt_competence',     b.dt_competence,
+                          'it_payment_method', b.it_payment_method,
+                          'dt_paid',           b.dt_paid,
+                          'vl_paid',           b.vl_paid,
+                          'it_status',         b.it_status,
+                          'id_overdue',        b.id_overdue,
+                          'uu_group',          b.uu_group,
+                          'nr_installment',    b.nr_installment,
+                          'qt_installments',   b.qt_installments,
+                          'id_recurring',      b.id_recurring,
+                          'vc_notes',          b.vc_notes)
+                        order by b.dt_due, b.nr_entry), '[]'::jsonb),
+           'totals', jsonb_build_object(
+                        'vl_open',      coalesce(sum(b.vl_amount) filter (where b.it_status = 1), 0),
+                        'vl_overdue',   coalesce(sum(b.vl_amount) filter (where b.id_overdue), 0),
+                        'vl_paid',      coalesce(sum(b.vl_paid) filter (where b.it_status = 2), 0),
+                        'vl_cancelled', coalesce(sum(b.vl_amount) filter (where b.it_status = 90), 0),
+                        'qt_total',     count(*),
+                        'by_cost_type', jsonb_build_object(
+                          '1', coalesce(sum(b.vl_amount) filter (where c.it_cost_type = 1 and b.it_status <> 90), 0),
+                          '2', coalesce(sum(b.vl_amount) filter (where c.it_cost_type = 2 and b.it_status <> 90), 0),
+                          '3', coalesce(sum(b.vl_amount) filter (where c.it_cost_type = 3 and b.it_status <> 90), 0),
+                          '4', coalesce(sum(b.vl_amount) filter (where c.it_cost_type = 4 and b.it_status <> 90), 0))),
+           'dt_today', _today)
+    into _rows
+    from base b
+    join od.fin_category c on c.nr_company = b.nr_company and c.nr_branch = b.nr_branch and c.nr_category = b.nr_category
+    left join od.fin_account a on a.nr_company = b.nr_company and a.nr_branch = b.nr_branch and a.nr_account = b.nr_account
+    left join od.fin_supplier s on s.nr_company = b.nr_company and s.nr_branch = b.nr_branch and s.nr_supplier = b.nr_supplier
+    left join od.patient p on p.nr_company = b.nr_company and p.nr_branch = b.nr_branch and p.nr_patient = b.nr_patient;
+
+  return _rows;
+end;
+$$;
+
+revoke all on function ad.fin_entry_list(jsonb) from public, anon;
+grant execute on function ad.fin_entry_list(jsonb) to authenticated;

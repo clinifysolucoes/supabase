@@ -1,0 +1,120 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_cashflow(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_cashflow')          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Fluxo de caixa de um mes, dia a dia (contas ativas):
+      vl_in / vl_out                 realizado (pago, pela data do pagamento)
+      vl_in_planned / vl_out_planned previsto (em aberto, pelo vencimento)
+      vl_balance                     saldo acumulado realizado no fim do dia
+      vl_projected                   saldo acumulado com o previsto
+    vl_opening = saldo realizado antes do dia 1. Os vencidos de meses
+    anteriores ainda em aberto entram no previsto do dia 1 (vl_overdue_in /
+    vl_overdue_out). Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_year     integer  obrigatorio
+    nr_month    integer  obrigatorio 1..12
+
+  Output jsonb:
+    {"vl_opening", "vl_overdue_in", "vl_overdue_out",
+     "days": [{"dt", "vl_in", "vl_out", "vl_in_planned", "vl_out_planned", "vl_balance", "vl_projected"}],
+     "totals": {"vl_in", "vl_out", "vl_in_planned", "vl_out_planned"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.fin_cashflow(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _m0         date;
+  _m1         date;
+  _opening    numeric;
+  _ov_in      numeric;
+  _ov_out     numeric;
+  _days       jsonb;
+  _totals     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_cashflow');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _m0 := make_date((p_json ->> 'nr_year')::integer, (p_json ->> 'nr_month')::integer, 1);
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _m0 is null then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+  _m1 := (_m0 + interval '1 month')::date;
+
+  _opening := od.fn_fin_balance(_nr_company, _nr_branch, null, _m0);
+  select coalesce(sum(e.vl_amount) filter (where e.it_kind = 1), 0),
+         coalesce(sum(e.vl_amount) filter (where e.it_kind = 2), 0)
+    into _ov_in, _ov_out
+    from od.fin_entry e
+   where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_status = 1 and e.dt_due < _m0;
+
+  with d as (
+    select gs::date as dt from generate_series(_m0, _m1 - 1, interval '1 day') gs
+  ), mv as (
+    select d.dt,
+           coalesce(sum(e.vl_paid) filter (where e.it_status = 2 and e.it_kind = 1 and e.dt_paid = d.dt), 0) as vl_in,
+           coalesce(sum(e.vl_paid) filter (where e.it_status = 2 and e.it_kind = 2 and e.dt_paid = d.dt), 0) as vl_out,
+           coalesce(sum(e.vl_amount) filter (where e.it_status = 1 and e.it_kind = 1 and e.dt_due = d.dt), 0)
+             + case when d.dt = _m0 then _ov_in else 0 end as vl_in_planned,
+           coalesce(sum(e.vl_amount) filter (where e.it_status = 1 and e.it_kind = 2 and e.dt_due = d.dt), 0)
+             + case when d.dt = _m0 then _ov_out else 0 end as vl_out_planned
+      from d
+      left join od.fin_entry e
+        on e.nr_company = _nr_company and e.nr_branch = _nr_branch
+       and (e.dt_paid = d.dt or e.dt_due = d.dt)
+       and (e.nr_account is null or exists (select 1 from od.fin_account a
+                                             where a.nr_company = e.nr_company and a.nr_branch = e.nr_branch
+                                               and a.nr_account = e.nr_account and a.it_status = 1))
+     group by d.dt
+  ), acc as (
+    select mv.*,
+           _opening + sum(mv.vl_in - mv.vl_out) over (order by mv.dt) as vl_balance,
+           _opening + sum(mv.vl_in - mv.vl_out + mv.vl_in_planned - mv.vl_out_planned) over (order by mv.dt) as vl_projected
+      from mv
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'dt', acc.dt, 'vl_in', acc.vl_in, 'vl_out', acc.vl_out,
+           'vl_in_planned', acc.vl_in_planned, 'vl_out_planned', acc.vl_out_planned,
+           'vl_balance', acc.vl_balance, 'vl_projected', acc.vl_projected) order by acc.dt), '[]'::jsonb),
+         jsonb_build_object('vl_in', coalesce(sum(acc.vl_in), 0), 'vl_out', coalesce(sum(acc.vl_out), 0),
+                            'vl_in_planned', coalesce(sum(acc.vl_in_planned), 0),
+                            'vl_out_planned', coalesce(sum(acc.vl_out_planned), 0))
+    into _days, _totals
+    from acc;
+
+  return jsonb_build_object('vl_opening', _opening, 'vl_overdue_in', _ov_in, 'vl_overdue_out', _ov_out,
+                            'days', _days, 'totals', _totals);
+end;
+$$;
+
+revoke all on function ad.fin_cashflow(jsonb) from public, anon;
+grant execute on function ad.fin_cashflow(jsonb) to authenticated;

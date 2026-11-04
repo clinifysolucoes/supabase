@@ -1,0 +1,46 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_balance(bigint, bigint, bigint, date)               ::
+  ::  UsedBy      : ad.fin_catalog, ad.fin_overview, ad.fin_cashflow,             ::
+  ::                ad.fin_statement                                              ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Saldo realizado de uma conta (ou de todas as contas ativas, com
+    p_nr_account nulo) no fim do dia anterior a p_dt_before:
+      saldo inicial + receitas pagas - despesas pagas (vl_paid, dt_paid < p_dt_before)
+    Sem p_dt_before = saldo de hoje em diante (tudo que ja foi pago).
+    Helper interno (sem grant): a RPC que chama ja checou a permissao.
+  Input:
+    p_nr_company, p_nr_branch, p_nr_account (null = todas), p_dt_before (null = sem corte)
+  Output: numeric(14,2)
+*/
+create or replace function od.fn_fin_balance(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_account bigint,
+  p_dt_before  date)
+returns numeric
+language sql
+stable
+set search_path = ''
+as $$
+  select coalesce((select sum(a.vl_opening)
+                     from od.fin_account a
+                    where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch
+                      and (p_nr_account is null and a.it_status = 1 or a.nr_account = p_nr_account)), 0)
+       + coalesce((select sum(case when e.it_kind = 1 then e.vl_paid else -e.vl_paid end)
+                     from od.fin_entry e
+                     join od.fin_account a on a.nr_company = e.nr_company and a.nr_branch = e.nr_branch
+                                          and a.nr_account = e.nr_account
+                    where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch
+                      and e.it_status = 2
+                      and (p_nr_account is null and a.it_status = 1 or e.nr_account = p_nr_account)
+                      and (p_dt_before is null or e.dt_paid < p_dt_before)), 0);
+$$;
+
+revoke all on function od.fn_fin_balance(bigint, bigint, bigint, date) from public, anon, authenticated;

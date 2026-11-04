@@ -1,0 +1,142 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_category_save(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_category_save')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Plano de contas: categorias de receita (it_kind 1) e de despesa (it_kind 2).
+    A despesa tem o tipo de custo: 1 fixo | 2 variavel | 3 investimento | 4 outros.
+      vc_action = 'I'  cria (nr_category sequencial por filial) -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente (o tipo receita/despesa nao muda)
+    Nome unico por tipo na filial. Grava ad.event_log.
+
+  Input p_json:
+    nr_version    integer  obrigatorio = 1
+    vc_action     text     obrigatorio 'I' | 'U'
+    nr_company    bigint   obrigatorio
+    nr_branch     bigint   obrigatorio
+    nr_category   bigint   obrigatorio em 'U'
+    vc_name       text     obrigatorio em 'I' (ate 60)
+    it_kind       integer  obrigatorio em 'I': 1 receita | 2 despesa
+    it_cost_type  integer  despesa: 1..4 (default 4 outros); receita: ignorado
+    it_status     integer  1 ativa | 90 inativa (so em 'U')
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_category"}
+
+  Errors: VERSION_MISMATCH, FIN_CATEGORY_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_CATEGORY_FORBIDDEN,
+    FIN_CATEGORY_NAME_REQUIRED, FIN_CATEGORY_NAME_IN_USE {Name}, FIN_CATEGORY_KIND_INVALID,
+    FIN_CATEGORY_COST_TYPE_INVALID, FIN_CATEGORY_STATUS_INVALID, FIN_CATEGORY_REQUIRED, FIN_CATEGORY_NOT_FOUND
+*/
+create or replace function ad.fin_category_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user     bigint;
+  _vc_action   text;
+  _nr_company  bigint;
+  _nr_branch   bigint;
+  _nr_category bigint;
+  _perm        jsonb;
+  _vc_name     varchar(60);
+  _kind        smallint;
+  _cost        smallint;
+  _row         od.fin_category%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_category_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('FIN_CATEGORY_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FIN_CATEGORY_FORBIDDEN');
+  end if;
+
+  if p_json ? 'vc_name' or _vc_action = 'I' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 60);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('FIN_CATEGORY_NAME_REQUIRED');
+    end if;
+  end if;
+  if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
+    raise exception '%', ad.fn_message('FIN_CATEGORY_STATUS_INVALID');
+  end if;
+
+  if _vc_action = 'I' then
+    _kind := (p_json ->> 'it_kind')::smallint;
+    if _kind is null or _kind not in (1, 2) then
+      raise exception '%', ad.fn_message('FIN_CATEGORY_KIND_INVALID');
+    end if;
+  else
+    _nr_category := (p_json ->> 'nr_category')::bigint;
+    if _nr_category is null then
+      raise exception '%', ad.fn_message('FIN_CATEGORY_REQUIRED');
+    end if;
+    select c.it_kind into _kind from od.fin_category c
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_category = _nr_category;
+    if not found then
+      raise exception '%', ad.fn_message('FIN_CATEGORY_NOT_FOUND');
+    end if;
+  end if;
+
+  if _kind = 2 and (p_json ? 'it_cost_type' or _vc_action = 'I') then
+    _cost := coalesce((p_json ->> 'it_cost_type')::smallint, 4);
+    if _cost not in (1, 2, 3, 4) then
+      raise exception '%', ad.fn_message('FIN_CATEGORY_COST_TYPE_INVALID');
+    end if;
+  end if;
+
+  if _vc_name is not null and exists (
+       select 1 from od.fin_category c
+        where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.it_kind = _kind
+          and lower(c.vc_name) = lower(_vc_name) and c.nr_category is distinct from _nr_category) then
+    raise exception '%', ad.fn_message('FIN_CATEGORY_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+  end if;
+
+  if _vc_action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(c.nr_category), 0) + 1 into _nr_category
+      from od.fin_category c where c.nr_company = _nr_company and c.nr_branch = _nr_branch;
+    insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, it_cost_type, nr_operator)
+    values (_nr_company, _nr_branch, _nr_category, _vc_name, _kind, _cost, _nr_user)
+    returning * into _row;
+  else
+    update od.fin_category c set
+      vc_name      = case when p_json ? 'vc_name'   then _vc_name                           else c.vc_name end,
+      it_cost_type = case when _cost is not null    then _cost                              else c.it_cost_type end,
+      it_status    = case when p_json ? 'it_status' then (p_json ->> 'it_status')::smallint else c.it_status end
+    where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_category = _nr_category
+    returning c.* into _row;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'fin_category', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_category::text,
+    format('Categoria %s %s', _row.vc_name, case when _vc_action = 'I' then 'cadastrada' else 'alterada' end),
+    jsonb_build_object('vc_name', _row.vc_name, 'it_kind', _row.it_kind, 'it_cost_type', _row.it_cost_type,
+                       'it_status', _row.it_status));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_category', _nr_category);
+end;
+$$;
+
+revoke all on function ad.fin_category_save(jsonb) from public, anon;
+grant execute on function ad.fin_category_save(jsonb) to authenticated;

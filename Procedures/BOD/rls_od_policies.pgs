@@ -89,3 +89,27 @@ drop policy if exists appointment_select on od.appointment;
 create policy appointment_select on od.appointment
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_account
+drop policy if exists fin_account_select on od.fin_account;
+create policy fin_account_select on od.fin_account
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_category
+drop policy if exists fin_category_select on od.fin_category;
+create policy fin_category_select on od.fin_category
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_supplier
+drop policy if exists fin_supplier_select on od.fin_supplier;
+create policy fin_supplier_select on od.fin_supplier
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_entry
+drop policy if exists fin_entry_select on od.fin_entry;
+create policy fin_entry_select on od.fin_entry
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

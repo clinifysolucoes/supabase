@@ -1,0 +1,100 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_catalog(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_catalog')           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastros do financeiro da filial: contas (com o saldo de hoje), plano de
+    contas (receitas e despesas, com tipo de custo) e fornecedores, e a
+    permissao do usuario na tela. Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    id_include_inactive  boolean  opcional (default false)
+
+  Output jsonb:
+    {"accounts":   [{"nr_account", "vc_name", "it_type", "vl_opening", "vl_balance", "it_status"}],
+     "categories": [{"nr_category", "vc_name", "it_kind", "it_cost_type", "it_status", "qt_entries"}],
+     "suppliers":  [{"nr_supplier", "vc_name", "vc_document", "vc_phone", "vc_email", "vc_notes", "it_status"}],
+     "permission": {"id_read", "id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
+*/
+create or replace function ad.fin_catalog(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _perm       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_catalog');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+
+  return jsonb_build_object(
+    'accounts', (select coalesce(jsonb_agg(
+                          jsonb_build_object(
+                            'nr_account', a.nr_account,
+                            'vc_name',    a.vc_name,
+                            'it_type',    a.it_type,
+                            'vl_opening', a.vl_opening,
+                            'vl_balance', od.fn_fin_balance(_nr_company, _nr_branch, a.nr_account, null),
+                            'it_status',  a.it_status)
+                          order by a.it_type, a.vc_name), '[]'::jsonb)
+                   from od.fin_account a
+                  where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+                    and (_inactive or a.it_status = 1)),
+    'categories', (select coalesce(jsonb_agg(
+                            jsonb_build_object(
+                              'nr_category',  c.nr_category,
+                              'vc_name',      c.vc_name,
+                              'it_kind',      c.it_kind,
+                              'it_cost_type', c.it_cost_type,
+                              'it_status',    c.it_status,
+                              'qt_entries',   (select count(*) from od.fin_entry e
+                                                where e.nr_company = c.nr_company and e.nr_branch = c.nr_branch
+                                                  and e.nr_category = c.nr_category))
+                            order by c.it_kind, c.vc_name), '[]'::jsonb)
+                     from od.fin_category c
+                    where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                      and (_inactive or c.it_status = 1)),
+    'suppliers', (select coalesce(jsonb_agg(
+                           jsonb_build_object(
+                             'nr_supplier', s.nr_supplier,
+                             'vc_name',     s.vc_name,
+                             'vc_document', s.vc_document,
+                             'vc_phone',    s.vc_phone,
+                             'vc_email',    s.vc_email,
+                             'vc_notes',    s.vc_notes,
+                             'it_status',   s.it_status)
+                           order by s.vc_name), '[]'::jsonb)
+                    from od.fin_supplier s
+                   where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                     and (_inactive or s.it_status = 1)),
+    'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.fin_catalog(jsonb) from public, anon;
+grant execute on function ad.fin_catalog(jsonb) to authenticated;

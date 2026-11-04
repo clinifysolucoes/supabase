@@ -53,6 +53,8 @@ Objetos principais:
 | `od.professional` / `od.professional_schedule` | agenda: profissionais da filial (cor, intervalo, usuário vinculado) e horário de atendimento por dia da semana |
 | `ad.professional_list` / `ad.professional_save` | tela Agenda (`AGENDA`, uuid `...000000000007`): cadastro de profissionais e horários |
 | `od.appointment` / `ad.appointment_list` / `ad.appointment_save` | agenda: consultas e compromissos (clínica toda ou profissional), situação do atendimento, conflito de horário (encaixe libera), alertas de retorno no período |
+| `od.fin_account` / `od.fin_category` / `od.fin_supplier` / `od.fin_entry` | financeiro (fase 1): contas com saldo, plano de contas (tipo de custo da precificação), fornecedores, contas a receber/pagar com parcelas e recorrência |
+| `ad.fin_setup` / `ad.fin_catalog` / `ad.fin_*_save` / `ad.fin_entry_settle` / `ad.fin_entry_list` / `ad.fin_overview` / `ad.fin_cashflow` / `ad.fin_statement` | tela Financeiro (`FINANCE`, uuid `...000000000008`); saldo em `od.fn_fin_balance` |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |

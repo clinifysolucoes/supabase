@@ -1,0 +1,136 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_account_save(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_account_save')      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastro de contas do financeiro (caixa, banco, cofre).
+      vc_action = 'I'  cria (nr_account sequencial por filial) -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente                   -> permissao ALTERAR
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     obrigatorio 'I' | 'U'
+    nr_company   bigint   obrigatorio
+    nr_branch    bigint   obrigatorio
+    nr_account   bigint   obrigatorio em 'U'
+    vc_name      text     obrigatorio em 'I' (ate 60, unico na filial)
+    it_type      integer  1 caixa | 2 banco | 3 cofre (default 1)
+    vl_opening   numeric  saldo inicial (pode ser negativo)
+    it_status    integer  1 ativa | 90 inativa (so em 'U')
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_account"}
+
+  Errors: VERSION_MISMATCH, FIN_ACCOUNT_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_ACCOUNT_FORBIDDEN,
+    FIN_ACCOUNT_NAME_REQUIRED, FIN_ACCOUNT_NAME_IN_USE {Name}, FIN_ACCOUNT_TYPE_INVALID,
+    FIN_ACCOUNT_VALUE_INVALID, FIN_ACCOUNT_STATUS_INVALID, FIN_ACCOUNT_REQUIRED, FIN_ACCOUNT_NOT_FOUND
+*/
+create or replace function ad.fin_account_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _vc_action  text;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_account bigint;
+  _perm       jsonb;
+  _vc_name    varchar(60);
+  _opening    numeric;
+  _row        od.fin_account%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_account_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_FORBIDDEN');
+  end if;
+
+  if p_json ? 'vc_name' or _vc_action = 'I' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 60);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('FIN_ACCOUNT_NAME_REQUIRED');
+    end if;
+  end if;
+  if p_json ? 'it_type' and coalesce((p_json ->> 'it_type')::smallint, 0) not in (1, 2, 3) then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_TYPE_INVALID');
+  end if;
+  begin
+    _opening := (p_json ->> 'vl_opening')::numeric;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_VALUE_INVALID');
+  end;
+  if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_STATUS_INVALID');
+  end if;
+
+  if _vc_action = 'U' then
+    _nr_account := (p_json ->> 'nr_account')::bigint;
+    if _nr_account is null then
+      raise exception '%', ad.fn_message('FIN_ACCOUNT_REQUIRED');
+    end if;
+    if not exists (select 1 from od.fin_account a
+                    where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _nr_account) then
+      raise exception '%', ad.fn_message('FIN_ACCOUNT_NOT_FOUND');
+    end if;
+  end if;
+  if _vc_name is not null and exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+          and lower(a.vc_name) = lower(_vc_name) and a.nr_account is distinct from _nr_account) then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+  end if;
+
+  if _vc_action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(a.nr_account), 0) + 1 into _nr_account
+      from od.fin_account a where a.nr_company = _nr_company and a.nr_branch = _nr_branch;
+    insert into od.fin_account (nr_company, nr_branch, nr_account, vc_name, it_type, vl_opening, nr_operator)
+    values (_nr_company, _nr_branch, _nr_account, _vc_name,
+            coalesce((p_json ->> 'it_type')::smallint, 1), coalesce(_opening, 0), _nr_user)
+    returning * into _row;
+  else
+    update od.fin_account a set
+      vc_name    = case when p_json ? 'vc_name'    then _vc_name                              else a.vc_name end,
+      it_type    = case when p_json ? 'it_type'    then (p_json ->> 'it_type')::smallint      else a.it_type end,
+      vl_opening = case when p_json ? 'vl_opening' then coalesce(_opening, 0)                 else a.vl_opening end,
+      it_status  = case when p_json ? 'it_status'  then (p_json ->> 'it_status')::smallint    else a.it_status end
+    where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _nr_account
+    returning a.* into _row;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'fin_account', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_account::text,
+    format('Conta %s %s', _row.vc_name, case when _vc_action = 'I' then 'cadastrada' else 'alterada' end),
+    jsonb_build_object('vc_name', _row.vc_name, 'it_type', _row.it_type, 'vl_opening', _row.vl_opening,
+                       'it_status', _row.it_status));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_account', _nr_account);
+end;
+$$;
+
+revoke all on function ad.fin_account_save(jsonb) from public, anon;
+grant execute on function ad.fin_account_save(jsonb) to authenticated;

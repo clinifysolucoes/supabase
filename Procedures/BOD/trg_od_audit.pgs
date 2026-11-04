@@ -65,3 +65,19 @@ create or replace trigger professional_schedule_audit
 create or replace trigger appointment_audit
   before insert or update on od.appointment
   for each row execute function ad.trg_audit();
+
+create or replace trigger fin_account_audit
+  before insert or update on od.fin_account
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_category_audit
+  before insert or update on od.fin_category
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_supplier_audit
+  before insert or update on od.fin_supplier
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_entry_audit
+  before insert or update on od.fin_entry
+  for each row execute function ad.trg_audit();
