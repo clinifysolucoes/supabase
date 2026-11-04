@@ -1,0 +1,124 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_setup(jsonb)                                           ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_setup')             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Primeiro uso do financeiro da filial: cria as contas e o plano de contas
+    padrao, so o que ainda nao existe (pode rodar de novo).
+      contas:     Caixa (tipo 1) e Banco (tipo 2), se a filial nao tem nenhuma
+      receitas:   Tratamentos, Consultas, Outras receitas, se nao tem nenhuma
+      despesas:   as despesas ativas da precificacao (od.clinic_expense) com o
+                  tipo de custo (fixa e eventual anual -> fixo; variavel e
+                  publicidade -> variavel) e, se a filial nao tem nenhuma,
+                  Materiais, Laboratorio, Equipamentos e Outras despesas
+    Exige permissao de CRIAR na tela FINANCE. Grava ad.event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+
+  Output jsonb: {"qt_accounts", "qt_categories"}  (quantos foram criados)
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
+*/
+create or replace function ad.fin_setup(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user     bigint;
+  _nr_company  bigint;
+  _nr_branch   bigint;
+  _qt_acc      integer := 0;
+  _qt_cat      integer := 0;
+  _n           integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_setup');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+
+  if not exists (select 1 from od.fin_account a where a.nr_company = _nr_company and a.nr_branch = _nr_branch) then
+    insert into od.fin_account (nr_company, nr_branch, nr_account, vc_name, it_type, nr_operator)
+    values (_nr_company, _nr_branch, 1, 'Caixa', 1, _nr_user),
+           (_nr_company, _nr_branch, 2, 'Banco', 2, _nr_user);
+    _qt_acc := 2;
+  end if;
+
+  if not exists (select 1 from od.fin_category c where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.it_kind = 1) then
+    insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, nr_operator)
+    select _nr_company, _nr_branch,
+           coalesce((select max(c.nr_category) from od.fin_category c
+                      where c.nr_company = _nr_company and c.nr_branch = _nr_branch), 0) + x.ord,
+           x.name, 1, _nr_user
+      from unnest(array['Tratamentos', 'Consultas', 'Outras receitas']) with ordinality x(name, ord);
+    _qt_cat := _qt_cat + 3;
+  end if;
+
+  /* despesas da precificacao que ainda nao sao categoria                    */
+  with src as (
+    select distinct on (lower(trim(e.vc_name))) trim(e.vc_name) as name,
+           case when e.it_type in (1, 3) then 1 else 2 end as cost_type
+      from od.clinic_expense e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_status = 1
+       and length(trim(e.vc_name)) > 0
+       and not exists (select 1 from od.fin_category c
+                        where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.it_kind = 2
+                          and lower(c.vc_name) = lower(trim(e.vc_name)))
+     order by lower(trim(e.vc_name)), e.nr_expense
+  ), ins as (
+    insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, it_cost_type, nr_operator)
+    select _nr_company, _nr_branch,
+           coalesce((select max(c.nr_category) from od.fin_category c
+                      where c.nr_company = _nr_company and c.nr_branch = _nr_branch), 0)
+             + row_number() over (order by s.name),
+           left(s.name, 60), 2, s.cost_type, _nr_user
+      from src s
+    returning 1
+  )
+  select count(*) into _n from ins;
+  _qt_cat := _qt_cat + _n;
+
+  if not exists (select 1 from od.fin_category c where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.it_kind = 2) then
+    insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, it_cost_type, nr_operator)
+    select _nr_company, _nr_branch,
+           coalesce((select max(c.nr_category) from od.fin_category c
+                      where c.nr_company = _nr_company and c.nr_branch = _nr_branch), 0) + x.ord,
+           x.name, 2, x.cost_type, _nr_user
+      from (values (1, 'Materiais', 2), (2, 'Laboratório', 2), (3, 'Equipamentos', 3), (4, 'Outras despesas', 4))
+           x(ord, name, cost_type);
+    _qt_cat := _qt_cat + 4;
+  end if;
+
+  if _qt_acc + _qt_cat > 0 then
+    perform ad.fn_event_log(
+      _nr_user, _nr_company, _nr_branch, 'FINANCE', 'CREATE', 'fin_setup', _nr_company::text || '/' || _nr_branch::text,
+      format('Financeiro configurado: %s contas e %s categorias', _qt_acc, _qt_cat),
+      jsonb_build_object('qt_accounts', _qt_acc, 'qt_categories', _qt_cat));
+  end if;
+
+  return jsonb_build_object('qt_accounts', _qt_acc, 'qt_categories', _qt_cat);
+end;
+$$;
+
+revoke all on function ad.fin_setup(jsonb) from public, anon;
+grant execute on function ad.fin_setup(jsonb) to authenticated;

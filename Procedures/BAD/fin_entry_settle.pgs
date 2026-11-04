@@ -1,0 +1,156 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_entry_settle(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_entry_settle')      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
+      PAY     em aberto -> pago: conta (obrigatoria, ou a do lancamento), data
+              (default hoje no fuso da filial), valor pago (default o valor) e
+              forma de pagamento
+      UNDO    pago -> em aberto (limpa data e valor pagos)
+      CANCEL  em aberto -> cancelado; com id_following, cancela tambem as
+              proximas parcelas/repeticoes em aberto do mesmo grupo
+      REOPEN  cancelado -> em aberto
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    nr_company         bigint   obrigatorio
+    nr_branch          bigint   obrigatorio
+    nr_entry           bigint   obrigatorio
+    vc_action          text     obrigatorio PAY | UNDO | CANCEL | REOPEN
+    nr_account         bigint   PAY
+    dt_paid            date     PAY (opcional)
+    vl_paid            numeric  PAY (opcional, > 0)
+    it_payment_method  integer  PAY (opcional)
+    id_following       boolean  CANCEL (opcional)
+
+  Output jsonb: {"nr_entry", "it_status", "qt_changed"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, FIN_ENTRY_REQUIRED,
+    FIN_ENTRY_NOT_FOUND, FIN_SETTLE_ACTION_INVALID, FIN_SETTLE_STATUS_INVALID, FIN_ENTRY_VALUE_INVALID,
+    FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID
+*/
+create or replace function ad.fin_entry_settle(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_entry   bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _cur        od.fin_entry%rowtype;
+  _account    bigint;
+  _dt_paid    date;
+  _vl_paid    numeric;
+  _method     smallint;
+  _tz         text;
+  _status     smallint;
+  _n          integer := 1;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_entry_settle');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_update')::boolean then
+    raise exception '%', ad.fn_message('FIN_ENTRY_FORBIDDEN');
+  end if;
+  if _action not in ('PAY', 'UNDO', 'CANCEL', 'REOPEN') then
+    raise exception '%', ad.fn_message('FIN_SETTLE_ACTION_INVALID');
+  end if;
+
+  _nr_entry := (p_json ->> 'nr_entry')::bigint;
+  if _nr_entry is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_REQUIRED');
+  end if;
+  select * into _cur from od.fin_entry e
+   where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('FIN_ENTRY_NOT_FOUND');
+  end if;
+  if (_action in ('PAY', 'CANCEL') and _cur.it_status <> 1)
+     or (_action = 'UNDO' and _cur.it_status <> 2)
+     or (_action = 'REOPEN' and _cur.it_status <> 90) then
+    raise exception '%', ad.fn_message('FIN_SETTLE_STATUS_INVALID');
+  end if;
+
+  if _action = 'PAY' then
+    begin
+      _account := coalesce((p_json ->> 'nr_account')::bigint, _cur.nr_account);
+      _dt_paid := (p_json ->> 'dt_paid')::date;
+      _vl_paid := round(coalesce((p_json ->> 'vl_paid')::numeric, _cur.vl_amount), 2);
+      _method  := coalesce((p_json ->> 'it_payment_method')::smallint, _cur.it_payment_method);
+    exception when others then
+      raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
+    end;
+    if _account is null or not exists (
+         select 1 from od.fin_account a
+          where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _account
+            and a.it_status = 1) then
+      raise exception '%', ad.fn_message('FIN_ENTRY_ACCOUNT_INVALID');
+    end if;
+    if _vl_paid <= 0 then
+      raise exception '%', ad.fn_message('FIN_ENTRY_AMOUNT_INVALID');
+    end if;
+    if _method is not null and _method not in (1, 2, 3, 4, 5, 6, 7, 9) then
+      raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_INVALID');
+    end if;
+    if _dt_paid is null then
+      select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+      _dt_paid := (now() at time zone _tz)::date;
+    end if;
+    update od.fin_entry e set
+      it_status = 2, nr_account = _account, dt_paid = _dt_paid, vl_paid = _vl_paid, it_payment_method = _method
+    where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
+    _status := 2;
+  elsif _action = 'UNDO' then
+    update od.fin_entry e set it_status = 1, dt_paid = null, vl_paid = null
+    where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
+    _status := 1;
+  elsif _action = 'CANCEL' then
+    update od.fin_entry e set it_status = 90
+    where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_status = 1
+      and (e.nr_entry = _nr_entry
+           or (coalesce((p_json ->> 'id_following')::boolean, false) and _cur.uu_group is not null
+               and e.uu_group = _cur.uu_group and e.nr_installment > _cur.nr_installment));
+    get diagnostics _n = row_count;
+    _status := 90;
+  else
+    update od.fin_entry e set it_status = 1
+    where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
+    _status := 1;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'UPDATE',
+    'fin_entry', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_entry::text,
+    format('%s %s: %s',
+           case when _cur.it_kind = 1 then 'Conta a receber' else 'Conta a pagar' end,
+           left(_cur.vc_description, 60),
+           case _action when 'PAY' then 'paga' when 'UNDO' then 'pagamento desfeito'
+                        when 'CANCEL' then 'cancelada' else 'reaberta' end),
+    jsonb_build_object('vc_action', _action, 'vl_paid', _vl_paid, 'dt_paid', _dt_paid,
+                       'nr_account', _account, 'qt_changed', _n));
+
+  return jsonb_build_object('nr_entry', _nr_entry, 'it_status', _status, 'qt_changed', _n);
+end;
+$$;
+
+revoke all on function ad.fin_entry_settle(jsonb) from public, anon;
+grant execute on function ad.fin_entry_settle(jsonb) to authenticated;

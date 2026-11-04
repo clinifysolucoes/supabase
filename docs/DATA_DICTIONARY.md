@@ -56,6 +56,10 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.professional`](#odprofessional) | Profissional da agenda | Quem atende na filial (dentista, HOF, ASB...): uma coluna na agenda, com cor própria, intervalo dos horários e, opcionalmente, o usuário do sistema que é este profissional. nr_professional é sequencial por filial. |
 | [`od.professional_schedule`](#odprofessionalschedule) | Horário de atendimento | Faixas de atendimento do profissional por dia da semana (várias por dia, sem sobrepor). Fora delas a agenda mostra o horário como indisponível. Substituído inteiro a cada professional_save com schedules. |
 | [`od.appointment`](#odappointment) | Agendamento | Um horário na agenda da filial: consulta (paciente + profissional, procedimento opcional) ou compromisso (bloqueio com título, de um profissional ou da clínica toda), com a situação do atendimento. Datas com fuso; a agenda é lida no fuso da filial. Conflito de horário checado em appointment_save (encaixe libera). nr_appointment é sequencial por filial. |
+| [`od.fin_account`](#odfinaccount) | Conta financeira | Conta onde o dinheiro entra e sai na filial (caixa, banco, cofre), com saldo inicial. Saldo = saldo inicial + receitas pagas − despesas pagas (od.fn_fin_balance). nr_account é sequencial por filial. |
+| [`od.fin_category`](#odfincategory) | Categoria financeira (plano de contas) | Plano de contas da filial: categorias de receita e de despesa. A despesa tem o tipo de custo (fixo, variável, investimento, outros), como as despesas da precificação, de onde fin_setup cria as primeiras. nr_category é sequencial por filial. |
+| [`od.fin_supplier`](#odfinsupplier) | Fornecedor | Fornecedores da filial, usados nas contas a pagar. CPF/CNPJ e telefone só com dígitos. nr_supplier é sequencial por filial. |
+| [`od.fin_entry`](#odfinentry) | Lançamento financeiro | Conta a receber ou a pagar da filial: categoria, conta, fornecedor ou paciente, descrição, valor, vencimento, competência, forma de pagamento, pagamento (data e valor) e situação. Parcelas e repetições mensais ficam ligadas pelo mesmo uu_group. nr_entry é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
 
@@ -89,6 +93,13 @@ erDiagram
   branch ||--o{ professional : "profissionais"
   professional ||--o{ professional_schedule : "horário de atendimento"
   app_user |o--o{ professional : "é o profissional"
+  branch ||--o{ fin_account : "contas"
+  branch ||--o{ fin_category : "plano de contas"
+  branch ||--o{ fin_supplier : "fornecedores"
+  fin_category ||--o{ fin_entry : "classifica"
+  fin_account |o--o{ fin_entry : "movimenta"
+  fin_supplier |o--o{ fin_entry : "cobra"
+  patient |o--o{ fin_entry : "paga"
   branch ||--o{ appointment : "agenda"
   patient |o--o{ appointment : "consultas"
   professional |o--o{ appointment : "atende"
@@ -347,6 +358,59 @@ erDiagram
     boolean id_all_day
     boolean id_fit_in
     smallint it_status
+    bigint nr_user_created FK
+  }
+  fin_account {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_account PK
+    varchar vc_name UK
+    smallint it_type
+    numeric vl_opening
+    smallint it_status
+  }
+  fin_category {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_category PK
+    varchar vc_name UK
+    smallint it_kind
+    smallint it_cost_type
+    smallint it_status
+  }
+  fin_supplier {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_supplier PK
+    varchar vc_name UK
+    varchar vc_document
+    varchar vc_phone
+    varchar vc_email
+    varchar vc_notes
+    smallint it_status
+  }
+  fin_entry {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_entry PK
+    smallint it_kind
+    bigint nr_category FK
+    bigint nr_account FK
+    bigint nr_supplier FK
+    bigint nr_patient FK
+    varchar vc_description
+    numeric vl_amount
+    date dt_due
+    date dt_competence
+    smallint it_payment_method
+    date dt_paid
+    numeric vl_paid
+    smallint it_status
+    uuid uu_group
+    smallint nr_installment
+    smallint qt_installments
+    boolean id_recurring
+    varchar vc_notes
     bigint nr_user_created FK
   }
   patient {
@@ -915,6 +979,107 @@ Um horário na agenda da filial: consulta (paciente + profissional, procedimento
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.fin_account
+
+**Conta financeira**
+
+Conta onde o dinheiro entra e sai na filial (caixa, banco, cofre), com saldo inicial. Saldo = saldo inicial + receitas pagas − despesas pagas (od.fn_fin_balance). nr_account é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_account_save e fin_setup (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_account` | `bigint` | PK3 | NOT NULL |  | Número sequencial da conta na filial. |
+| `vc_name` | `varchar(60)` | UK | NOT NULL |  | Nome da conta (único na filial). |
+| `it_type` | `smallint` |  | NOT NULL | `1` | Tipo da conta. Valores: 1 = Caixa; 2 = Banco; 3 = Cofre. |
+| `vl_opening` | `numeric(14,2)` |  | NOT NULL | `0` | Saldo inicial (R$; pode ser negativo). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação da conta. Valores: 1 = Ativa; 90 = Inativa. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.fin_category
+
+**Categoria financeira (plano de contas)**
+
+Plano de contas da filial: categorias de receita e de despesa. A despesa tem o tipo de custo (fixo, variável, investimento, outros), como as despesas da precificação, de onde fin_setup cria as primeiras. nr_category é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_category_save e fin_setup (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_category` | `bigint` | PK3 | NOT NULL |  | Número sequencial da categoria na filial. |
+| `vc_name` | `varchar(60)` | UK | NOT NULL |  | Nome da categoria (único por tipo na filial). |
+| `it_kind` | `smallint` |  | NOT NULL |  | Receita ou despesa (não muda depois de criada). Valores: 1 = Receita; 2 = Despesa. |
+| `it_cost_type` | `smallint` |  | NULL |  | Tipo de custo da despesa (nulo na receita). Valores: 1 = Custo fixo; 2 = Custo variável; 3 = Investimento; 4 = Outros. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação da categoria. Valores: 1 = Ativa; 90 = Inativa. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.fin_supplier
+
+**Fornecedor**
+
+Fornecedores da filial, usados nas contas a pagar. CPF/CNPJ e telefone só com dígitos. nr_supplier é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_supplier_save (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_supplier` | `bigint` | PK3 | NOT NULL |  | Número sequencial do fornecedor na filial. |
+| `vc_name` | `varchar(120)` | UK | NOT NULL |  | Nome / razão social (único na filial). |
+| `vc_document` | `varchar(14)` |  | NULL |  | CPF (11, validado) ou CNPJ (14, alfanumérico ok), só dígitos/letras. |
+| `vc_phone` | `varchar(11)` |  | NULL |  | Telefone, só dígitos (DDD + número). |
+| `vc_email` | `varchar(120)` |  | NULL |  | E-mail em minúsculas. |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observações. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do fornecedor. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.fin_entry
+
+**Lançamento financeiro**
+
+Conta a receber ou a pagar da filial: categoria, conta, fornecedor ou paciente, descrição, valor, vencimento, competência, forma de pagamento, pagamento (data e valor) e situação. Parcelas e repetições mensais ficam ligadas pelo mesmo uu_group. nr_entry é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_entry_save e fin_entry_settle (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_entry` | `bigint` | PK3 | NOT NULL |  | Número sequencial do lançamento na filial. |
+| `it_kind` | `smallint` |  | NOT NULL |  | A receber ou a pagar. Valores: 1 = A receber (receita); 2 = A pagar (despesa). |
+| `nr_category` | `bigint` | FK → `fin_category.nr_category` | NOT NULL |  | Categoria do plano de contas (do mesmo tipo). |
+| `nr_account` | `bigint` | FK → `fin_account.nr_account` | NULL |  | Conta (obrigatória quando pago). |
+| `nr_supplier` | `bigint` | FK → `fin_supplier.nr_supplier` | NULL |  | Fornecedor (contas a pagar). |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NULL |  | Paciente (contas a receber). |
+| `vc_description` | `varchar(140)` |  | NOT NULL |  | Descrição (parcelas ganham " (n/N)"). |
+| `vl_amount` | `numeric(14,2)` |  | NOT NULL |  | Valor (R$, > 0). |
+| `dt_due` | `date` |  | NOT NULL |  | Vencimento. |
+| `dt_competence` | `date` |  | NOT NULL |  | Competência (mês a que o valor se refere; padrão = vencimento). |
+| `it_payment_method` | `smallint` |  | NULL |  | Forma de pagamento. Valores: 1 = Dinheiro; 2 = Pix; 3 = Cartão de crédito; 4 = Cartão de débito; 5 = Transferência; 6 = Boleto; 7 = Cheque; 9 = Outro. |
+| `dt_paid` | `date` |  | NULL |  | Data do pagamento (só quando pago). |
+| `vl_paid` | `numeric(14,2)` |  | NULL |  | Valor pago (só quando pago; entra no saldo da conta). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação (vencido = em aberto com vencimento antes de hoje). Valores: 1 = Em aberto; 2 = Pago; 90 = Cancelado. |
+| `uu_group` | `uuid` |  | NULL |  | Liga as parcelas / repetições criadas juntas. |
+| `nr_installment` | `smallint` |  | NOT NULL | `1` | Número da parcela / repetição. |
+| `qt_installments` | `smallint` |  | NOT NULL | `1` | Total de parcelas / repetições do grupo. |
+| `id_recurring` | `boolean` |  | NOT NULL | `false` | Conta recorrente (mesmo valor todo mês) em vez de parcelada. |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observações. |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Quem lançou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.patient
 
 **Paciente**
@@ -1035,6 +1200,17 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.professional_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
 | `ad.specialty_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) uma especialidade: nome, lucro desejado (null = padrão da filial) e situação. Grava event_log. |
+| `ad.fin_setup(p_json jsonb)` | authenticated | Primeiro uso do financeiro: cria Caixa e Banco, receitas padrão e as despesas a partir das despesas ativas da precificação (com o tipo de custo), só o que falta. Permissão criar na tela FINANCE. Grava event_log. |
+| `ad.fin_catalog(p_json jsonb)` | authenticated | Cadastros do financeiro: contas com o saldo de hoje, plano de contas (com quantos lançamentos usam cada categoria) e fornecedores, e a permissão do usuário. Exige leitura na tela FINANCE. |
+| `ad.fin_account_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) uma conta: nome, tipo (caixa, banco, cofre), saldo inicial e situação. Grava event_log. |
+| `ad.fin_category_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) uma categoria do plano de contas: nome, receita/despesa (só na criação), tipo de custo da despesa e situação. Grava event_log. |
+| `ad.fin_supplier_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um fornecedor: nome, CPF/CNPJ, telefone, e-mail, observações e situação (documentos e telefone só com dígitos). Grava event_log sem documento e contato. |
+| `ad.fin_entry_save(p_json jsonb)` | authenticated | Cria contas a receber/pagar (I: única, parcelada em N meses ou recorrente por N meses; pode nascer paga) ou altera parcialmente um lançamento (U; pago só muda descrição, categoria e observações; cancelado não muda). Grava event_log sem dados pessoais. |
+| `ad.fin_entry_settle(p_json jsonb)` | authenticated | Baixa e situação de um lançamento (permissão alterar): PAY (conta, data, valor e forma), UNDO (desfaz o pagamento), CANCEL (com id_following cancela também as próximas parcelas em aberto) e REOPEN. Grava event_log. |
+| `ad.fin_entry_list(p_json jsonb)` | authenticated | Contas a receber ou a pagar num período (até 400 dias) por situação (em aberto, vencidas, pagas, canceladas, todas), conta, categoria, fornecedor, paciente e busca; com totais (em aberto, vencido, pago, por tipo de custo). Exige leitura na tela FINANCE. |
+| `ad.fin_overview(p_json jsonb)` | authenticated | Visão geral do financeiro no dia: saldo por conta, a receber e a pagar no dia, vencidos, o mês (recebido, pago, a receber, a pagar), próximos vencimentos e se a filial já foi configurada. Exige leitura na tela FINANCE. |
+| `ad.fin_cashflow(p_json jsonb)` | authenticated | Fluxo de caixa de um mês, dia a dia: realizado (pago) e previsto (em aberto; vencidos antes do mês entram no dia 1), saldo acumulado realizado e projetado a partir do saldo anterior. Exige leitura na tela FINANCE. |
+| `ad.fin_statement(p_json jsonb)` | authenticated | Extrato de uma conta (ou de todas as ativas) no período: saldo inicial, movimentos pagos com o saldo após cada um, entradas, saídas e saldo final. Exige leitura na tela FINANCE. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
 | `ad.patient_get(p_json jsonb)` | authenticated | Ficha completa de um paciente (todas as colunas, mais qt_age) e as notas gerais ativas, da mais recente para a mais antiga, com o nome do autor. Exige leitura na tela PATIENTS. |
 | `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). |
@@ -1058,6 +1234,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fn_cnpj_normalize(p_vc_cnpj text)` | interna | Remove pontuação, maiúsculas, NULL para vazio. |
 | `ad.fn_cpf_is_valid(p_vc_cpf text)` | interna | Dígitos verificadores do CPF. |
 | `ad.fn_email_is_valid(p_vc_email text)` | interna | Validação sintática mínima de e-mail de contato. |
+| `od.fn_fin_balance(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint, p_dt_before date)` | interna | Saldo realizado de uma conta (ou de todas as ativas, com p_nr_account nulo) antes de p_dt_before: saldo inicial + receitas pagas − despesas pagas (sem data = tudo que já foi pago). |
 | `od.fn_pricing_calc(p_json jsonb)` | interna | Fórmula do preço: custo direto = materiais + laboratório + tempo × estrutura/h + tempo × hora clínica; preço = custo ÷ (1 − cartão − comissão − taxas − IR − lucro) no regime PJ (IR sobre o faturamento) ou (1 − IR) × custo ÷ ((1 − IR)(1 − cartão − comissão − taxas) − lucro) no regime PF (IR sobre o lucro); preço mínimo com lucro zero. Devolve a decomposição e id_valid. Com vl_current_price (valor cobrado hoje) devolve também o lucro que sobra com ele e it_price_status: 0 sem valor, 1 ok, 2 abaixo do sugerido, 3 abaixo do mínimo, 4 abaixo do custo direto. |
 | `od.fn_pricing_context(p_nr_company bigint, p_nr_branch bigint)` | interna | Parâmetros da filial (ou padrões) e resumo: custo mensal das despesas (eventuais ÷ 12), horas por mês, horas produtivas, custo da estrutura por hora (calculado e o efetivo, que pode ser o valor manual), soma das taxas ativas e IR do regime. |
 | `ad.fn_screen_permission(p_nr_company bigint, p_nr_branch bigint, p_vc_screen text)` | interna | Permissão efetiva do usuário logado numa tela e filial ({id_read, id_create, id_update}): filial acessível + nível 100 ou união das linhas de access_profile_screen dos perfis do usuário. Usada pelas RPCs de negócio (schema od). |
@@ -1161,6 +1338,57 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `EVENT_LOG_LIST_COMPANY_REQUIRED` | `event_log_list` |  |
 | `EVENT_LOG_LIST_FORBIDDEN` | `event_log_list` |  |
 | `EVENT_LOG_LIST_PERIOD_INVALID` | `event_log_list` |  |
+| `FIN_ACCOUNT_ACTION_INVALID` | `fin_account_save` |  |
+| `FIN_ACCOUNT_FORBIDDEN` | `fin_account_save` |  |
+| `FIN_ACCOUNT_NAME_IN_USE` | `fin_account_save` |  |
+| `FIN_ACCOUNT_NAME_REQUIRED` | `fin_account_save` |  |
+| `FIN_ACCOUNT_NOT_FOUND` | `fin_account_save` |  |
+| `FIN_ACCOUNT_REQUIRED` | `fin_account_save` |  |
+| `FIN_ACCOUNT_STATUS_INVALID` | `fin_account_save` |  |
+| `FIN_ACCOUNT_TYPE_INVALID` | `fin_account_save` |  |
+| `FIN_ACCOUNT_VALUE_INVALID` | `fin_account_save` |  |
+| `FIN_CATEGORY_ACTION_INVALID` | `fin_category_save` |  |
+| `FIN_CATEGORY_COST_TYPE_INVALID` | `fin_category_save` |  |
+| `FIN_CATEGORY_FORBIDDEN` | `fin_category_save` |  |
+| `FIN_CATEGORY_KIND_INVALID` | `fin_category_save` |  |
+| `FIN_CATEGORY_NAME_IN_USE` | `fin_category_save` |  |
+| `FIN_CATEGORY_NAME_REQUIRED` | `fin_category_save` |  |
+| `FIN_CATEGORY_NOT_FOUND` | `fin_category_save` |  |
+| `FIN_CATEGORY_REQUIRED` | `fin_category_save` |  |
+| `FIN_CATEGORY_STATUS_INVALID` | `fin_category_save` |  |
+| `FIN_ENTRY_ACCOUNT_INVALID` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_ENTRY_ACTION_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_AMOUNT_INVALID` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_ENTRY_CANCELLED_LOCKED` | `fin_entry_save` |  |
+| `FIN_ENTRY_CATEGORY_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_DESCRIPTION_REQUIRED` | `fin_entry_save` |  |
+| `FIN_ENTRY_DUE_REQUIRED` | `fin_entry_save` |  |
+| `FIN_ENTRY_FORBIDDEN` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_ENTRY_INSTALLMENTS_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_KIND_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_METHOD_INVALID` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_ENTRY_NOT_FOUND` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_ENTRY_PAID_ACCOUNT_REQUIRED` | `fin_entry_save` |  |
+| `FIN_ENTRY_PAID_LOCKED` | `fin_entry_save` |  |
+| `FIN_ENTRY_PATIENT_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_REQUIRED` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_ENTRY_SUPPLIER_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_VALUE_INVALID` | `fin_entry_save`, `fin_entry_settle` |  |
+| `FIN_LIST_FILTER_INVALID` | `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement` |  |
+| `FIN_SETTLE_ACTION_INVALID` | `fin_entry_settle` |  |
+| `FIN_SETTLE_STATUS_INVALID` | `fin_entry_settle` |  |
+| `FIN_SUPPLIER_ACTION_INVALID` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_DOCUMENT_INVALID` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_EMAIL_INVALID` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_FORBIDDEN` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_NAME_IN_USE` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_NAME_REQUIRED` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_NOT_FOUND` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_PHONE_INVALID` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_REQUIRED` | `fin_supplier_save` |  |
+| `FIN_SUPPLIER_STATUS_INVALID` | `fin_supplier_save` |  |
+| `FINANCE_BRANCH_REQUIRED` | `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement` |  |
+| `FINANCE_FORBIDDEN` | `fin_setup`, `fin_catalog`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement` |  |
 | `MATERIAL_ACTION_INVALID` | `material_save` |  |
 | `MATERIAL_FORBIDDEN` | `material_save` |  |
 | `MATERIAL_NAME_IN_USE` | `material_save` | Name |
@@ -1258,5 +1486,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

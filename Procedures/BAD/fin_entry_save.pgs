@@ -1,0 +1,270 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_entry_save(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_entry_save')        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Conta a receber (it_kind 1) ou a pagar (it_kind 2).
+      vc_action = 'I'  cria -> permissao CRIAR
+        qt_installments > 1: divide vl_amount em parcelas mensais (centavos
+                             que sobram na ultima), descricao "(1/3)"
+        id_recurring + qt_repeat > 1: repete o mesmo valor todo mes
+        (parcelas e repeticoes ficam ligadas pelo mesmo uu_group)
+        id_paid: ja nasce paga (so lancamento unico; exige conta)
+      vc_action = 'U'  altera parcialmente UM lancamento -> permissao ALTERAR
+        pago so muda descricao, categoria e observacoes (desfaca o pagamento
+        para mudar valor, data ou conta); cancelado nao muda.
+    Categoria tem de ser do mesmo tipo (receita/despesa) e ativa; conta e
+    fornecedor ativos; paciente da filial. Grava ad.event_log sem dados
+    pessoais (so o numero do paciente).
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    vc_action          text     obrigatorio 'I' | 'U'
+    nr_company         bigint   obrigatorio
+    nr_branch          bigint   obrigatorio
+    nr_entry           bigint   obrigatorio em 'U'
+    it_kind            integer  obrigatorio em 'I': 1 receber | 2 pagar
+    nr_category        bigint   obrigatorio em 'I'
+    nr_account         bigint   opcional (obrigatorio com id_paid)
+    nr_supplier        bigint   opcional
+    nr_patient         bigint   opcional
+    vc_description     text     obrigatorio em 'I' (ate 140; parcelas ganham " (n/N)")
+    vl_amount          numeric  obrigatorio em 'I' (> 0; total quando parcelado)
+    dt_due             date     obrigatorio em 'I' (1o vencimento)
+    dt_competence      date     opcional (default = vencimento de cada parcela)
+    it_payment_method  integer  opcional 1 dinheiro | 2 pix | 3 cartao credito | 4 cartao debito |
+                                5 transferencia | 6 boleto | 7 cheque | 9 outro
+    vc_notes           text     opcional (ate 500)
+    qt_installments    integer  opcional 1..120 (so 'I')
+    id_recurring       boolean  opcional (so 'I')
+    qt_repeat          integer  opcional 1..60 com id_recurring (default 12)
+    id_paid            boolean  opcional (so 'I', lancamento unico)
+    dt_paid            date     opcional com id_paid (default dt_due)
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_entry" (o primeiro), "qt_created", "uu_group"}
+
+  Errors: VERSION_MISMATCH, FIN_ENTRY_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN,
+    FIN_ENTRY_VALUE_INVALID, FIN_ENTRY_KIND_INVALID, FIN_ENTRY_CATEGORY_INVALID, FIN_ENTRY_ACCOUNT_INVALID,
+    FIN_ENTRY_SUPPLIER_INVALID, FIN_ENTRY_PATIENT_INVALID, FIN_ENTRY_DESCRIPTION_REQUIRED,
+    FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_DUE_REQUIRED, FIN_ENTRY_METHOD_INVALID, FIN_ENTRY_INSTALLMENTS_INVALID,
+    FIN_ENTRY_PAID_ACCOUNT_REQUIRED, FIN_ENTRY_REQUIRED, FIN_ENTRY_NOT_FOUND, FIN_ENTRY_PAID_LOCKED,
+    FIN_ENTRY_CANCELLED_LOCKED
+*/
+create or replace function ad.fin_entry_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user     bigint;
+  _vc_action   text;
+  _nr_company  bigint;
+  _nr_branch   bigint;
+  _nr_entry    bigint;
+  _first       bigint;
+  _perm        jsonb;
+  _cur         od.fin_entry%rowtype;
+  _new         od.fin_entry%rowtype;
+  _qt_inst     integer;
+  _qt_repeat   integer;
+  _recurring   boolean;
+  _paid        boolean;
+  _dt_paid     date;
+  _n           integer;
+  _i           integer;
+  _part        numeric;
+  _group       uuid;
+  _key         text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_entry_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('FIN_ENTRY_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_FORBIDDEN');
+  end if;
+
+  if _vc_action = 'U' then
+    _nr_entry := (p_json ->> 'nr_entry')::bigint;
+    if _nr_entry is null then
+      raise exception '%', ad.fn_message('FIN_ENTRY_REQUIRED');
+    end if;
+    select * into _cur from od.fin_entry e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('FIN_ENTRY_NOT_FOUND');
+    end if;
+    if _cur.it_status = 90 then
+      raise exception '%', ad.fn_message('FIN_ENTRY_CANCELLED_LOCKED');
+    end if;
+    if _cur.it_status = 2 then
+      for _key in select jsonb_object_keys(p_json) loop
+        if _key not in ('nr_version', 'vc_action', 'nr_company', 'nr_branch', 'nr_entry',
+                        'vc_description', 'nr_category', 'vc_notes') then
+          raise exception '%', ad.fn_message('FIN_ENTRY_PAID_LOCKED');
+        end if;
+      end loop;
+    end if;
+  else
+    _cur.it_status := 1;
+  end if;
+
+  /* linha resultante                                                        */
+  begin
+    _new := _cur;
+    _new.it_kind           := case when _vc_action = 'I' then (p_json ->> 'it_kind')::smallint else _cur.it_kind end;
+    _new.nr_category       := case when p_json ? 'nr_category'       then (p_json ->> 'nr_category')::bigint        else _cur.nr_category end;
+    _new.nr_account        := case when p_json ? 'nr_account'        then (p_json ->> 'nr_account')::bigint         else _cur.nr_account end;
+    _new.nr_supplier       := case when p_json ? 'nr_supplier'       then (p_json ->> 'nr_supplier')::bigint        else _cur.nr_supplier end;
+    _new.nr_patient        := case when p_json ? 'nr_patient'        then (p_json ->> 'nr_patient')::bigint         else _cur.nr_patient end;
+    _new.vc_description    := case when p_json ? 'vc_description'    then left(nullif(trim(p_json ->> 'vc_description'), ''), 140) else _cur.vc_description end;
+    _new.vl_amount         := case when p_json ? 'vl_amount'         then round((p_json ->> 'vl_amount')::numeric, 2) else _cur.vl_amount end;
+    _new.dt_due            := case when p_json ? 'dt_due'            then (p_json ->> 'dt_due')::date               else _cur.dt_due end;
+    _new.dt_competence     := case when p_json ? 'dt_competence'     then (p_json ->> 'dt_competence')::date        else _cur.dt_competence end;
+    _new.it_payment_method := case when p_json ? 'it_payment_method' then (p_json ->> 'it_payment_method')::smallint else _cur.it_payment_method end;
+    _new.vc_notes          := case when p_json ? 'vc_notes'          then left(nullif(trim(p_json ->> 'vc_notes'), ''), 500) else _cur.vc_notes end;
+    _qt_inst   := coalesce((p_json ->> 'qt_installments')::integer, 1);
+    _recurring := coalesce((p_json ->> 'id_recurring')::boolean, false);
+    _qt_repeat := coalesce((p_json ->> 'qt_repeat')::integer, 12);
+    _paid      := coalesce((p_json ->> 'id_paid')::boolean, false);
+    _dt_paid   := (p_json ->> 'dt_paid')::date;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
+  end;
+
+  if _new.it_kind is null or _new.it_kind not in (1, 2) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_KIND_INVALID');
+  end if;
+  if _new.nr_category is null or not exists (
+       select 1 from od.fin_category c
+        where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_category = _new.nr_category
+          and c.it_kind = _new.it_kind
+          and (c.it_status = 1 or _new.nr_category is not distinct from _cur.nr_category)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_CATEGORY_INVALID');
+  end if;
+  if _new.nr_account is not null and not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _new.nr_account
+          and (a.it_status = 1 or _new.nr_account is not distinct from _cur.nr_account)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_ACCOUNT_INVALID');
+  end if;
+  if _new.nr_supplier is not null and not exists (
+       select 1 from od.fin_supplier s
+        where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_supplier = _new.nr_supplier
+          and (s.it_status = 1 or _new.nr_supplier is not distinct from _cur.nr_supplier)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_SUPPLIER_INVALID');
+  end if;
+  if _new.nr_patient is not null and not exists (
+       select 1 from od.patient p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_PATIENT_INVALID');
+  end if;
+  if _new.vc_description is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_DESCRIPTION_REQUIRED');
+  end if;
+  if _new.vl_amount is null or _new.vl_amount <= 0 then
+    raise exception '%', ad.fn_message('FIN_ENTRY_AMOUNT_INVALID');
+  end if;
+  if _new.dt_due is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_DUE_REQUIRED');
+  end if;
+  if _new.it_payment_method is not null and _new.it_payment_method not in (1, 2, 3, 4, 5, 6, 7, 9) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_INVALID');
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'U' then
+    update od.fin_entry e set
+      nr_category       = _new.nr_category,
+      nr_account        = _new.nr_account,
+      nr_supplier       = _new.nr_supplier,
+      nr_patient        = _new.nr_patient,
+      vc_description    = _new.vc_description,
+      vl_amount         = _new.vl_amount,
+      dt_due            = _new.dt_due,
+      dt_competence     = coalesce(_new.dt_competence, _new.dt_due),
+      it_payment_method = _new.it_payment_method,
+      vc_notes          = _new.vc_notes
+    where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
+    _first := _nr_entry;
+    _n := 1;
+  else
+    if _qt_inst not between 1 and 120 or (_recurring and _qt_repeat not between 1 and 60)
+       or (_recurring and _qt_inst > 1) then
+      raise exception '%', ad.fn_message('FIN_ENTRY_INSTALLMENTS_INVALID');
+    end if;
+    _n := case when _recurring then _qt_repeat else _qt_inst end;
+    if _paid and (_n > 1 or _new.nr_account is null) then
+      raise exception '%', ad.fn_message('FIN_ENTRY_PAID_ACCOUNT_REQUIRED');
+    end if;
+    _group := case when _n > 1 then gen_random_uuid() end;
+
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(e.nr_entry), 0) into _nr_entry
+      from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    _first := _nr_entry + 1;
+
+    for _i in 1 .. _n loop
+      _part := case when _recurring or _n = 1 then _new.vl_amount
+                    when _i < _n then trunc(_new.vl_amount / _n, 2)
+                    else _new.vl_amount - trunc(_new.vl_amount / _n, 2) * (_n - 1) end;
+      insert into od.fin_entry (
+        nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, nr_supplier, nr_patient,
+        vc_description, vl_amount, dt_due, dt_competence, it_payment_method, dt_paid, vl_paid, it_status,
+        uu_group, nr_installment, qt_installments, id_recurring, vc_notes, nr_user_created, nr_operator)
+      values (
+        _nr_company, _nr_branch, _nr_entry + _i, _new.it_kind, _new.nr_category, _new.nr_account,
+        _new.nr_supplier, _new.nr_patient,
+        case when _n > 1 and not _recurring
+             then left(_new.vc_description, 130) || format(' (%s/%s)', _i, _n)
+             else _new.vc_description end,
+        _part,
+        (_new.dt_due + make_interval(months => _i - 1))::date,
+        (coalesce(_new.dt_competence, _new.dt_due) + make_interval(months => _i - 1))::date,
+        _new.it_payment_method,
+        case when _paid then coalesce(_dt_paid, _new.dt_due) end,
+        case when _paid then _part end,
+        case when _paid then 2 else 1 end,
+        _group, _i, _n, _recurring, _new.vc_notes, _nr_user, _nr_user);
+    end loop;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'fin_entry', _nr_company::text || '/' || _nr_branch::text || '/' || _first::text,
+    format('%s %s %s%s',
+           case when _new.it_kind = 1 then 'Conta a receber' else 'Conta a pagar' end,
+           left(_new.vc_description, 60),
+           case when _vc_action = 'I' then 'lançada' else 'alterada' end,
+           case when _n > 1 then format(' (%s lançamentos)', _n) else '' end),
+    jsonb_build_object('it_kind', _new.it_kind, 'vl_amount', _new.vl_amount, 'dt_due', _new.dt_due,
+                       'nr_category', _new.nr_category, 'nr_patient', _new.nr_patient,
+                       'qt_created', _n, 'id_recurring', _recurring, 'id_paid', _paid));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_entry', _first,
+                            'qt_created', _n, 'uu_group', _group);
+end;
+$$;
+
+revoke all on function ad.fin_entry_save(jsonb) from public, anon;
+grant execute on function ad.fin_entry_save(jsonb) to authenticated;

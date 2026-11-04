@@ -1,0 +1,131 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_overview(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_overview')          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Visao geral do financeiro da filial em dt_ref (default hoje, fuso da filial):
+      saldo de hoje por conta ativa e o total;
+      a receber e a pagar no dia, vencidos (valor e quantidade);
+      o mes de dt_ref: recebido, pago, a receber e a pagar (em aberto);
+      proximos 8 vencimentos em aberto a partir de dt_ref;
+      id_configured = filial ja tem conta e categoria (senao o app oferece fin_setup).
+    Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    dt_ref      date     opcional
+
+  Output jsonb:
+    {"dt_ref", "id_configured", "vl_balance",
+     "accounts": [{"nr_account", "vc_name", "it_type", "vl_balance"}],
+     "today":   {"vl_receivable", "qt_receivable", "vl_payable", "qt_payable"},
+     "overdue": {"vl_receivable", "qt_receivable", "vl_payable", "qt_payable"},
+     "month":   {"vl_received", "vl_paid", "vl_to_receive", "vl_to_pay"},
+     "next":    [{"nr_entry", "it_kind", "vc_description", "vl_amount", "dt_due", "vc_category"}],
+     "permission": {"id_read", "id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.fin_overview(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _ref        date;
+  _m0         date;
+  _m1         date;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_overview');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _ref := (p_json ->> 'dt_ref')::date;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _ref is null then
+    select (now() at time zone b.vc_timezone)::date into _ref
+      from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  end if;
+  _m0 := date_trunc('month', _ref)::date;
+  _m1 := (_m0 + interval '1 month')::date;
+
+  return jsonb_build_object(
+    'dt_ref', _ref,
+    'id_configured', exists (select 1 from od.fin_account a where a.nr_company = _nr_company and a.nr_branch = _nr_branch)
+                     and exists (select 1 from od.fin_category c where c.nr_company = _nr_company and c.nr_branch = _nr_branch),
+    'vl_balance', od.fn_fin_balance(_nr_company, _nr_branch, null, null),
+    'accounts', (select coalesce(jsonb_agg(
+                          jsonb_build_object('nr_account', a.nr_account, 'vc_name', a.vc_name, 'it_type', a.it_type,
+                                             'vl_balance', od.fn_fin_balance(_nr_company, _nr_branch, a.nr_account, null))
+                          order by a.it_type, a.vc_name), '[]'::jsonb)
+                   from od.fin_account a
+                  where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_status = 1),
+    'today', (select jsonb_build_object(
+                       'vl_receivable', coalesce(sum(e.vl_amount) filter (where e.it_kind = 1), 0),
+                       'qt_receivable', count(*) filter (where e.it_kind = 1),
+                       'vl_payable',    coalesce(sum(e.vl_amount) filter (where e.it_kind = 2), 0),
+                       'qt_payable',    count(*) filter (where e.it_kind = 2))
+                from od.fin_entry e
+               where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                 and e.it_status = 1 and e.dt_due = _ref),
+    'overdue', (select jsonb_build_object(
+                         'vl_receivable', coalesce(sum(e.vl_amount) filter (where e.it_kind = 1), 0),
+                         'qt_receivable', count(*) filter (where e.it_kind = 1),
+                         'vl_payable',    coalesce(sum(e.vl_amount) filter (where e.it_kind = 2), 0),
+                         'qt_payable',    count(*) filter (where e.it_kind = 2))
+                  from od.fin_entry e
+                 where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                   and e.it_status = 1 and e.dt_due < _ref),
+    'month', (select jsonb_build_object(
+                       'vl_received',   coalesce(sum(e.vl_paid) filter (where e.it_kind = 1 and e.it_status = 2
+                                                                         and e.dt_paid >= _m0 and e.dt_paid < _m1), 0),
+                       'vl_paid',       coalesce(sum(e.vl_paid) filter (where e.it_kind = 2 and e.it_status = 2
+                                                                         and e.dt_paid >= _m0 and e.dt_paid < _m1), 0),
+                       'vl_to_receive', coalesce(sum(e.vl_amount) filter (where e.it_kind = 1 and e.it_status = 1
+                                                                           and e.dt_due >= _m0 and e.dt_due < _m1), 0),
+                       'vl_to_pay',     coalesce(sum(e.vl_amount) filter (where e.it_kind = 2 and e.it_status = 1
+                                                                           and e.dt_due >= _m0 and e.dt_due < _m1), 0))
+                from od.fin_entry e
+               where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                 and ((e.dt_paid >= _m0 and e.dt_paid < _m1) or (e.dt_due >= _m0 and e.dt_due < _m1))),
+    'next', (select coalesce(jsonb_agg(x.j order by x.dt_due, x.nr_entry), '[]'::jsonb)
+               from (select e.dt_due, e.nr_entry,
+                            jsonb_build_object('nr_entry', e.nr_entry, 'it_kind', e.it_kind,
+                                               'vc_description', e.vc_description, 'vl_amount', e.vl_amount,
+                                               'dt_due', e.dt_due, 'vc_category', c.vc_name) as j
+                       from od.fin_entry e
+                       join od.fin_category c on c.nr_company = e.nr_company and c.nr_branch = e.nr_branch
+                                             and c.nr_category = e.nr_category
+                      where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                        and e.it_status = 1 and e.dt_due >= _ref
+                      order by e.dt_due, e.nr_entry
+                      limit 8) x),
+    'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.fin_overview(jsonb) from public, anon;
+grant execute on function ad.fin_overview(jsonb) to authenticated;
