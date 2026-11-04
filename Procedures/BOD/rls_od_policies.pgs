@@ -125,3 +125,15 @@ drop policy if exists fin_transfer_select on od.fin_transfer;
 create policy fin_transfer_select on od.fin_transfer
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_card_rate
+drop policy if exists fin_card_rate_select on od.fin_card_rate;
+create policy fin_card_rate_select on od.fin_card_rate
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_receivable
+drop policy if exists fin_receivable_select on od.fin_receivable;
+create policy fin_receivable_select on od.fin_receivable
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

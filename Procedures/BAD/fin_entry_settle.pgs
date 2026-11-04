@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - sessao de caixa (fase 2)                        ::
+  ::  Change      : 04/11/2026 - recebiveis de cartao/boleto/cheque (fase 3a)    ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
@@ -31,12 +31,20 @@
     vl_paid            numeric  PAY (opcional, > 0)
     it_payment_method  integer  PAY (opcional)
     id_following       boolean  CANCEL (opcional)
+    qt_card_installments integer PAY (opcional, parcelas do cartao de credito, 1..24)
+    vc_reference       text     PAY (opcional: NSU, numero do cheque / boleto)
 
-  Output jsonb: {"nr_entry", "it_status", "qt_changed"}
+    PAY de conta a receber em cartao, boleto ou cheque com taxa cadastrada
+    (od.fin_card_rate) leva o valor para a conta de passagem "Recebíveis" e
+    cria os recebiveis (od.fn_fin_receivable_make). UNDO cancela os
+    recebiveis ainda nao confirmados (com algum confirmado, bloqueia).
+
+  Output jsonb: {"nr_entry", "it_status", "qt_changed", "qt_receivables"}
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, FIN_ENTRY_REQUIRED,
     FIN_ENTRY_NOT_FOUND, FIN_SETTLE_ACTION_INVALID, FIN_SETTLE_STATUS_INVALID, FIN_ENTRY_VALUE_INVALID,
-    FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_CASH_SESSION_CLOSED
+    FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_CASH_SESSION_CLOSED,
+    FIN_RECEIVABLE_CONFIRMED
 */
 create or replace function ad.fin_entry_settle(p_json jsonb)
 returns jsonb
@@ -58,6 +66,7 @@ declare
   _tz         text;
   _status     smallint;
   _n          integer := 1;
+  _qt_rec     integer := 0;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_entry_settle');
 
@@ -120,6 +129,13 @@ begin
       it_status = 2, nr_account = _account, dt_paid = _dt_paid, vl_paid = _vl_paid, it_payment_method = _method,
       nr_cash_session = od.fn_fin_open_session(_nr_company, _nr_branch, _account)
     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
+    /* cartao / boleto / cheque com taxa: vai para Recebiveis e gera os recebiveis */
+    begin
+      _qt_rec := od.fn_fin_receivable_make(_nr_company, _nr_branch, _nr_entry,
+                   coalesce((p_json ->> 'qt_card_installments')::integer, 1), p_json ->> 'vc_reference', _nr_user);
+    exception when invalid_text_representation then
+      raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
+    end;
     _status := 2;
   elsif _action = 'UNDO' then
     if exists (select 1 from od.fin_cash_session s
@@ -127,6 +143,13 @@ begin
                   and s.nr_session = _cur.nr_cash_session and s.it_status = 2) then
       raise exception '%', ad.fn_message('FIN_CASH_SESSION_CLOSED');
     end if;
+    if exists (select 1 from od.fin_receivable r
+                where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                  and r.nr_entry = _nr_entry and r.it_status = 2) then
+      raise exception '%', ad.fn_message('FIN_RECEIVABLE_CONFIRMED');
+    end if;
+    update od.fin_receivable r set it_status = 90
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_entry = _nr_entry and r.it_status = 1;
     update od.fin_entry e set it_status = 1, dt_paid = null, vl_paid = null, nr_cash_session = null
     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
     _status := 1;
@@ -155,7 +178,7 @@ begin
     jsonb_build_object('vc_action', _action, 'vl_paid', _vl_paid, 'dt_paid', _dt_paid,
                        'nr_account', _account, 'qt_changed', _n));
 
-  return jsonb_build_object('nr_entry', _nr_entry, 'it_status', _status, 'qt_changed', _n);
+  return jsonb_build_object('nr_entry', _nr_entry, 'it_status', _status, 'qt_changed', _n, 'qt_receivables', _qt_rec);
 end;
 $$;
 

@@ -1,0 +1,161 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_receivable_settle(jsonb)                               ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_receivable_settle') ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Confirma ou desfaz um recebivel (permissao ALTERAR na tela FINANCE):
+      CONFIRM  a receber -> recebido: data (padrao a prevista) e valor que caiu
+               (padrao o liquido). Transfere o valor da conta de passagem
+               "Recebíveis" para a conta destino e lanca a diferenca bruto -
+               recebido como despesa paga na categoria "Taxas de recebimento"
+               (variavel), saindo da conta de passagem.
+      UNDO     recebido -> a receber: cancela a transferencia e a despesa da
+               taxa.
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version     integer  obrigatorio = 1
+    nr_company     bigint   obrigatorio
+    nr_branch      bigint   obrigatorio
+    nr_receivable  bigint   obrigatorio
+    vc_action      text     obrigatorio CONFIRM | UNDO
+    dt_received    date     CONFIRM (opcional)
+    vl_received    numeric  CONFIRM (opcional, > 0 e <= bruto)
+    nr_account     bigint   CONFIRM (opcional, padrao a conta da taxa)
+
+  Output jsonb: {"nr_receivable", "it_status", "vl_fee"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_RECEIVABLE_FORBIDDEN, FIN_RECEIVABLE_REQUIRED,
+    FIN_RECEIVABLE_NOT_FOUND, FIN_RECEIVABLE_ACTION_INVALID, FIN_RECEIVABLE_STATUS_INVALID,
+    FIN_RECEIVABLE_VALUE_INVALID, FIN_RECEIVABLE_ACCOUNT_INVALID
+*/
+create or replace function ad.fin_receivable_settle(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr         bigint;
+  _cur        od.fin_receivable%rowtype;
+  _clear      bigint;
+  _dt         date;
+  _vl         numeric;
+  _account    bigint;
+  _fee        numeric;
+  _nr_tr      bigint;
+  _nr_fee     bigint;
+  _cat        bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_receivable_settle');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_update')::boolean then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_FORBIDDEN');
+  end if;
+  if _action not in ('CONFIRM', 'UNDO') then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_ACTION_INVALID');
+  end if;
+  _nr := (p_json ->> 'nr_receivable')::bigint;
+  if _nr is null then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_REQUIRED');
+  end if;
+  select * into _cur from od.fin_receivable r
+   where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_receivable = _nr
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_NOT_FOUND');
+  end if;
+  if (_action = 'CONFIRM' and _cur.it_status <> 1) or (_action = 'UNDO' and _cur.it_status <> 2) then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_STATUS_INVALID');
+  end if;
+
+  select e.nr_account into _clear from od.fin_entry e
+   where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _cur.nr_entry;
+
+  if _action = 'UNDO' then
+    update od.fin_transfer t set it_status = 90
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_transfer = _cur.nr_transfer;
+    update od.fin_entry e set it_status = 90, dt_paid = null, vl_paid = null
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _cur.nr_fee_entry;
+    update od.fin_receivable r set it_status = 1, dt_received = null, vl_received = null,
+                                   nr_transfer = null, nr_fee_entry = null
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_receivable = _nr;
+    perform ad.fn_event_log(
+      _nr_user, _nr_company, _nr_branch, 'FINANCE', 'UPDATE',
+      'fin_receivable', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+      'Recebível voltou para a receber', jsonb_build_object('vl_gross', _cur.vl_gross));
+    return jsonb_build_object('nr_receivable', _nr, 'it_status', 1, 'vl_fee', 0);
+  end if;
+
+  begin
+    _dt      := coalesce((p_json ->> 'dt_received')::date, _cur.dt_expected);
+    _vl      := round(coalesce((p_json ->> 'vl_received')::numeric, _cur.vl_net), 2);
+    _account := coalesce((p_json ->> 'nr_account')::bigint, _cur.nr_account);
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_VALUE_INVALID');
+  end;
+  if _vl is null or _vl <= 0 or _vl > _cur.vl_gross then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_VALUE_INVALID');
+  end if;
+  if _account = _clear or not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _account
+          and a.it_status = 1 and a.it_type <> 4) then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_ACCOUNT_INVALID');
+  end if;
+  _fee := _cur.vl_gross - _vl;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select coalesce(max(t.nr_transfer), 0) + 1 into _nr_tr
+    from od.fin_transfer t where t.nr_company = _nr_company and t.nr_branch = _nr_branch;
+  insert into od.fin_transfer (nr_company, nr_branch, nr_transfer, it_type, nr_account_from, nr_account_to,
+                               vl_amount, dt_transfer, vc_description, nr_cash_session, nr_user_created, nr_operator)
+  values (_nr_company, _nr_branch, _nr_tr, 1, _clear, _account, _vl, _dt,
+          format('Recebível %s/%s', _cur.nr_installment, _cur.qt_installments),
+          od.fn_fin_open_session(_nr_company, _nr_branch, _account), _nr_user, _nr_user);
+
+  if _fee > 0 then
+    _cat := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Taxas de recebimento', 2::smallint, 2::smallint, _nr_user);
+    select coalesce(max(e.nr_entry), 0) + 1 into _nr_fee
+      from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    insert into od.fin_entry (nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, vc_description,
+                              vl_amount, dt_due, dt_competence, it_payment_method, dt_paid, vl_paid, it_status,
+                              nr_installment, qt_installments, nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _nr_fee, 2, _cat, _clear,
+            format('Taxa do recebível %s/%s', _cur.nr_installment, _cur.qt_installments),
+            _fee, _dt, _dt, _cur.it_payment_method, _dt, _fee, 2, 1, 1, _nr_user, _nr_user);
+  end if;
+
+  update od.fin_receivable r set it_status = 2, dt_received = _dt, vl_received = _vl,
+                                 nr_transfer = _nr_tr, nr_fee_entry = _nr_fee
+   where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_receivable = _nr;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'UPDATE',
+    'fin_receivable', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    'Recebível confirmado',
+    jsonb_build_object('vl_gross', _cur.vl_gross, 'vl_received', _vl, 'vl_fee', _fee, 'dt_received', _dt));
+
+  return jsonb_build_object('nr_receivable', _nr, 'it_status', 2, 'vl_fee', _fee);
+end;
+$$;
+
+revoke all on function ad.fin_receivable_settle(jsonb) from public, anon;
+grant execute on function ad.fin_receivable_settle(jsonb) to authenticated;

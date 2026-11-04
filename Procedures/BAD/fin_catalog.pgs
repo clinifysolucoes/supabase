@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - taxas de recebimento (fase 3a)                  ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastros do financeiro da filial: contas (com o saldo de hoje), plano de
@@ -23,6 +23,8 @@
     {"accounts":   [{"nr_account", "vc_name", "it_type", "vl_opening", "vl_balance", "it_status"}],
      "categories": [{"nr_category", "vc_name", "it_kind", "it_cost_type", "it_status", "qt_entries"}],
      "suppliers":  [{"nr_supplier", "vc_name", "vc_document", "vc_phone", "vc_email", "vc_notes", "it_status"}],
+     "rates":      [{"nr_rate", "vc_name", "it_payment_method", "qt_installments_min", "qt_installments_max",
+                     "pc_fee", "vl_fee_fixed", "qt_days", "nr_account", "it_status"}],
      "permission": {"id_read", "id_create", "id_update"}}
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
@@ -92,6 +94,22 @@ begin
                     from od.fin_supplier s
                    where s.nr_company = _nr_company and s.nr_branch = _nr_branch
                      and (_inactive or s.it_status = 1)),
+    'rates', (select coalesce(jsonb_agg(
+                       jsonb_build_object(
+                         'nr_rate',             r.nr_rate,
+                         'vc_name',             r.vc_name,
+                         'it_payment_method',   r.it_payment_method,
+                         'qt_installments_min', r.qt_installments_min,
+                         'qt_installments_max', r.qt_installments_max,
+                         'pc_fee',              r.pc_fee,
+                         'vl_fee_fixed',        r.vl_fee_fixed,
+                         'qt_days',             r.qt_days,
+                         'nr_account',          r.nr_account,
+                         'it_status',           r.it_status)
+                       order by r.it_payment_method, r.qt_installments_min, r.vc_name), '[]'::jsonb)
+                from od.fin_card_rate r
+               where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                 and (_inactive or r.it_status = 1)),
     'permission', _perm);
 end;
 $$;

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - recebiveis da 1a parcela (fase 3a)              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Fechamento financeiro da consulta (permissao CRIAR na tela FINANCE):
@@ -36,6 +36,8 @@
     id_commission      boolean  opcional (padrao true)
     pc_commission      numeric  opcional 0..100 (padrao o do procedimento/filial)
     vc_notes           text     opcional
+    qt_card_installments integer opcional (1a parcela no cartao de credito em N vezes)
+    vc_reference       text     opcional (NSU, numero do cheque / boleto)
 
   Output jsonb: {"nr_appointment", "nr_entry", "qt_installments", "nr_commission_entry", "vl_commission"}
 
@@ -81,6 +83,7 @@ declare
   _vl_comm     numeric := 0;
   _nr_comm     bigint;
   _cat_comm    bigint;
+  _qt_card     integer;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_checkout');
 
@@ -134,6 +137,7 @@ begin
     _commission := coalesce((p_json ->> 'id_commission')::boolean, true);
     _pc         := (p_json ->> 'pc_commission')::numeric;
     _notes      := left(nullif(trim(p_json ->> 'vc_notes'), ''), 500);
+    _qt_card    := coalesce((p_json ->> 'qt_card_installments')::integer, 1);
   exception when others then
     raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
   end;
@@ -213,6 +217,10 @@ begin
       case when _paid and _i = 1 then _session end,
       _group, _i, _n, _notes, _nr_user, _nr_user);
   end loop;
+
+  if _paid then
+    perform od.fn_fin_receivable_make(_nr_company, _nr_branch, _nr_entry + 1, _qt_card, p_json ->> 'vc_reference', _nr_user);
+  end if;
 
   /* comissao do profissional: conta a pagar, dia 10 do mes seguinte         */
   _vl_comm := round(_amount * _pc / 100, 2);

@@ -1,0 +1,110 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_receivable_make(bigint, bigint, bigint, integer,    ::
+  ::                text, bigint)                                                 ::
+  ::  UsedBy      : ad.fin_entry_settle, ad.fin_entry_save,                       ::
+  ::                ad.appointment_checkout                                       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Depois que uma conta a receber e paga: se a forma de pagamento (cartao de
+    credito/debito, boleto, cheque) tem taxa ativa cadastrada para o numero de
+    parcelas, o valor pago vai para a conta de passagem "Recebíveis" (tipo 4,
+    criada se faltar; sai do caixa aberto) e nascem os recebiveis: uma linha
+    por parcela do cartao, com bruto (centavos na ultima), taxa (percentual +
+    tarifa fixa na 1a), liquido, previsao (data do pagamento + prazo da taxa
+    + 30 dias por parcela) e a conta destino da taxa.
+    Sem taxa cadastrada nada muda (o dinheiro fica na conta informada).
+    Helper interno (sem grant): a RPC que chama ja checou a permissao.
+  Input:
+    p_nr_company, p_nr_branch, p_nr_entry (ja pago, it_kind 1),
+    p_qt_installments (parcelas do cartao, 1..24), p_vc_reference (NSU,
+    numero do cheque/boleto), p_nr_user (operador)
+  Output: integer (quantos recebiveis foram criados; 0 = sem taxa)
+*/
+create or replace function od.fn_fin_receivable_make(
+  p_nr_company      bigint,
+  p_nr_branch       bigint,
+  p_nr_entry        bigint,
+  p_qt_installments integer,
+  p_vc_reference    text,
+  p_nr_user         bigint)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _e        od.fin_entry%rowtype;
+  _rate     od.fin_card_rate%rowtype;
+  _n        integer := least(greatest(coalesce(p_qt_installments, 1), 1), 24);
+  _clear    bigint;
+  _nr       bigint;
+  _i        integer;
+  _part     numeric;
+  _fee      numeric;
+begin
+  select * into _e from od.fin_entry e
+   where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch and e.nr_entry = p_nr_entry;
+  if _e.it_kind <> 1 or _e.it_status <> 2 or _e.it_payment_method not in (3, 4, 6, 7) then
+    return 0;
+  end if;
+  if _e.it_payment_method <> 3 then
+    _n := 1;
+  end if;
+
+  select * into _rate from od.fin_card_rate r
+   where r.nr_company = p_nr_company and r.nr_branch = p_nr_branch and r.it_status = 1
+     and r.it_payment_method = _e.it_payment_method
+     and _n between r.qt_installments_min and r.qt_installments_max
+   order by r.qt_installments_max - r.qt_installments_min, r.nr_rate
+   limit 1;
+  if _rate.nr_rate is null then
+    return 0;
+  end if;
+
+  /* conta de passagem                                                       */
+  select a.nr_account into _clear from od.fin_account a
+   where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch and a.it_type = 4
+   order by (a.it_status = 1) desc, a.nr_account
+   limit 1;
+  if _clear is null then
+    perform 1 from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch for update;
+    select coalesce(max(a.nr_account), 0) + 1 into _clear
+      from od.fin_account a where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch;
+    insert into od.fin_account (nr_company, nr_branch, nr_account, vc_name, it_type, nr_operator)
+    values (p_nr_company, p_nr_branch, _clear, 'Recebíveis', 4, p_nr_user);
+  else
+    update od.fin_account a set it_status = 1
+     where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch and a.nr_account = _clear and a.it_status <> 1;
+  end if;
+
+  update od.fin_entry e set nr_account = _clear, nr_cash_session = null
+   where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch and e.nr_entry = p_nr_entry;
+
+  select coalesce(max(r.nr_receivable), 0) into _nr
+    from od.fin_receivable r where r.nr_company = p_nr_company and r.nr_branch = p_nr_branch;
+  for _i in 1 .. _n loop
+    _part := case when _n = 1 then _e.vl_paid
+                  when _i < _n then trunc(_e.vl_paid / _n, 2)
+                  else _e.vl_paid - trunc(_e.vl_paid / _n, 2) * (_n - 1) end;
+    _fee  := least(round(_part * _rate.pc_fee / 100, 2) + case when _i = 1 then _rate.vl_fee_fixed else 0 end, _part);
+    insert into od.fin_receivable (
+      nr_company, nr_branch, nr_receivable, nr_entry, nr_rate, it_payment_method, nr_installment,
+      qt_installments, vl_gross, vl_fee, vl_net, dt_expected, nr_account, vc_reference,
+      nr_user_created, nr_operator)
+    values (
+      p_nr_company, p_nr_branch, _nr + _i, p_nr_entry, _rate.nr_rate, _e.it_payment_method, _i,
+      _n, _part, _fee, _part - _fee,
+      _e.dt_paid + _rate.qt_days + 30 * (_i - 1),
+      _rate.nr_account, left(nullif(trim(p_vc_reference), ''), 60), p_nr_user, p_nr_user);
+  end loop;
+  return _n;
+end;
+$$;
+
+revoke all on function od.fn_fin_receivable_make(bigint, bigint, bigint, integer, text, bigint)
+  from public, anon, authenticated;
