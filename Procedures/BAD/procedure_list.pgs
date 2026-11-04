@@ -12,12 +12,17 @@
     Procedimentos da filial com os materiais usados e o preco calculado no
     banco (od.fn_pricing_calc) a partir dos parametros da filial
     (od.fn_pricing_context). Comissao e lucro proprios do procedimento, quando
-    informados, substituem os padroes. it_tax_regime permite simular o outro
-    regime (PF x PJ) sem alterar os parametros. Alertas por procedimento:
-      NO_TIME            tempo zero
-      NO_MATERIAL        sem material e sem "outros materiais"
-      MATERIAL_NO_PRICE  algum material usado esta sem preco
-      PERCENT_TOO_HIGH   percentuais somam 100% ou mais (preco impossivel)
+    informados, substituem os padroes; o lucro segue procedimento >
+    especialidade > filial. it_tax_regime permite simular o outro regime
+    (PF x PJ) sem alterar os parametros. Alertas por procedimento:
+      NO_TIME                tempo zero
+      NO_MATERIAL            sem material e sem "outros materiais"
+      MATERIAL_NO_PRICE      algum material usado esta sem preco
+      PERCENT_TOO_HIGH       percentuais somam 100% ou mais (preco impossivel)
+      PRICE_BELOW_COST       valor cobrado hoje nao paga nem o custo direto
+      PRICE_BELOW_MIN        valor cobrado hoje abaixo do preco minimo
+      PRICE_BELOW_SUGGESTED  valor cobrado hoje abaixo do preco sugerido
+    (pricing.it_price_status e o lucro com o valor cobrado: od.fn_pricing_calc)
     Exige permissao de LEITURA na tela PRICING.
 
   Input p_json:
@@ -25,18 +30,17 @@
     nr_company           bigint   obrigatorio
     nr_branch            bigint   obrigatorio
     id_include_inactive  boolean  opcional (default false)
-    vc_search            text     opcional (codigo, nome ou categoria, contem)
-    vc_category          text     opcional (categoria exata)
+    vc_search            text     opcional (codigo, nome ou especialidade, contem)
+    nr_specialty         bigint   opcional (so os procedimentos da especialidade)
     it_tax_regime        integer  opcional 1 PF | 2 PJ (simulacao; default = parametro)
 
   Output jsonb:
-    {"procedures": [{"nr_procedure", "vc_code", "vc_name", "vc_category", "qt_minutes",
+    {"procedures": [{"nr_procedure", "vc_code", "vc_name", "nr_specialty", "vc_specialty", "qt_minutes",
                      "vl_lab_cost", "vl_material_other", "vl_current_price", "pc_commission",
                      "pc_profit", "it_status",
                      "materials": [{"nr_material", "vc_name", "vc_unit", "qt_used", "vl_unit_cost", "vl_line_cost"}],
                      "pricing": {... od.fn_pricing_calc ...},
                      "alerts": ["NO_TIME", ...]}],
-     "categories": ["Clínica Geral", ...],
      "params": {...}, "summary": {...}}                         (od.fn_pricing_context)
 
   Errors: VERSION_MISMATCH, PRICING_BRANCH_REQUIRED, PRICING_FORBIDDEN, PROCEDURE_LIST_REGIME_INVALID
@@ -53,7 +57,7 @@ declare
   _nr_branch     bigint;
   _inactive      boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
   _search        text    := nullif(trim(p_json ->> 'vc_search'), '');
-  _category      text    := nullif(trim(p_json ->> 'vc_category'), '');
+  _specialty     bigint  := (p_json ->> 'nr_specialty')::bigint;
   _regime        smallint;
   _ctx           jsonb;
   _params        jsonb;
@@ -66,7 +70,6 @@ declare
   _calc          jsonb;
   _alerts        jsonb;
   _procedures    jsonb := '[]'::jsonb;
-  _categories    jsonb;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'procedure_list');
 
@@ -90,17 +93,20 @@ begin
   _pc_tax := case when _regime = 2 then (_params ->> 'pc_tax_pj')::numeric else (_params ->> 'pc_tax_pf')::numeric end;
 
   for _proc in
-    select p.*
+    select p.*, s.vc_name as vc_specialty, s.pc_profit as pc_profit_specialty
       from od.procedure p
+      left join od.specialty s on s.nr_company   = p.nr_company
+                              and s.nr_branch    = p.nr_branch
+                              and s.nr_specialty = p.nr_specialty
      where p.nr_company = _nr_company
        and p.nr_branch  = _nr_branch
        and (_inactive or p.it_status = 1)
-       and (_category is null or p.vc_category = _category)
+       and (_specialty is null or p.nr_specialty = _specialty)
        and (_search is null
             or p.vc_name ilike '%' || _search || '%'
             or coalesce(p.vc_code, '') ilike '%' || _search || '%'
-            or coalesce(p.vc_category, '') ilike '%' || _search || '%')
-     order by p.vc_category nulls last, p.vc_code nulls last, p.vc_name
+            or coalesce(s.vc_name, '') ilike '%' || _search || '%')
+     order by s.vc_name nulls last, p.vc_code nulls last, p.vc_name
   loop
     select coalesce(jsonb_agg(
              jsonb_build_object(
@@ -138,7 +144,8 @@ begin
       'pc_fees',              _summary ->> 'pc_fees',
       'it_tax_regime',        _regime,
       'pc_tax',               _pc_tax,
-      'pc_profit',            coalesce(_proc.pc_profit, (_params ->> 'pc_profit')::numeric)));
+      'pc_profit',            coalesce(_proc.pc_profit, _proc.pc_profit_specialty, (_params ->> 'pc_profit')::numeric),
+      'vl_current_price',     _proc.vl_current_price));
 
     _alerts := '[]'::jsonb;
     if _proc.qt_minutes = 0 then
@@ -153,12 +160,19 @@ begin
     if not (_calc ->> 'id_valid')::boolean then
       _alerts := _alerts || '"PERCENT_TOO_HIGH"'::jsonb;
     end if;
+    _alerts := _alerts || case (_calc ->> 'it_price_status')::smallint
+                            when 4 then '["PRICE_BELOW_COST"]'::jsonb
+                            when 3 then '["PRICE_BELOW_MIN"]'::jsonb
+                            when 2 then '["PRICE_BELOW_SUGGESTED"]'::jsonb
+                            else '[]'::jsonb
+                          end;
 
     _procedures := _procedures || jsonb_build_object(
       'nr_procedure',      _proc.nr_procedure,
       'vc_code',           _proc.vc_code,
       'vc_name',           _proc.vc_name,
-      'vc_category',       _proc.vc_category,
+      'nr_specialty',      _proc.nr_specialty,
+      'vc_specialty',      _proc.vc_specialty,
       'qt_minutes',        _proc.qt_minutes,
       'vl_lab_cost',       _proc.vl_lab_cost,
       'vl_material_other', _proc.vl_material_other,
@@ -171,16 +185,8 @@ begin
       'alerts',            _alerts);
   end loop;
 
-  select coalesce(jsonb_agg(distinct p.vc_category order by p.vc_category), '[]'::jsonb)
-    into _categories
-    from od.procedure p
-   where p.nr_company = _nr_company
-     and p.nr_branch  = _nr_branch
-     and p.vc_category is not null;
-
   return jsonb_build_object(
     'procedures', _procedures,
-    'categories', _categories,
     'params',     _params,
     'summary',    _summary || jsonb_build_object('it_tax_regime', _regime, 'pc_tax', _pc_tax));
 end;

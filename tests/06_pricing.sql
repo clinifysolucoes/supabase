@@ -176,7 +176,7 @@ begin
 
   -- procedimento com materiais
   _r := ad.procedure_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
-          'vc_code', '1.0', 'vc_name', 'Restauração 1 face', 'vc_category', 'Clínica Geral',
+          'vc_code', '1.0', 'vc_name', 'Restauração 1 face',
           'qt_minutes', 30, 'vl_lab_cost', 20, 'vl_material_other', 2, 'vl_current_price', 150,
           'materials', jsonb_build_array(
             jsonb_build_object('nr_material', _m1, 'qt_used', 3),
@@ -209,10 +209,10 @@ begin
   -- formula no regime dos parametros (PJ)
   _r  := ad.procedure_list(jsonb_build_object('nr_version', 1, 'nr_company', _ca, 'nr_branch', 1));
   assert jsonb_array_length(_r -> 'procedures') = 1, 'deveria listar 1 procedimento';
-  assert _r -> 'categories' = '["Clínica Geral"]'::jsonb, 'categorias distintas';
   _pr := _r -> 'procedures' -> 0 -> 'pricing';
   assert jsonb_array_length(_r -> 'procedures' -> 0 -> 'materials') = 2, '2 materiais no procedimento';
-  assert _r -> 'procedures' -> 0 -> 'alerts' = '[]'::jsonb, 'sem alertas, veio ' || (_r -> 'procedures' -> 0 ->> 'alerts');
+  -- cobra 150 hoje: cobre o minimo (121,67), mas fica abaixo do sugerido (182,50) -> unico alerta
+  assert _r -> 'procedures' -> 0 -> 'alerts' = '["PRICE_BELOW_SUGGESTED"]'::jsonb, 'so o alerta de preco, veio ' || (_r -> 'procedures' -> 0 ->> 'alerts');
   assert (_pr ->> 'vl_material')::numeric     = 10,     'materiais 3x2 + 2x1 + 2 = 10, veio ' || (_pr ->> 'vl_material');
   assert (_pr ->> 'vl_structure')::numeric    = 31.25,  'estrutura 0,5h x 62,50';
   assert (_pr ->> 'vl_professional')::numeric = 30,     'profissional 0,5h x 60';

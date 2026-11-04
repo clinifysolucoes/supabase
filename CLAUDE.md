@@ -47,7 +47,8 @@ Objetos principais:
 | `od.pricing_param` / `od.clinic_expense` / `od.pricing_fee` | parâmetros de precificação da filial, despesas (custo mensal → estrutura/hora) e taxas adicionais |
 | `od.material` / `od.procedure` / `od.procedure_material` | catálogo de materiais (custo por unidade de uso), procedimentos e materiais × quantidade |
 | `ad.pricing_param_get` / `ad.pricing_param_save` | aba Parâmetros da tela Precificação |
-| `ad.material_list` / `ad.material_save` / `ad.procedure_list` / `ad.procedure_save` | CRUD da tela; `procedure_list` devolve o preço calculado |
+| `ad.material_list` / `ad.material_save` / `ad.procedure_list` / `ad.procedure_save` | CRUD da tela; `procedure_list` devolve o preço calculado e o alerta do valor cobrado |
+| `od.specialty` / `ad.specialty_list` / `ad.specialty_save` | especialidades da filial: agrupam os procedimentos e têm lucro próprio (procedimento > especialidade > filial) |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |
@@ -341,6 +342,8 @@ o que estava errado nelas (comissão/cartão/lucro/IR somados "por fora" do cust
   - **PJ** (`it_tax_regime = 2`, IR sobre o faturamento): `preço = custo ÷ (1 − cartão − comissão − taxas − IR − lucro)`
   - **PF** (`it_tax_regime = 1`, IR sobre o lucro): `preço = (1 − IR) × custo ÷ ((1 − IR) × (1 − cartão − comissão − taxas) − lucro)`
   - **Preço mínimo** = mesma fórmula com lucro zero. Soma ≥ 100% → `PRICING_PERCENT_TOO_HIGH`.
+- **Valor cobrado hoje** (`vl_current_price`) × cálculo → `it_price_status`: 1 ok · 2 abaixo do sugerido ·
+  3 abaixo do mínimo · 4 abaixo do custo direto (alertas `PRICE_BELOW_*` em `procedure_list`), com o lucro real que sobra.
 - A fórmula vive em `od.fn_pricing_calc` (e numa cópia testada no app, `PricingCalculator`, para a simulação ao
   vivo). `procedure_list` sempre recalcula: o preço nunca é gravado. Percentuais em pontos (4 = 4%).
 - Preço de mercado dos materiais: Edge Function `material-price-lookup` (o usuário escolhe a oferta;

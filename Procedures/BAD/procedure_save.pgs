@@ -25,7 +25,7 @@
     nr_procedure       bigint   obrigatorio em 'U'
     vc_code            text     opcional (ate 10, unico na filial; null limpa)
     vc_name            text     obrigatorio em 'I' (ate 80, unico na filial)
-    vc_category        text     opcional (ate 40, ex.: "Clínica Geral")
+    nr_specialty       bigint   opcional (especialidade ativa da filial; null limpa)
     qt_minutes         numeric  >= 0 (tempo de cadeira)
     vl_lab_cost        numeric  >= 0 (laboratorio / terceiros)
     vl_material_other  numeric  >= 0 (materiais sem cadastro, valor informado)
@@ -41,7 +41,8 @@
     PROCEDURE_NAME_REQUIRED, PROCEDURE_NAME_IN_USE {Name}, PROCEDURE_CODE_IN_USE {Code},
     PROCEDURE_MINUTES_INVALID, PROCEDURE_VALUE_INVALID {Field}, PROCEDURE_PERCENT_INVALID {Field},
     PROCEDURE_STATUS_INVALID, PROCEDURE_MATERIALS_INVALID, PROCEDURE_MATERIAL_INVALID {Material},
-    PROCEDURE_QUANTITY_INVALID {Material}, PROCEDURE_REQUIRED, PROCEDURE_NOT_FOUND
+    PROCEDURE_QUANTITY_INVALID {Material}, PROCEDURE_SPECIALTY_INVALID, PROCEDURE_REQUIRED,
+    PROCEDURE_NOT_FOUND
 */
 create or replace function ad.procedure_save(p_json jsonb)
 returns jsonb
@@ -58,6 +59,7 @@ declare
   _perm         jsonb;
   _vc_name      varchar(80);
   _vc_code      varchar(10);
+  _nr_specialty bigint;
   _row          od.procedure%rowtype;
   _item         jsonb;
   _nr_material  bigint;
@@ -109,6 +111,19 @@ begin
   if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
     raise exception '%', ad.fn_message('PROCEDURE_STATUS_INVALID');
   end if;
+  /* especialidade: tem de estar ativa, salvo se o procedimento ja esta nela  */
+  _nr_specialty := (p_json ->> 'nr_specialty')::bigint;
+  if _nr_specialty is not null
+     and not exists (select 1 from od.specialty s
+                      where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                        and s.nr_specialty = _nr_specialty and s.it_status = 1)
+     and not exists (select 1 from od.procedure p
+                      where _vc_action = 'U'
+                        and p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                        and p.nr_procedure = (p_json ->> 'nr_procedure')::bigint
+                        and p.nr_specialty = _nr_specialty) then
+    raise exception '%', ad.fn_message('PROCEDURE_SPECIALTY_INVALID');
+  end if;
 
   /* materiais: valida antes de gravar qualquer coisa                        */
   if p_json ? 'materials' then
@@ -156,11 +171,10 @@ begin
      where p.nr_company = _nr_company and p.nr_branch = _nr_branch;
 
     insert into od.procedure (
-      nr_company, nr_branch, nr_procedure, vc_code, vc_name, vc_category, qt_minutes, vl_lab_cost,
+      nr_company, nr_branch, nr_procedure, vc_code, vc_name, nr_specialty, qt_minutes, vl_lab_cost,
       vl_material_other, vl_current_price, pc_commission, pc_profit, it_status, nr_operator)
     values (
-      _nr_company, _nr_branch, _nr_procedure, _vc_code, _vc_name,
-      left(nullif(trim(p_json ->> 'vc_category'), ''), 40),
+      _nr_company, _nr_branch, _nr_procedure, _vc_code, _vc_name, _nr_specialty,
       coalesce((p_json ->> 'qt_minutes')::numeric, 0),
       coalesce((p_json ->> 'vl_lab_cost')::numeric, 0),
       coalesce((p_json ->> 'vl_material_other')::numeric, 0),
@@ -198,7 +212,7 @@ begin
     update od.procedure p set
       vc_code           = case when p_json ? 'vc_code'           then _vc_code                                                 else p.vc_code end,
       vc_name           = case when p_json ? 'vc_name'           then _vc_name                                                 else p.vc_name end,
-      vc_category       = case when p_json ? 'vc_category'       then left(nullif(trim(p_json ->> 'vc_category'), ''), 40)     else p.vc_category end,
+      nr_specialty      = case when p_json ? 'nr_specialty'      then _nr_specialty                                            else p.nr_specialty end,
       qt_minutes        = case when p_json ? 'qt_minutes'        then coalesce((p_json ->> 'qt_minutes')::numeric, 0)          else p.qt_minutes end,
       vl_lab_cost       = case when p_json ? 'vl_lab_cost'       then coalesce((p_json ->> 'vl_lab_cost')::numeric, 0)         else p.vl_lab_cost end,
       vl_material_other = case when p_json ? 'vl_material_other' then coalesce((p_json ->> 'vl_material_other')::numeric, 0)   else p.vl_material_other end,
@@ -230,7 +244,7 @@ begin
     jsonb_build_object(
       'vc_code',          _row.vc_code,
       'vc_name',          _row.vc_name,
-      'vc_category',      _row.vc_category,
+      'nr_specialty',     _row.nr_specialty,
       'qt_minutes',       _row.qt_minutes,
       'vl_lab_cost',      _row.vl_lab_cost,
       'vl_current_price', _row.vl_current_price,

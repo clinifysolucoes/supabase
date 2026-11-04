@@ -63,3 +63,9 @@ drop policy if exists patient_note_select on od.patient_note;
 create policy patient_note_select on od.patient_note
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.specialty
+drop policy if exists specialty_select on od.specialty;
+create policy specialty_select on od.specialty
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
