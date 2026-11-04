@@ -25,13 +25,26 @@
     Percentuais de entrada em pontos percentuais (4 = 4%). Helper interno
     (sem grant). Se o divisor nao for positivo (percentuais somam >= 100%),
     id_valid = false e os valores de preco vem nulos.
+
+    Valor cobrado hoje (vl_current_price, opcional): o mesmo rateio aplicado
+    ao valor cobrado C da o lucro que sobra hoje
+      lucro atual = C - custo direto - C x s - IR(C)
+      IR(C) PJ = C x r    PF = r x max(0, C - custo direto - C x s)
+    e a situacao do valor cobrado (it_price_status):
+      0 sem valor cobrado (ou preco impossivel e C >= custo direto)
+      1 ok: C >= preco sugerido
+      2 abaixo do sugerido: cobre tudo, mas o lucro e menor que o desejado
+      3 abaixo do minimo: paga o custo direto, mas nao cobre cartao/comissao/IR
+      4 abaixo do custo: nao paga nem o custo direto (prejuizo)
   Input p_json:
     vl_material, vl_lab, qt_minutes, vl_structure_hour, vl_professional_hour,
-    pc_card, pc_commission, pc_fees, it_tax_regime (1 PF | 2 PJ), pc_tax, pc_profit
+    pc_card, pc_commission, pc_fees, it_tax_regime (1 PF | 2 PJ), pc_tax, pc_profit,
+    vl_current_price (opcional)
   Output jsonb:
     vl_material, vl_lab, vl_structure, vl_professional, vl_direct_cost,
     vl_price, vl_price_min, vl_card, vl_commission, vl_fees, vl_tax, vl_profit,
-    pc_profit_real, pc_total, it_tax_regime, id_valid
+    pc_profit_real, pc_total, it_tax_regime, id_valid,
+    vl_current_price, vl_current_profit, pc_current_profit, vl_current_diff, it_price_status
 */
 create or replace function od.fn_pricing_calc(p_json jsonb)
 returns jsonb
@@ -51,6 +64,7 @@ declare
   _it_tax_regime  smallint := coalesce((p_json ->> 'it_tax_regime')::smallint, 1);
   _pc_tax         numeric  := coalesce((p_json ->> 'pc_tax')::numeric, 0);
   _pc_profit      numeric  := coalesce((p_json ->> 'pc_profit')::numeric, 0);
+  _vl_current     numeric  := (p_json ->> 'vl_current_price')::numeric;
   _vl_structure    numeric;
   _vl_professional numeric;
   _vl_direct       numeric;
@@ -67,6 +81,9 @@ declare
   _vl_tax          numeric;
   _vl_profit       numeric;
   _id_valid        boolean := true;
+  _vl_cur_tax      numeric;
+  _vl_cur_profit   numeric;
+  _it_status       smallint := 0;
 begin
   if _it_tax_regime not in (1, 2) then
     _it_tax_regime := 1;
@@ -109,6 +126,23 @@ begin
     _vl_profit := _price - _vl_direct - _vl_card - _vl_commission - _vl_fees - _vl_tax;
   end if;
 
+  if _vl_current is not null then
+    _vl_current := round(_vl_current, 2);
+    if _it_tax_regime = 2 then
+      _vl_cur_tax := round(_vl_current * _r, 2);
+    else
+      _vl_cur_tax := round(_r * greatest(0, _vl_current - _vl_direct - _vl_current * _s), 2);
+    end if;
+    _vl_cur_profit := round(_vl_current - _vl_direct - _vl_current * _s, 2) - _vl_cur_tax;
+    _it_status := case
+                    when _vl_current < _vl_direct                        then 4
+                    when _price_min is not null and _vl_current < _price_min then 3
+                    when _price is not null and _vl_current < _price     then 2
+                    when _price is not null                              then 1
+                    else 0
+                  end;
+  end if;
+
   return jsonb_build_object(
     'vl_material',     round(_vl_material, 2),
     'vl_lab',          round(_vl_lab, 2),
@@ -125,7 +159,14 @@ begin
     'pc_profit_real',  case when _price is null or _price = 0 then 0 else round(_vl_profit / _price * 100, 2) end,
     'pc_total',        round((_s + _m + _r) * 100, 2),
     'it_tax_regime',   _it_tax_regime,
-    'id_valid',        _id_valid);
+    'id_valid',        _id_valid,
+    'vl_current_price',  _vl_current,
+    'vl_current_profit', _vl_cur_profit,
+    'pc_current_profit', case when _vl_current is null or _vl_current = 0 then null
+                              else round(_vl_cur_profit / _vl_current * 100, 2) end,
+    'vl_current_diff',   case when _vl_current is null or _price is null then null
+                              else _vl_current - _price end,
+    'it_price_status',   _it_status);
 end;
 $$;
 

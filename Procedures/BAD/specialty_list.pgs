@@ -1,0 +1,75 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.specialty_list(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('specialty_list')        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 03/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Especialidades da filial (aba Especialidades da tela Precificacao) com
+    quantos procedimentos ativos cada uma tem. pc_profit nulo = usa o lucro
+    padrao da filial (pricing_param.pc_profit). Exige permissao de LEITURA na
+    tela PRICING.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    id_include_inactive  boolean  opcional (default false)
+
+  Output jsonb:
+    {"specialties": [{"nr_specialty", "vc_name", "pc_profit", "it_status", "qt_procedures"}]}
+
+  Errors: VERSION_MISMATCH, PRICING_BRANCH_REQUIRED, PRICING_FORBIDDEN
+*/
+create or replace function ad.specialty_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _result     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'specialty_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('PRICING_FORBIDDEN');
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_specialty',  s.nr_specialty,
+             'vc_name',       s.vc_name,
+             'pc_profit',     s.pc_profit,
+             'it_status',     s.it_status,
+             'qt_procedures', (select count(*) from od.procedure p
+                                where p.nr_company   = s.nr_company
+                                  and p.nr_branch    = s.nr_branch
+                                  and p.nr_specialty = s.nr_specialty
+                                  and p.it_status    = 1))
+           order by s.vc_name), '[]'::jsonb)
+    into _result
+    from od.specialty s
+   where s.nr_company = _nr_company
+     and s.nr_branch  = _nr_branch
+     and (_inactive or s.it_status = 1);
+
+  return jsonb_build_object('specialties', _result);
+end;
+$$;
+
+revoke all on function ad.specialty_list(jsonb) from public, anon;
+grant execute on function ad.specialty_list(jsonb) to authenticated;
