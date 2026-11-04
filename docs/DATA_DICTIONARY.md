@@ -55,6 +55,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.procedure_material`](#odprocedurematerial) | Material do procedimento | Materiais usados em cada procedimento com a quantidade em unidades de uso. Custo da linha = quantidade × custo unitário do material. A lista é substituída a cada procedure_save com materials. |
 | [`od.professional`](#odprofessional) | Profissional da agenda | Quem atende na filial (dentista, HOF, ASB...): uma coluna na agenda, com cor própria, intervalo dos horários e, opcionalmente, o usuário do sistema que é este profissional. nr_professional é sequencial por filial. |
 | [`od.professional_schedule`](#odprofessionalschedule) | Horário de atendimento | Faixas de atendimento do profissional por dia da semana (várias por dia, sem sobrepor). Fora delas a agenda mostra o horário como indisponível. Substituído inteiro a cada professional_save com schedules. |
+| [`od.appointment`](#odappointment) | Agendamento | Um horário na agenda da filial: consulta (paciente + profissional, procedimento opcional) ou compromisso (bloqueio com título, de um profissional ou da clínica toda), com a situação do atendimento. Datas com fuso; a agenda é lida no fuso da filial. Conflito de horário checado em appointment_save (encaixe libera). nr_appointment é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
 
@@ -88,6 +89,10 @@ erDiagram
   branch ||--o{ professional : "profissionais"
   professional ||--o{ professional_schedule : "horário de atendimento"
   app_user |o--o{ professional : "é o profissional"
+  branch ||--o{ appointment : "agenda"
+  patient |o--o{ appointment : "consultas"
+  professional |o--o{ appointment : "atende"
+  procedure |o--o{ appointment : "previsto em"
   patient ||--o{ patient_note : "notas"
   app_user ||--o{ patient_note : "autor"
   auth_users {
@@ -326,6 +331,23 @@ erDiagram
     smallint it_weekday
     smallint qt_minute_start
     smallint qt_minute_end
+  }
+  appointment {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_appointment PK
+    smallint it_type
+    bigint nr_patient FK
+    bigint nr_professional FK
+    bigint nr_procedure FK
+    varchar vc_title
+    text vc_notes
+    timestamptz dh_start
+    timestamptz dh_end
+    boolean id_all_day
+    boolean id_fit_in
+    smallint it_status
+    bigint nr_user_created FK
   }
   patient {
     bigint nr_company PK, FK
@@ -864,6 +886,35 @@ Faixas de atendimento do profissional por dia da semana (várias por dia, sem so
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.appointment
+
+**Agendamento**
+
+Um horário na agenda da filial: consulta (paciente + profissional, procedimento opcional) ou compromisso (bloqueio com título, de um profissional ou da clínica toda), com a situação do atendimento. Datas com fuso; a agenda é lida no fuso da filial. Conflito de horário checado em appointment_save (encaixe libera). nr_appointment é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via appointment_save (permissão na tela AGENDA).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_appointment` | `bigint` | PK3 | NOT NULL |  | Número sequencial do agendamento na filial. |
+| `it_type` | `smallint` |  | NOT NULL | `1` | Tipo do agendamento. Valores: 1 = Consulta; 2 = Compromisso. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NULL |  | Paciente da consulta (obrigatório na consulta; nulo no compromisso). |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional (obrigatório na consulta; no compromisso, nulo = clínica toda). |
+| `nr_procedure` | `bigint` | FK → `procedure.nr_procedure` | NULL |  | Procedimento previsto (opcional, da precificação). |
+| `vc_title` | `varchar(80)` |  | NULL |  | Título do compromisso (obrigatório) ou motivo da consulta (opcional). |
+| `vc_notes` | `text` |  | NULL |  | Observações do agendamento. |
+| `dh_start` | `timestamptz` |  | NOT NULL |  | Início. |
+| `dh_end` | `timestamptz` |  | NOT NULL |  | Fim (maior que o início; no máximo 1 dia depois). |
+| `id_all_day` | `boolean` |  | NOT NULL | `false` | Compromisso do dia inteiro. |
+| `id_fit_in` | `boolean` |  | NOT NULL | `false` | Encaixe: pode se sobrepor a outro agendamento do mesmo profissional. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do atendimento (cancelado e faltou não ocupam o horário). Valores: 1 = Agendado; 2 = Confirmado; 3 = Em espera; 4 = Em atendimento; 5 = Atendido; 6 = Atrasado; 7 = Faltou; 90 = Cancelado. |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Quem agendou (usuário da sessão na criação). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.patient
 
 **Paciente**
@@ -978,6 +1029,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.procedure_list(p_json jsonb)` | authenticated | Procedimentos da filial com especialidade, materiais, preço calculado (fn_pricing_calc; lucro do procedimento > especialidade > filial), preço mínimo, decomposição (cartão, comissão, taxas, IR, lucro), situação do valor cobrado hoje (it_price_status, lucro atual) e alertas (NO_TIME, NO_MATERIAL, MATERIAL_NO_PRICE, PERCENT_TOO_HIGH, PRICE_BELOW_COST, PRICE_BELOW_MIN, PRICE_BELOW_SUGGESTED). Filtros: nr_specialty, vc_search, id_include_inactive; it_tax_regime simula PF x PJ. Devolve também parâmetros e resumo. Exige leitura na tela PRICING. |
 | `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
 | `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING. |
+| `ad.appointment_list(p_json jsonb)` | authenticated | Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação e quem agendou; filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. |
+| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. |
 | `ad.professional_list(p_json jsonb)` | authenticated | Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA. |
 | `ad.professional_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
@@ -1040,8 +1093,24 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ACCESS_PROFILE_SCREEN_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_SCREENS_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_STATUS_INVALID` | `access_profile_save` |  |
-| `AGENDA_BRANCH_REQUIRED` | `professional_list`, `professional_save` |  |
-| `AGENDA_FORBIDDEN` | `professional_list` |  |
+| `AGENDA_BRANCH_REQUIRED` | `appointment_list`, `appointment_save`, `professional_list`, `professional_save` |  |
+| `AGENDA_FORBIDDEN` | `appointment_list`, `professional_list` |  |
+| `APPOINTMENT_ACTION_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_CONFLICT` | `appointment_save` |  |
+| `APPOINTMENT_FORBIDDEN` | `appointment_save` |  |
+| `APPOINTMENT_LIST_PERIOD_INVALID` | `appointment_list` |  |
+| `APPOINTMENT_NOT_FOUND` | `appointment_save` |  |
+| `APPOINTMENT_PATIENT_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_PATIENT_REQUIRED` | `appointment_save` |  |
+| `APPOINTMENT_PERIOD_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_PROCEDURE_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_PROFESSIONAL_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_PROFESSIONAL_REQUIRED` | `appointment_save` |  |
+| `APPOINTMENT_REQUIRED` | `appointment_save` |  |
+| `APPOINTMENT_STATUS_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_TITLE_REQUIRED` | `appointment_save` |  |
+| `APPOINTMENT_TYPE_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_VALUE_INVALID` | `appointment_save` |  |
 | `BRANCH_CREATE_CNPJ_IN_USE` | `branch_create` | Cnpj |
 | `BRANCH_CREATE_CNPJ_INVALID` | `branch_create` | Cnpj |
 | `BRANCH_CREATE_COMPANY_REQUIRED` | `branch_create` |  |
@@ -1189,5 +1258,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

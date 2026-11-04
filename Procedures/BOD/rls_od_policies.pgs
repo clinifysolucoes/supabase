@@ -83,3 +83,9 @@ drop policy if exists professional_schedule_select on od.professional_schedule;
 create policy professional_schedule_select on od.professional_schedule
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.appointment
+drop policy if exists appointment_select on od.appointment;
+create policy appointment_select on od.appointment
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

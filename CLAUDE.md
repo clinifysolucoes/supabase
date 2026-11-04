@@ -52,6 +52,7 @@ Objetos principais:
 | `od.procedure_template` / `ad.procedure_suggest` | catálogo global de procedimentos da planilha por especialidade + auto complete do cadastro (catálogo ainda não cadastrado e procedimentos para copiar) |
 | `od.professional` / `od.professional_schedule` | agenda: profissionais da filial (cor, intervalo, usuário vinculado) e horário de atendimento por dia da semana |
 | `ad.professional_list` / `ad.professional_save` | tela Agenda (`AGENDA`, uuid `...000000000007`): cadastro de profissionais e horários |
+| `od.appointment` / `ad.appointment_list` / `ad.appointment_save` | agenda: consultas e compromissos (clínica toda ou profissional), situação do atendimento, conflito de horário (encaixe libera), alertas de retorno no período |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |

@@ -1,0 +1,257 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.appointment_save(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('appointment_save')      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Agenda: cria ou altera uma consulta ou um compromisso.
+      vc_action = 'I'  cria (nr_appointment sequencial por filial) -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente (tambem a situacao)   -> permissao ALTERAR
+    Update parcial: chave presente altera (null limpa), ausente mantem; a linha
+    resultante e validada inteira.
+      consulta (it_type 1):     paciente ativo e profissional ativo obrigatorios
+      compromisso (it_type 2):  titulo obrigatorio; sem profissional = clinica toda
+    Paciente, profissional e procedimento podem continuar inativos se nao
+    mudaram. Conflito de horario: outro agendamento nao cancelado, que nao e
+    encaixe, que se sobrepoe, do mesmo profissional ou da clinica toda ->
+    APPOINTMENT_CONFLICT, salvo id_fit_in (encaixe) ou situacao cancelado/faltou.
+    Na alteracao so e checado se mudou horario, profissional ou tipo, ou se o
+    agendamento voltou de cancelado/faltou (mudar so a situacao nao barra). O log de
+    atividades nao guarda dados pessoais (so o numero do paciente).
+
+  Input p_json:
+    nr_version       integer      obrigatorio = 1
+    vc_action        text         obrigatorio 'I' | 'U'
+    nr_company       bigint       obrigatorio
+    nr_branch        bigint       obrigatorio
+    nr_appointment   bigint       obrigatorio em 'U'
+    it_type          integer      1 consulta (default) | 2 compromisso
+    nr_patient       bigint       consulta
+    nr_professional  bigint       consulta (obrigatorio) | compromisso (null = clinica toda)
+    nr_procedure     bigint       opcional
+    vc_title         text         compromisso (ate 80); consulta: motivo opcional
+    vc_notes         text         opcional
+    dh_start         timestamptz  obrigatorio em 'I' (ISO 8601 com fuso)
+    dh_end           timestamptz  obrigatorio em 'I' (maior que dh_start)
+    id_all_day       boolean      opcional
+    id_fit_in        boolean      opcional (encaixe: ignora conflito de horario)
+    it_status        integer      1 agendado | 2 confirmado | 3 em espera | 4 em atendimento |
+                                  5 atendido | 6 atrasado | 7 faltou | 90 cancelado
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_appointment"}
+
+  Errors: VERSION_MISMATCH, APPOINTMENT_ACTION_INVALID, AGENDA_BRANCH_REQUIRED, APPOINTMENT_FORBIDDEN,
+    APPOINTMENT_REQUIRED, APPOINTMENT_NOT_FOUND, APPOINTMENT_VALUE_INVALID, APPOINTMENT_TYPE_INVALID,
+    APPOINTMENT_PATIENT_REQUIRED, APPOINTMENT_PATIENT_INVALID, APPOINTMENT_PROFESSIONAL_REQUIRED,
+    APPOINTMENT_PROFESSIONAL_INVALID, APPOINTMENT_PROCEDURE_INVALID, APPOINTMENT_TITLE_REQUIRED,
+    APPOINTMENT_PERIOD_INVALID, APPOINTMENT_STATUS_INVALID, APPOINTMENT_CONFLICT {Time}
+*/
+create or replace function ad.appointment_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user        bigint;
+  _vc_action      text;
+  _nr_company     bigint;
+  _nr_branch      bigint;
+  _nr_appointment bigint;
+  _perm           jsonb;
+  _cur            od.appointment%rowtype;
+  _new            od.appointment%rowtype;
+  _tz             text;
+  _conflict       timestamptz;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('APPOINTMENT_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('AGENDA_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('APPOINTMENT_FORBIDDEN');
+  end if;
+
+  if _vc_action = 'U' then
+    _nr_appointment := (p_json ->> 'nr_appointment')::bigint;
+    if _nr_appointment is null then
+      raise exception '%', ad.fn_message('APPOINTMENT_REQUIRED');
+    end if;
+    select * into _cur from od.appointment a
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_appointment = _nr_appointment
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('APPOINTMENT_NOT_FOUND');
+    end if;
+  else
+    _cur.it_type   := 1;
+    _cur.it_status := 1;
+    _cur.id_all_day := false;
+    _cur.id_fit_in  := false;
+  end if;
+
+  /* linha resultante: chave presente altera (null limpa), ausente mantem    */
+  begin
+    _new := _cur;
+    _new.it_type         := case when p_json ? 'it_type'         then (p_json ->> 'it_type')::smallint          else _cur.it_type end;
+    _new.nr_patient      := case when p_json ? 'nr_patient'      then (p_json ->> 'nr_patient')::bigint         else _cur.nr_patient end;
+    _new.nr_professional := case when p_json ? 'nr_professional' then (p_json ->> 'nr_professional')::bigint    else _cur.nr_professional end;
+    _new.nr_procedure    := case when p_json ? 'nr_procedure'    then (p_json ->> 'nr_procedure')::bigint       else _cur.nr_procedure end;
+    _new.vc_title        := case when p_json ? 'vc_title'        then left(nullif(trim(p_json ->> 'vc_title'), ''), 80) else _cur.vc_title end;
+    _new.vc_notes        := case when p_json ? 'vc_notes'        then nullif(trim(p_json ->> 'vc_notes'), '')   else _cur.vc_notes end;
+    _new.dh_start        := case when p_json ? 'dh_start'        then (p_json ->> 'dh_start')::timestamptz      else _cur.dh_start end;
+    _new.dh_end          := case when p_json ? 'dh_end'          then (p_json ->> 'dh_end')::timestamptz        else _cur.dh_end end;
+    _new.id_all_day      := case when p_json ? 'id_all_day'      then coalesce((p_json ->> 'id_all_day')::boolean, false) else _cur.id_all_day end;
+    _new.id_fit_in       := case when p_json ? 'id_fit_in'       then coalesce((p_json ->> 'id_fit_in')::boolean, false)  else _cur.id_fit_in end;
+    _new.it_status       := case when p_json ? 'it_status'       then (p_json ->> 'it_status')::smallint        else _cur.it_status end;
+  exception when others then
+    raise exception '%', ad.fn_message('APPOINTMENT_VALUE_INVALID');
+  end;
+
+  if _new.it_type is null or _new.it_type not in (1, 2) then
+    raise exception '%', ad.fn_message('APPOINTMENT_TYPE_INVALID');
+  end if;
+  if _new.it_status is null or _new.it_status not in (1, 2, 3, 4, 5, 6, 7, 90) then
+    raise exception '%', ad.fn_message('APPOINTMENT_STATUS_INVALID');
+  end if;
+
+  if _new.it_type = 1 then
+    if _new.nr_patient is null then
+      raise exception '%', ad.fn_message('APPOINTMENT_PATIENT_REQUIRED');
+    end if;
+    if _new.nr_professional is null then
+      raise exception '%', ad.fn_message('APPOINTMENT_PROFESSIONAL_REQUIRED');
+    end if;
+  else
+    _new.nr_patient := null;
+    if _new.vc_title is null then
+      raise exception '%', ad.fn_message('APPOINTMENT_TITLE_REQUIRED');
+    end if;
+  end if;
+
+  /* paciente / profissional / procedimento: existem; ativos se mudaram      */
+  if _new.nr_patient is not null and not exists (
+       select 1 from od.patient p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient
+          and (p.it_status = 1 or _new.nr_patient is not distinct from _cur.nr_patient)) then
+    raise exception '%', ad.fn_message('APPOINTMENT_PATIENT_INVALID');
+  end if;
+  if _new.nr_professional is not null and not exists (
+       select 1 from od.professional p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _new.nr_professional
+          and (p.it_status = 1 or _new.nr_professional is not distinct from _cur.nr_professional)) then
+    raise exception '%', ad.fn_message('APPOINTMENT_PROFESSIONAL_INVALID');
+  end if;
+  if _new.nr_procedure is not null and not exists (
+       select 1 from od.procedure p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_procedure = _new.nr_procedure
+          and (p.it_status = 1 or _new.nr_procedure is not distinct from _cur.nr_procedure)) then
+    raise exception '%', ad.fn_message('APPOINTMENT_PROCEDURE_INVALID');
+  end if;
+
+  if _new.dh_start is null or _new.dh_end is null or _new.dh_end <= _new.dh_start
+     or _new.dh_end - _new.dh_start > interval '1 day' then
+    raise exception '%', ad.fn_message('APPOINTMENT_PERIOD_INVALID');
+  end if;
+
+  /* conflito de horario                                                     */
+  if not _new.id_fit_in and _new.it_status not in (7, 90)
+     and (_vc_action = 'I'
+          or _new.dh_start <> _cur.dh_start or _new.dh_end <> _cur.dh_end
+          or _new.nr_professional is distinct from _cur.nr_professional
+          or _new.it_type <> _cur.it_type or _cur.id_fit_in
+          or _cur.it_status in (7, 90)) then
+    select a.dh_start into _conflict
+      from od.appointment a
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+       and a.nr_appointment is distinct from _nr_appointment
+       and a.it_status not in (7, 90)
+       and not a.id_fit_in
+       and a.dh_start < _new.dh_end and _new.dh_start < a.dh_end
+       and (a.nr_professional is null or _new.nr_professional is null
+            or a.nr_professional = _new.nr_professional)
+     order by a.dh_start
+     limit 1;
+    if found then
+      select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+      raise exception '%', ad.fn_message('APPOINTMENT_CONFLICT',
+        jsonb_build_object('Time', to_char(_conflict at time zone _tz, 'DD/MM HH24:MI')));
+    end if;
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(a.nr_appointment), 0) + 1
+      into _nr_appointment
+      from od.appointment a
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch;
+
+    insert into od.appointment (
+      nr_company, nr_branch, nr_appointment, it_type, nr_patient, nr_professional, nr_procedure,
+      vc_title, vc_notes, dh_start, dh_end, id_all_day, id_fit_in, it_status, nr_user_created, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr_appointment, _new.it_type, _new.nr_patient, _new.nr_professional,
+      _new.nr_procedure, _new.vc_title, _new.vc_notes, _new.dh_start, _new.dh_end, _new.id_all_day,
+      _new.id_fit_in, _new.it_status, _nr_user, _nr_user);
+  else
+    update od.appointment a set
+      it_type         = _new.it_type,
+      nr_patient      = _new.nr_patient,
+      nr_professional = _new.nr_professional,
+      nr_procedure    = _new.nr_procedure,
+      vc_title        = _new.vc_title,
+      vc_notes        = _new.vc_notes,
+      dh_start        = _new.dh_start,
+      dh_end          = _new.dh_end,
+      id_all_day      = _new.id_all_day,
+      id_fit_in       = _new.id_fit_in,
+      it_status       = _new.it_status
+    where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_appointment = _nr_appointment;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'AGENDA',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'appointment', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_appointment::text,
+    format('%s %s %s',
+           case when _new.it_type = 1 then 'Consulta' else 'Compromisso' end,
+           to_char(_new.dh_start at time zone coalesce(
+             (select b.vc_timezone from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch),
+             'America/Sao_Paulo'), 'DD/MM/YYYY HH24:MI'),
+           case when _vc_action = 'I' then 'agendado(a)' else 'alterado(a)' end),
+    jsonb_build_object(
+      'it_type',         _new.it_type,
+      'nr_patient',      _new.nr_patient,
+      'nr_professional', _new.nr_professional,
+      'dh_start',        _new.dh_start,
+      'dh_end',          _new.dh_end,
+      'it_status',       _new.it_status,
+      'changed',         (select coalesce(jsonb_agg(k order by k), '[]'::jsonb)
+                            from jsonb_object_keys(p_json - array['nr_version', 'vc_action', 'nr_company',
+                                                                  'nr_branch', 'nr_appointment']) k)));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_appointment', _nr_appointment);
+end;
+$$;
+
+revoke all on function ad.appointment_save(jsonb) from public, anon;
+grant execute on function ad.appointment_save(jsonb) to authenticated;
