@@ -1,0 +1,100 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.professional_list(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('professional_list')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Profissionais da filial (colunas da agenda) com o horario de atendimento
+    por dia da semana e o usuario do sistema vinculado. Devolve tambem os
+    usuarios ativos da empresa, para o combo "usuario do sistema" do cadastro.
+    Exige permissao de LEITURA na tela AGENDA.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    id_include_inactive  boolean  opcional (default false)
+
+  Output jsonb:
+    {"professionals": [{"nr_professional", "vc_name", "vc_council", "vc_color",
+                        "qt_slot_minutes", "nr_user", "vc_user_name", "it_status",
+                        "schedules": [{"it_weekday", "qt_minute_start", "qt_minute_end"}]}],
+     "users": [{"nr_user", "vc_name", "vc_email"}]}
+    it_weekday: 0 domingo .. 6 sabado; minutos desde a meia-noite.
+
+  Errors: VERSION_MISMATCH, AGENDA_BRANCH_REQUIRED, AGENDA_FORBIDDEN
+*/
+create or replace function ad.professional_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company    bigint;
+  _nr_branch     bigint;
+  _inactive      boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _professionals jsonb;
+  _users         jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'professional_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('AGENDA_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('AGENDA_FORBIDDEN');
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_professional', p.nr_professional,
+             'vc_name',         p.vc_name,
+             'vc_council',      p.vc_council,
+             'vc_color',        p.vc_color,
+             'qt_slot_minutes', p.qt_slot_minutes,
+             'nr_user',         p.nr_user,
+             'vc_user_name',    u.vc_name,
+             'it_status',       p.it_status,
+             'schedules',       (select coalesce(jsonb_agg(
+                                          jsonb_build_object(
+                                            'it_weekday',      s.it_weekday,
+                                            'qt_minute_start', s.qt_minute_start,
+                                            'qt_minute_end',   s.qt_minute_end)
+                                          order by s.it_weekday, s.qt_minute_start), '[]'::jsonb)
+                                   from od.professional_schedule s
+                                  where s.nr_company      = p.nr_company
+                                    and s.nr_branch       = p.nr_branch
+                                    and s.nr_professional = p.nr_professional))
+           order by p.vc_name), '[]'::jsonb)
+    into _professionals
+    from od.professional p
+    left join ad.app_user u on u.nr_user = p.nr_user
+   where p.nr_company = _nr_company
+     and p.nr_branch  = _nr_branch
+     and (_inactive or p.it_status = 1);
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object('nr_user', u.nr_user, 'vc_name', u.vc_name, 'vc_email', u.vc_email)
+           order by u.vc_name), '[]'::jsonb)
+    into _users
+    from ad.company_user cu
+    join ad.app_user u on u.nr_user = cu.nr_user
+   where cu.nr_company = _nr_company
+     and cu.it_status  = 1
+     and u.it_status   = 1;
+
+  return jsonb_build_object('professionals', _professionals, 'users', _users);
+end;
+$$;
+
+revoke all on function ad.professional_list(jsonb) from public, anon;
+grant execute on function ad.professional_list(jsonb) to authenticated;

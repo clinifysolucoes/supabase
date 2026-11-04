@@ -50,6 +50,8 @@ Objetos principais:
 | `ad.material_list` / `ad.material_save` / `ad.procedure_list` / `ad.procedure_save` | CRUD da tela; `procedure_list` devolve o preço calculado e o alerta do valor cobrado |
 | `od.specialty` / `ad.specialty_list` / `ad.specialty_save` | especialidades da filial: agrupam os procedimentos e têm lucro próprio (procedimento > especialidade > filial) |
 | `od.procedure_template` / `ad.procedure_suggest` | catálogo global de procedimentos da planilha por especialidade + auto complete do cadastro (catálogo ainda não cadastrado e procedimentos para copiar) |
+| `od.professional` / `od.professional_schedule` | agenda: profissionais da filial (cor, intervalo, usuário vinculado) e horário de atendimento por dia da semana |
+| `ad.professional_list` / `ad.professional_save` | tela Agenda (`AGENDA`, uuid `...000000000007`): cadastro de profissionais e horários |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |

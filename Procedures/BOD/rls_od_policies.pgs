@@ -71,3 +71,15 @@ drop policy if exists specialty_select on od.specialty;
 create policy specialty_select on od.specialty
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.professional
+drop policy if exists professional_select on od.professional;
+create policy professional_select on od.professional
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.professional_schedule
+drop policy if exists professional_schedule_select on od.professional_schedule;
+create policy professional_schedule_select on od.professional_schedule
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

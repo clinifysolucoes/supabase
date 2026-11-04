@@ -53,3 +53,11 @@ create or replace trigger specialty_audit
 create or replace trigger procedure_template_audit
   before insert or update on od.procedure_template
   for each row execute function ad.trg_audit();
+
+create or replace trigger professional_audit
+  before insert or update on od.professional
+  for each row execute function ad.trg_audit();
+
+create or replace trigger professional_schedule_audit
+  before insert or update on od.professional_schedule
+  for each row execute function ad.trg_audit();

@@ -1,0 +1,251 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.professional_save(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('professional_save')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastro de profissionais da agenda e do horario de atendimento.
+      vc_action = 'I'  cria (nr_professional sequencial por filial) -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente                        -> permissao ALTERAR
+    vc_color: cor da coluna na agenda (#RRGGBB, gravada em maiusculas). Sem cor
+    na criacao, usa a proxima da paleta padrao.
+    nr_user: usuario do sistema que e este profissional (ativo na empresa e
+    em no maximo um profissional da filial); null desvincula.
+    schedules, quando presente, SUBSTITUI o horario inteiro: lista de
+    {it_weekday 0..6 (0 = domingo), qt_minute_start, qt_minute_end} em minutos
+    desde a meia-noite; faixas do mesmo dia nao podem se sobrepor.
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     obrigatorio 'I' | 'U'
+    nr_company       bigint   obrigatorio
+    nr_branch        bigint   obrigatorio
+    nr_professional  bigint   obrigatorio em 'U'
+    vc_name          text     obrigatorio em 'I' (ate 80, unico na filial)
+    vc_council       text     opcional (registro no conselho, ex.: CRO-PR 12345)
+    vc_color         text     opcional (#RRGGBB)
+    qt_slot_minutes  integer  opcional 5..240 (intervalo dos horarios; default 30)
+    nr_user          bigint   opcional (null desvincula)
+    it_status        integer  1 ativo | 90 inativo (so em 'U')
+    schedules        array    opcional [{"it_weekday": 1, "qt_minute_start": 480, "qt_minute_end": 720}]
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_professional"}
+
+  Errors: VERSION_MISMATCH, PROFESSIONAL_ACTION_INVALID, AGENDA_BRANCH_REQUIRED,
+    PROFESSIONAL_FORBIDDEN, PROFESSIONAL_NAME_REQUIRED, PROFESSIONAL_NAME_IN_USE {Name},
+    PROFESSIONAL_COLOR_INVALID, PROFESSIONAL_SLOT_INVALID, PROFESSIONAL_USER_INVALID,
+    PROFESSIONAL_USER_IN_USE {Name}, PROFESSIONAL_STATUS_INVALID, PROFESSIONAL_SCHEDULES_INVALID,
+    PROFESSIONAL_SCHEDULE_INVALID {Weekday}, PROFESSIONAL_SCHEDULE_OVERLAP {Weekday},
+    PROFESSIONAL_REQUIRED, PROFESSIONAL_NOT_FOUND
+*/
+create or replace function ad.professional_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user         bigint;
+  _vc_action       text;
+  _nr_company      bigint;
+  _nr_branch       bigint;
+  _nr_professional bigint;
+  _perm            jsonb;
+  _vc_name         varchar(80);
+  _vc_color        varchar(7);
+  _nr_link         bigint;
+  _row             od.professional%rowtype;
+  _item            jsonb;
+  _weekday         integer;
+  _start           integer;
+  _end             integer;
+  _palette         text[] := array['#0E8C86', '#E9A23B', '#6C5CE7', '#D64545', '#2E9E6B',
+                                   '#3B82F6', '#DB2777', '#E07B2E', '#14B8A6', '#64748B'];
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'professional_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('PROFESSIONAL_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('AGENDA_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PROFESSIONAL_FORBIDDEN');
+  end if;
+
+  if p_json ? 'vc_name' or _vc_action = 'I' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 80);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('PROFESSIONAL_NAME_REQUIRED');
+    end if;
+  end if;
+  _vc_color := upper(nullif(trim(p_json ->> 'vc_color'), ''));
+  if _vc_color is not null and _vc_color !~ '^#[0-9A-F]{6}$' then
+    raise exception '%', ad.fn_message('PROFESSIONAL_COLOR_INVALID');
+  end if;
+  if p_json ? 'qt_slot_minutes'
+     and coalesce((p_json ->> 'qt_slot_minutes')::integer, 0) not between 5 and 240 then
+    raise exception '%', ad.fn_message('PROFESSIONAL_SLOT_INVALID');
+  end if;
+  if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
+    raise exception '%', ad.fn_message('PROFESSIONAL_STATUS_INVALID');
+  end if;
+
+  /* usuario vinculado: ativo na empresa                                      */
+  _nr_link := (p_json ->> 'nr_user')::bigint;
+  if _nr_link is not null and not exists (
+       select 1 from ad.company_user cu
+         join ad.app_user u on u.nr_user = cu.nr_user
+        where cu.nr_company = _nr_company and cu.nr_user = _nr_link
+          and cu.it_status = 1 and u.it_status = 1) then
+    raise exception '%', ad.fn_message('PROFESSIONAL_USER_INVALID');
+  end if;
+
+  /* horario: valida antes de gravar qualquer coisa                          */
+  if p_json ? 'schedules' then
+    if p_json -> 'schedules' is null or jsonb_typeof(p_json -> 'schedules') <> 'array' then
+      raise exception '%', ad.fn_message('PROFESSIONAL_SCHEDULES_INVALID');
+    end if;
+    for _item in select * from jsonb_array_elements(p_json -> 'schedules') loop
+      _weekday := (_item ->> 'it_weekday')::integer;
+      _start   := (_item ->> 'qt_minute_start')::integer;
+      _end     := (_item ->> 'qt_minute_end')::integer;
+      if _weekday is null or _weekday not between 0 and 6
+         or _start is null or _end is null or _start < 0 or _end > 1440 or _start >= _end then
+        raise exception '%', ad.fn_message('PROFESSIONAL_SCHEDULE_INVALID',
+          jsonb_build_object('Weekday', coalesce(_item ->> 'it_weekday', '')));
+      end if;
+    end loop;
+    select (a.item ->> 'it_weekday')::integer
+      into _weekday
+      from jsonb_array_elements(p_json -> 'schedules') with ordinality a(item, ia)
+      join jsonb_array_elements(p_json -> 'schedules') with ordinality b(item, ib)
+        on a.ia < b.ib
+       and (a.item ->> 'it_weekday')::integer = (b.item ->> 'it_weekday')::integer
+       and (a.item ->> 'qt_minute_start')::integer < (b.item ->> 'qt_minute_end')::integer
+       and (b.item ->> 'qt_minute_start')::integer < (a.item ->> 'qt_minute_end')::integer
+     limit 1;
+    if found then
+      raise exception '%', ad.fn_message('PROFESSIONAL_SCHEDULE_OVERLAP', jsonb_build_object('Weekday', _weekday));
+    end if;
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+  /*------------------------------------------------------------------------*/
+    if exists (select 1 from od.professional p
+                where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                  and lower(p.vc_name) = lower(_vc_name)) then
+      raise exception '%', ad.fn_message('PROFESSIONAL_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+    end if;
+
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+
+    select coalesce(max(p.nr_professional), 0) + 1
+      into _nr_professional
+      from od.professional p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch;
+  else
+    _nr_professional := (p_json ->> 'nr_professional')::bigint;
+    if _nr_professional is null then
+      raise exception '%', ad.fn_message('PROFESSIONAL_REQUIRED');
+    end if;
+    if not exists (select 1 from od.professional p
+                    where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                      and p.nr_professional = _nr_professional) then
+      raise exception '%', ad.fn_message('PROFESSIONAL_NOT_FOUND');
+    end if;
+    if _vc_name is not null and exists (
+         select 1 from od.professional p
+          where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+            and lower(p.vc_name) = lower(_vc_name) and p.nr_professional <> _nr_professional) then
+      raise exception '%', ad.fn_message('PROFESSIONAL_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+    end if;
+  end if;
+
+  if _nr_link is not null and exists (
+       select 1 from od.professional p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+          and p.nr_user = _nr_link and p.nr_professional <> _nr_professional) then
+    raise exception '%', ad.fn_message('PROFESSIONAL_USER_IN_USE',
+      jsonb_build_object('Name', (select p.vc_name from od.professional p
+                                   where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                     and p.nr_user = _nr_link)));
+  end if;
+
+  if _vc_action = 'I' then
+    insert into od.professional (
+      nr_company, nr_branch, nr_professional, vc_name, vc_council, vc_color,
+      qt_slot_minutes, nr_user, it_status, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr_professional, _vc_name,
+      left(nullif(trim(p_json ->> 'vc_council'), ''), 30),
+      coalesce(_vc_color, _palette[1 + ((_nr_professional - 1) % array_length(_palette, 1))::integer]),
+      coalesce((p_json ->> 'qt_slot_minutes')::smallint, 30),
+      _nr_link, 1, _nr_user)
+    returning * into _row;
+  else
+    update od.professional p set
+      vc_name         = case when p_json ? 'vc_name'         then _vc_name                                            else p.vc_name end,
+      vc_council      = case when p_json ? 'vc_council'      then left(nullif(trim(p_json ->> 'vc_council'), ''), 30) else p.vc_council end,
+      vc_color        = case when _vc_color is not null      then _vc_color                                           else p.vc_color end,
+      qt_slot_minutes = case when p_json ? 'qt_slot_minutes' then (p_json ->> 'qt_slot_minutes')::smallint            else p.qt_slot_minutes end,
+      nr_user         = case when p_json ? 'nr_user'         then _nr_link                                            else p.nr_user end,
+      it_status       = case when p_json ? 'it_status'       then (p_json ->> 'it_status')::smallint                  else p.it_status end
+    where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _nr_professional
+    returning p.* into _row;
+  end if;
+
+  /* horario: presente = substitui todo                                      */
+  if p_json ? 'schedules' then
+    delete from od.professional_schedule s
+     where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_professional = _nr_professional;
+
+    insert into od.professional_schedule (
+      nr_company, nr_branch, nr_professional, nr_schedule, it_weekday, qt_minute_start, qt_minute_end, nr_operator)
+    select _nr_company, _nr_branch, _nr_professional,
+           row_number() over (order by (x.item ->> 'it_weekday')::integer, (x.item ->> 'qt_minute_start')::integer),
+           (x.item ->> 'it_weekday')::smallint,
+           (x.item ->> 'qt_minute_start')::smallint,
+           (x.item ->> 'qt_minute_end')::smallint,
+           _nr_user
+      from jsonb_array_elements(p_json -> 'schedules') x(item);
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'AGENDA',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'professional', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_professional::text,
+    format('Profissional %s %s', _row.vc_name, case when _vc_action = 'I' then 'cadastrado' else 'alterado' end),
+    jsonb_build_object(
+      'vc_name',         _row.vc_name,
+      'vc_color',        _row.vc_color,
+      'qt_slot_minutes', _row.qt_slot_minutes,
+      'nr_user',         _row.nr_user,
+      'it_status',       _row.it_status,
+      'qt_schedules',    (select count(*) from od.professional_schedule s
+                           where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                             and s.nr_professional = _nr_professional)));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_professional', _nr_professional);
+end;
+$$;
+
+revoke all on function ad.professional_save(jsonb) from public, anon;
+grant execute on function ad.professional_save(jsonb) to authenticated;

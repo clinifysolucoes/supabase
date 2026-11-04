@@ -378,6 +378,42 @@
     },
     {
       "schema": "od",
+      "name": "professional",
+      "title": "Profissional da agenda",
+      "description": "Quem atende na filial (dentista, HOF, ASB...): uma coluna na agenda, com cor própria, intervalo dos horários e, opcionalmente, o usuário do sistema que é este profissional. nr_professional é sequencial por filial.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via professional_save (permissão na tela AGENDA).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "branch.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "branch.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_professional", "type": "bigint", "pk": 3, "nullable": false, "description": "Número sequencial do profissional na filial." },
+        { "name": "vc_name", "type": "varchar(80)", "uk": "professional_vc_name_uk", "nullable": false, "description": "Nome exibido na agenda (único na filial)." },
+        { "name": "vc_council", "type": "varchar(30)", "nullable": true, "description": "Registro no conselho (ex.: CRO-PR 12345)." },
+        { "name": "vc_color", "type": "varchar(7)", "nullable": false, "description": "Cor da coluna na agenda, #RRGGBB em maiúsculas (sem cor na criação: próxima da paleta padrão)." },
+        { "name": "qt_slot_minutes", "type": "smallint", "nullable": false, "default": "30", "description": "Intervalo dos horários na agenda deste profissional, em minutos (5 a 240)." },
+        { "name": "nr_user", "type": "bigint", "uk": "professional_nr_user_uk", "fk": "app_user.nr_user", "nullable": true, "description": "Usuário do sistema que é este profissional (ativo na empresa; no máximo um profissional por usuário na filial)." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação do profissional (inativo some da agenda).",
+          "values": { "1": "Ativo", "90": "Inativo" } }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "professional_schedule",
+      "title": "Horário de atendimento",
+      "description": "Faixas de atendimento do profissional por dia da semana (várias por dia, sem sobrepor). Fora delas a agenda mostra o horário como indisponível. Substituído inteiro a cada professional_save com schedules.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via professional_save.",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "professional.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "professional.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_professional", "type": "bigint", "pk": 3, "fk": "professional.nr_professional", "nullable": false, "description": "Profissional." },
+        { "name": "nr_schedule", "type": "bigint", "pk": 4, "nullable": false, "description": "Número da faixa no profissional (renumerado a cada gravação, por dia e hora)." },
+        { "name": "it_weekday", "type": "smallint", "nullable": false, "description": "Dia da semana.",
+          "values": { "0": "Domingo", "1": "Segunda", "2": "Terça", "3": "Quarta", "4": "Quinta", "5": "Sexta", "6": "Sábado" } },
+        { "name": "qt_minute_start", "type": "smallint", "nullable": false, "description": "Início da faixa, em minutos desde a meia-noite (480 = 08:00)." },
+        { "name": "qt_minute_end", "type": "smallint", "nullable": false, "description": "Fim da faixa, em minutos desde a meia-noite (maior que o início; até 1440)." }
+      ]
+    },
+    {
+      "schema": "od",
       "name": "patient",
       "title": "Paciente",
       "description": "Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial.",
@@ -484,6 +520,9 @@
     { "from": "procedure", "to": "procedure_material", "card": "||--o{", "label": "usa materiais" },
     { "from": "material", "to": "procedure_material", "card": "||--o{", "label": "usado em" },
     { "from": "branch", "to": "patient", "card": "||--o{", "label": "pacientes" },
+    { "from": "branch", "to": "professional", "card": "||--o{", "label": "profissionais" },
+    { "from": "professional", "to": "professional_schedule", "card": "||--o{", "label": "horário de atendimento" },
+    { "from": "app_user", "to": "professional", "card": "|o--o{", "label": "é o profissional" },
     { "from": "patient", "to": "patient_note", "card": "||--o{", "label": "notas" },
     { "from": "app_user", "to": "patient_note", "card": "||--o{", "label": "autor" }
   ],
@@ -588,6 +627,12 @@
     { "name": "procedure_suggest", "signature": "ad.procedure_suggest(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
       "description": "Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING.",
       "errors": ["VERSION_MISMATCH", "PRICING_BRANCH_REQUIRED", "PRICING_FORBIDDEN"] },
+    { "name": "professional_list", "signature": "ad.professional_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
+      "description": "Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA.",
+      "errors": ["VERSION_MISMATCH", "AGENDA_BRANCH_REQUIRED", "AGENDA_FORBIDDEN"] },
+    { "name": "professional_save", "signature": "ad.professional_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
+      "description": "Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log.",
+      "errors": ["VERSION_MISMATCH", "PROFESSIONAL_ACTION_INVALID", "AGENDA_BRANCH_REQUIRED", "PROFESSIONAL_FORBIDDEN", "PROFESSIONAL_NAME_REQUIRED", "PROFESSIONAL_NAME_IN_USE", "PROFESSIONAL_COLOR_INVALID", "PROFESSIONAL_SLOT_INVALID", "PROFESSIONAL_USER_INVALID", "PROFESSIONAL_USER_IN_USE", "PROFESSIONAL_STATUS_INVALID", "PROFESSIONAL_SCHEDULES_INVALID", "PROFESSIONAL_SCHEDULE_INVALID", "PROFESSIONAL_SCHEDULE_OVERLAP", "PROFESSIONAL_REQUIRED", "PROFESSIONAL_NOT_FOUND"] },
     { "name": "specialty_list", "signature": "ad.specialty_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
       "description": "Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING.",
       "errors": ["VERSION_MISMATCH", "PRICING_BRANCH_REQUIRED", "PRICING_FORBIDDEN"] },

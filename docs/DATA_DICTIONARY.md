@@ -53,6 +53,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.procedure_template`](#odproceduretemplate) | Catálogo de procedimentos (referência) | Catálogo GLOBAL de procedimentos por especialidade, com os dados da planilha de precificação da clínica (código, nome, tempo, material informado, laboratório e valor de referência). Alimenta o auto complete do cadastro de procedimento (procedure_suggest), que sugere o que a filial ainda não cadastrou. A especialidade é casada pelo nome com od.specialty. Mantido só por migration. |
 | [`od.procedure`](#odprocedure) | Procedimento | Procedimento precificado, ligado a uma especialidade: tempo de cadeira, laboratório/terceiros, outros materiais (valor informado), valor cobrado hoje (comparado ao custo, ao preço mínimo e ao sugerido para gerar o alerta) e, opcionalmente, comissão e lucro próprios. O preço não é gravado: procedure_list calcula sempre com os parâmetros atuais (od.fn_pricing_calc). |
 | [`od.procedure_material`](#odprocedurematerial) | Material do procedimento | Materiais usados em cada procedimento com a quantidade em unidades de uso. Custo da linha = quantidade × custo unitário do material. A lista é substituída a cada procedure_save com materials. |
+| [`od.professional`](#odprofessional) | Profissional da agenda | Quem atende na filial (dentista, HOF, ASB...): uma coluna na agenda, com cor própria, intervalo dos horários e, opcionalmente, o usuário do sistema que é este profissional. nr_professional é sequencial por filial. |
+| [`od.professional_schedule`](#odprofessionalschedule) | Horário de atendimento | Faixas de atendimento do profissional por dia da semana (várias por dia, sem sobrepor). Fora delas a agenda mostra o horário como indisponível. Substituído inteiro a cada professional_save com schedules. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
 
@@ -83,6 +85,9 @@ erDiagram
   procedure ||--o{ procedure_material : "usa materiais"
   material ||--o{ procedure_material : "usado em"
   branch ||--o{ patient : "pacientes"
+  branch ||--o{ professional : "profissionais"
+  professional ||--o{ professional_schedule : "horário de atendimento"
+  app_user |o--o{ professional : "é o profissional"
   patient ||--o{ patient_note : "notas"
   app_user ||--o{ patient_note : "autor"
   auth_users {
@@ -301,6 +306,26 @@ erDiagram
     bigint nr_procedure PK, FK
     bigint nr_material PK, FK
     numeric qt_used
+  }
+  professional {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_professional PK
+    varchar vc_name UK
+    varchar vc_council
+    varchar vc_color
+    smallint qt_slot_minutes
+    bigint nr_user FK, UK
+    smallint it_status
+  }
+  professional_schedule {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_professional PK, FK
+    bigint nr_schedule PK
+    smallint it_weekday
+    smallint qt_minute_start
+    smallint qt_minute_end
   }
   patient {
     bigint nr_company PK, FK
@@ -795,6 +820,50 @@ Materiais usados em cada procedimento com a quantidade em unidades de uso. Custo
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.professional
+
+**Profissional da agenda**
+
+Quem atende na filial (dentista, HOF, ASB...): uma coluna na agenda, com cor própria, intervalo dos horários e, opcionalmente, o usuário do sistema que é este profissional. nr_professional é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via professional_save (permissão na tela AGENDA).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_professional` | `bigint` | PK3 | NOT NULL |  | Número sequencial do profissional na filial. |
+| `vc_name` | `varchar(80)` | UK | NOT NULL |  | Nome exibido na agenda (único na filial). |
+| `vc_council` | `varchar(30)` |  | NULL |  | Registro no conselho (ex.: CRO-PR 12345). |
+| `vc_color` | `varchar(7)` |  | NOT NULL |  | Cor da coluna na agenda, #RRGGBB em maiúsculas (sem cor na criação: próxima da paleta padrão). |
+| `qt_slot_minutes` | `smallint` |  | NOT NULL | `30` | Intervalo dos horários na agenda deste profissional, em minutos (5 a 240). |
+| `nr_user` | `bigint` | UK, FK → `app_user.nr_user` | NULL |  | Usuário do sistema que é este profissional (ativo na empresa; no máximo um profissional por usuário na filial). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do profissional (inativo some da agenda). Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.professional_schedule
+
+**Horário de atendimento**
+
+Faixas de atendimento do profissional por dia da semana (várias por dia, sem sobrepor). Fora delas a agenda mostra o horário como indisponível. Substituído inteiro a cada professional_save com schedules.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via professional_save.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `professional.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `professional.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_professional` | `bigint` | PK3, FK → `professional.nr_professional` | NOT NULL |  | Profissional. |
+| `nr_schedule` | `bigint` | PK4 | NOT NULL |  | Número da faixa no profissional (renumerado a cada gravação, por dia e hora). |
+| `it_weekday` | `smallint` |  | NOT NULL |  | Dia da semana. Valores: 0 = Domingo; 1 = Segunda; 2 = Terça; 3 = Quarta; 4 = Quinta; 5 = Sexta; 6 = Sábado. |
+| `qt_minute_start` | `smallint` |  | NOT NULL |  | Início da faixa, em minutos desde a meia-noite (480 = 08:00). |
+| `qt_minute_end` | `smallint` |  | NOT NULL |  | Fim da faixa, em minutos desde a meia-noite (maior que o início; até 1440). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.patient
 
 **Paciente**
@@ -909,6 +978,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.procedure_list(p_json jsonb)` | authenticated | Procedimentos da filial com especialidade, materiais, preço calculado (fn_pricing_calc; lucro do procedimento > especialidade > filial), preço mínimo, decomposição (cartão, comissão, taxas, IR, lucro), situação do valor cobrado hoje (it_price_status, lucro atual) e alertas (NO_TIME, NO_MATERIAL, MATERIAL_NO_PRICE, PERCENT_TOO_HIGH, PRICE_BELOW_COST, PRICE_BELOW_MIN, PRICE_BELOW_SUGGESTED). Filtros: nr_specialty, vc_search, id_include_inactive; it_tax_regime simula PF x PJ. Devolve também parâmetros e resumo. Exige leitura na tela PRICING. |
 | `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
 | `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING. |
+| `ad.professional_list(p_json jsonb)` | authenticated | Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA. |
+| `ad.professional_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
 | `ad.specialty_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) uma especialidade: nome, lucro desejado (null = padrão da filial) e situação. Grava event_log. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
@@ -969,6 +1040,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ACCESS_PROFILE_SCREEN_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_SCREENS_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_STATUS_INVALID` | `access_profile_save` |  |
+| `AGENDA_BRANCH_REQUIRED` | `professional_list`, `professional_save` |  |
+| `AGENDA_FORBIDDEN` | `professional_list` |  |
 | `BRANCH_CREATE_CNPJ_IN_USE` | `branch_create` | Cnpj |
 | `BRANCH_CREATE_CNPJ_INVALID` | `branch_create` | Cnpj |
 | `BRANCH_CREATE_COMPANY_REQUIRED` | `branch_create` |  |
@@ -1077,6 +1150,20 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROCEDURE_SPECIALTY_INVALID` | `procedure_save` |  |
 | `PROCEDURE_STATUS_INVALID` | `procedure_save` |  |
 | `PROCEDURE_VALUE_INVALID` | `procedure_save` | Field |
+| `PROFESSIONAL_ACTION_INVALID` | `professional_save` |  |
+| `PROFESSIONAL_COLOR_INVALID` | `professional_save` |  |
+| `PROFESSIONAL_FORBIDDEN` | `professional_save` |  |
+| `PROFESSIONAL_NAME_IN_USE` | `professional_save` |  |
+| `PROFESSIONAL_NAME_REQUIRED` | `professional_save` |  |
+| `PROFESSIONAL_NOT_FOUND` | `professional_save` |  |
+| `PROFESSIONAL_REQUIRED` | `professional_save` |  |
+| `PROFESSIONAL_SCHEDULE_INVALID` | `professional_save` |  |
+| `PROFESSIONAL_SCHEDULE_OVERLAP` | `professional_save` |  |
+| `PROFESSIONAL_SCHEDULES_INVALID` | `professional_save` |  |
+| `PROFESSIONAL_SLOT_INVALID` | `professional_save` |  |
+| `PROFESSIONAL_STATUS_INVALID` | `professional_save` |  |
+| `PROFESSIONAL_USER_IN_USE` | `professional_save` |  |
+| `PROFESSIONAL_USER_INVALID` | `professional_save` |  |
 | `SCREEN_LIST_FORBIDDEN` | `screen_list` |  |
 | `SESSION_COMPANY_BLOCKED` | `session_context` |  |
 | `SESSION_COMPANY_INACTIVE` | `session_context` |  |
@@ -1102,5 +1189,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 
