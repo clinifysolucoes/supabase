@@ -1,0 +1,136 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.pricing_param_get(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('pricing_param_get')     ::
+  ::                Edge Function material-price-lookup (checagem de acesso)      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Aba "Parametros" da tela de precificacao: parametros da filial, resumo
+    calculado (custo mensal, custo da estrutura por hora...), despesas e taxas
+    adicionais. Quando a filial ainda nao salvou nada (id_saved = false), vem
+    os padroes sugeridos: lista tipica de despesas (valor zero) e taxas
+    sugeridas desligadas - a clinica ajusta e salva com pricing_param_save.
+    Exige permissao de LEITURA na tela PRICING naquela filial.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+
+  Output jsonb:
+    {"params": {...}, "summary": {...},                       (od.fn_pricing_context)
+     "expenses": [{"nr_expense", "vc_name", "it_type", "vl_amount"}],
+     "fees": [{"nr_fee", "vc_name", "vc_hint", "pc_rate", "id_active"}],
+     "permission": {"id_read", "id_create", "id_update"}}
+    it_type: 1 fixa mensal | 2 variavel mensal | 3 eventual anual | 4 publicidade mensal
+
+  Errors (ad.fn_message): VERSION_MISMATCH, PRICING_BRANCH_REQUIRED, PRICING_FORBIDDEN
+*/
+create or replace function ad.pricing_param_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _ctx        jsonb;
+  _expenses   jsonb;
+  _fees       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'pricing_param_get');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
+  if not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('PRICING_FORBIDDEN');
+  end if;
+
+  _ctx := od.fn_pricing_context(_nr_company, _nr_branch);
+
+  if (_ctx -> 'params' ->> 'id_saved')::boolean then
+    select coalesce(jsonb_agg(
+             jsonb_build_object(
+               'nr_expense', e.nr_expense,
+               'vc_name',    e.vc_name,
+               'it_type',    e.it_type,
+               'vl_amount',  e.vl_amount)
+             order by e.it_type, e.nr_expense), '[]'::jsonb)
+      into _expenses
+      from od.clinic_expense e
+     where e.nr_company = _nr_company
+       and e.nr_branch  = _nr_branch
+       and e.it_status  = 1;
+
+    select coalesce(jsonb_agg(
+             jsonb_build_object(
+               'nr_fee',    f.nr_fee,
+               'vc_name',   f.vc_name,
+               'vc_hint',   f.vc_hint,
+               'pc_rate',   f.pc_rate,
+               'id_active', f.id_active)
+             order by f.nr_fee), '[]'::jsonb)
+      into _fees
+      from od.pricing_fee f
+     where f.nr_company = _nr_company
+       and f.nr_branch  = _nr_branch;
+  else
+    /* Sugestoes para a primeira configuracao (consolidadas das planilhas) */
+    _expenses := jsonb_build_array(
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Aluguel',                                   'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Energia elétrica',                          'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Água',                                      'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Telefone e internet',                       'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Salários e encargos (recepção / ASB)',      'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Pró-labore e INSS do profissional',         'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Contabilidade',                             'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Sistema / software',                        'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Depreciação de equipamentos',               'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Anuidade do CRO e seguros',                 'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Manutenção de equipamentos',                'it_type', 1, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Material de limpeza e escritório',          'it_type', 2, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Esterilização e EPI',                       'it_type', 2, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Copa (café, água, copos)',                  'it_type', 2, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', '13º salário e férias',                      'it_type', 3, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Técnico das cadeiras e consertos',          'it_type', 3, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Reformas, fachada e gráfica',               'it_type', 3, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Agência / redes sociais',                   'it_type', 4, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Anúncios',                                  'it_type', 4, 'vl_amount', 0),
+      jsonb_build_object('nr_expense', null, 'vc_name', 'Campanhas internas',                        'it_type', 4, 'vl_amount', 0));
+
+    _fees := jsonb_build_array(
+      jsonb_build_object('nr_fee', null, 'vc_name', 'ISS', 'pc_rate', 5, 'id_active', false,
+        'vc_hint', 'Imposto municipal sobre serviços (2% a 5%). No Simples Nacional já está na alíquota do DAS: deixe desligado.'),
+      jsonb_build_object('nr_fee', null, 'vc_name', 'Inadimplência', 'pc_rate', 3, 'id_active', false,
+        'vc_hint', 'Provisão para pacientes que não pagam (use a média histórica da clínica).'),
+      jsonb_build_object('nr_fee', null, 'vc_name', 'Antecipação de recebíveis', 'pc_rate', 3, 'id_active', false,
+        'vc_hint', 'Custo de antecipar as parcelas do cartão (varia com o prazo e a operadora).'),
+      jsonb_build_object('nr_fee', null, 'vc_name', 'Garantia e retrabalho', 'pc_rate', 2, 'id_active', false,
+        'vc_hint', 'Reserva para refazer procedimentos sem cobrar do paciente.'),
+      jsonb_build_object('nr_fee', null, 'vc_name', 'Margem de negociação', 'pc_rate', 5, 'id_active', false,
+        'vc_hint', 'Espaço para dar desconto sem perder o lucro desejado.'),
+      jsonb_build_object('nr_fee', null, 'vc_name', 'Convênios / planos', 'pc_rate', 0, 'id_active', false,
+        'vc_hint', 'Desconto médio das tabelas de convênio, se a clínica atender planos.'),
+      jsonb_build_object('nr_fee', null, 'vc_name', 'Marketing por procedimento', 'pc_rate', 0, 'id_active', false,
+        'vc_hint', 'Use se preferir ratear a captação de pacientes por procedimento em vez de custo fixo mensal.'));
+  end if;
+
+  return _ctx || jsonb_build_object('expenses', _expenses, 'fees', _fees, 'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.pricing_param_get(jsonb) from public, anon;
+grant execute on function ad.pricing_param_get(jsonb) to authenticated;

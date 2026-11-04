@@ -45,6 +45,10 @@ const dict = {
 const sqlStr = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const mdCell = (s) => (s == null || s === '' ? '' : String(s).replace(/\|/g, '\\|').replace(/\n/g, ' '));
 const baseType = (t) => String(t).replace(/\(.*\)/, '').replace(/\s+/g, '_');
+/* schema da tabela: "schema" no JSON (od, ...) ou o schema padrao (ad) */
+const schemaOf = (t) => t.schema || dict.schema;
+const qualified = (t) => `${schemaOf(t)}.${t.name}`;
+const anchor = (t) => `${schemaOf(t)}${t.name.replace(/_/g, '')}`;
 
 function keyLabel(c) {
   const k = [];
@@ -91,7 +95,10 @@ function markdown() {
   const L = [];
   L.push(`# Dicionário de dados — ${dict.project}`);
   L.push('');
-  L.push(`> ${dict.subtitle}. Schema **\`${dict.schema}\`** (${dict.schema_title}). Atualizado em ${dict.updated}.`);
+  const schemas = dict.schemas
+    ? Object.entries(dict.schemas).map(([k, v]) => `**\`${k}\`** (${v})`).join(', ')
+    : `**\`${dict.schema}\`** (${dict.schema_title})`;
+  L.push(`> ${dict.subtitle}. Schemas: ${schemas}. Atualizado em ${dict.updated}.`);
   L.push('>');
   L.push('> **Gerado** por `node tools/gen-dictionary.mjs` a partir de [`docs/dictionary/schema.json`](dictionary/schema.json). Não edite este arquivo à mão.');
   L.push('> Viewer interativo: abra [`docs/dictionary/index.html`](dictionary/index.html) no navegador.');
@@ -115,7 +122,7 @@ function markdown() {
   L.push('');
   L.push('| Tabela | Título | Descrição |');
   L.push('|---|---|---|');
-  for (const t of dict.tables) L.push(`| [\`ad.${t.name}\`](#ad${t.name.replace(/_/g, '')}) | ${mdCell(t.title)} | ${mdCell(t.description)} |`);
+  for (const t of dict.tables) L.push(`| [\`${qualified(t)}\`](#${anchor(t)}) | ${mdCell(t.title)} | ${mdCell(t.description)} |`);
   L.push('');
   L.push('## Diagrama (ERD)');
   L.push('');
@@ -126,7 +133,7 @@ function markdown() {
   L.push('## Tabelas');
   for (const t of dict.tables) {
     L.push('');
-    L.push(`### ad.${t.name}`);
+    L.push(`### ${qualified(t)}`);
     L.push('');
     L.push(`**${t.title}**`);
     L.push('');
@@ -146,7 +153,7 @@ function markdown() {
   L.push('');
   L.push('## Functions');
   L.push('');
-  L.push('Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema(\'ad\').rpc(\'<nome>\', params: {\'p_json\': {...}})`.');
+  L.push('Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema(\'<schema>\').rpc(\'<nome>\', params: {\'p_json\': {...}})` (`ad` ou `od`, conforme a assinatura).');
   for (const kind of [['rpc', 'RPC (expostas ao app)'], ['helper', 'Helpers (regras compartilhadas / RLS)'], ['trigger', 'Triggers']]) {
     const fns = dict.functions.filter((f) => f.kind === kind[0]);
     if (!fns.length) continue;
@@ -172,6 +179,10 @@ function markdown() {
     BRANCH_UPDATE_CNPJ_INVALID: 'Cnpj', BRANCH_UPDATE_CNPJ_IN_USE: 'Cnpj', BRANCH_UPDATE_EMAIL_INVALID: 'Email', BRANCH_UPDATE_TIMEZONE_INVALID: 'Timezone',
     ACCESS_PROFILE_NAME_IN_USE: 'Name', COMPANY_USER_EMAIL_NOT_FOUND: 'Email', COMPANY_USER_BRANCH_INVALID: 'Branch', COMPANY_USER_PROFILE_INVALID: 'Profile',
     USER_UPDATE_CPF_INVALID: 'Cpf', USER_UPDATE_CPF_IN_USE: 'Cpf',
+    PRICING_PARAM_INVALID: 'Field', PRICING_EXPENSE_TYPE_INVALID: 'Expense', PRICING_EXPENSE_AMOUNT_INVALID: 'Expense',
+    PRICING_FEE_RATE_INVALID: 'Fee', PRICING_PERCENT_TOO_HIGH: 'Total', MATERIAL_NAME_IN_USE: 'Name',
+    PROCEDURE_NAME_IN_USE: 'Name', PROCEDURE_CODE_IN_USE: 'Code', PROCEDURE_VALUE_INVALID: 'Field',
+    PROCEDURE_PERCENT_INVALID: 'Field', PROCEDURE_MATERIAL_INVALID: 'Material', PROCEDURE_QUANTITY_INVALID: 'Material',
   };
   const seen = new Map();
   for (const f of dict.functions) for (const e of f.errors || []) {
@@ -198,9 +209,9 @@ function commentsSql() {
   L.push('-- Repeatable Flyway: reaplicado sempre que o dicionario muda (checksum).');
   L.push('');
   for (const t of dict.tables) {
-    L.push(`comment on table ad.${t.name} is ${sqlStr(`${t.title}. ${t.description}`)};`);
+    L.push(`comment on table ${qualified(t)} is ${sqlStr(`${t.title}. ${t.description}`)};`);
     for (const c of t.columns) {
-      L.push(`comment on column ad.${t.name}.${c.name} is ${sqlStr(colDescription(c))};`);
+      L.push(`comment on column ${qualified(t)}.${c.name} is ${sqlStr(colDescription(c))};`);
     }
     L.push('');
   }

@@ -1,0 +1,47 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : triggers *_audit das tabelas do schema od (ad.trg_audit)      ::
+  ::  UsedBy      : Postgres (BEFORE INSERT OR UPDATE)                            ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Reusa a function ad.trg_audit() (nr_operator, dh_created, dh_updated) nas
+    tabelas de negocio. Toda tabela nova do schema od recebe o trigger aqui.
+    Repeatable: roda depois de R__trg_audit (ordem alfabetica), que cria a function.
+*/
+
+create or replace trigger pricing_param_audit
+  before insert or update on od.pricing_param
+  for each row execute function ad.trg_audit();
+
+create or replace trigger clinic_expense_audit
+  before insert or update on od.clinic_expense
+  for each row execute function ad.trg_audit();
+
+create or replace trigger pricing_fee_audit
+  before insert or update on od.pricing_fee
+  for each row execute function ad.trg_audit();
+
+create or replace trigger material_audit
+  before insert or update on od.material
+  for each row execute function ad.trg_audit();
+
+create or replace trigger procedure_audit
+  before insert or update on od.procedure
+  for each row execute function ad.trg_audit();
+
+create or replace trigger procedure_material_audit
+  before insert or update on od.procedure_material
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_audit
+  before insert or update on od.patient
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_note_audit
+  before insert or update on od.patient_note
+  for each row execute function ad.trg_audit();

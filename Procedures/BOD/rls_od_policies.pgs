@@ -1,0 +1,65 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : RLS policies de todas as tabelas do schema od                 ::
+  ::  UsedBy      : PostgREST (toda leitura do app passa por aqui)                ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Regra central de acesso do negocio: a linha e visivel se (nr_company,
+    nr_branch) esta entre as filiais acessiveis do usuario
+    (private.fn_my_branches). Nunca reimplementar a regra em outra policy.
+    Nao existe policy de INSERT/UPDATE/DELETE: toda escrita passa pelas RPCs
+    SECURITY DEFINER do schema od, que checam a permissao por tela.
+*/
+
+-- od.pricing_param
+drop policy if exists pricing_param_select on od.pricing_param;
+create policy pricing_param_select on od.pricing_param
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.clinic_expense
+drop policy if exists clinic_expense_select on od.clinic_expense;
+create policy clinic_expense_select on od.clinic_expense
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.pricing_fee
+drop policy if exists pricing_fee_select on od.pricing_fee;
+create policy pricing_fee_select on od.pricing_fee
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.material
+drop policy if exists material_select on od.material;
+create policy material_select on od.material
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.procedure
+drop policy if exists procedure_select on od.procedure;
+create policy procedure_select on od.procedure
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.procedure_material
+drop policy if exists procedure_material_select on od.procedure_material;
+create policy procedure_material_select on od.procedure_material
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient
+drop policy if exists patient_select on od.patient;
+create policy patient_select on od.patient
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_note
+drop policy if exists patient_note_select on od.patient_note;
+create policy patient_note_select on od.patient_note
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

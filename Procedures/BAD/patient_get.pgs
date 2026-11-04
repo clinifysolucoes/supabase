@@ -1,0 +1,89 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_get(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('patient_get')           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Ficha completa de um paciente (todas as colunas de od.patient, mais a
+    idade) e as notas gerais ativas, da mais recente para a mais antiga, com
+    o nome do autor. Exige permissao de LEITURA na tela PATIENTS.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_patient  bigint   obrigatorio
+
+  Output jsonb:
+    {"patient": {... colunas de od.patient ..., "qt_age"},
+     "notes": [{"nr_note", "vc_note", "nr_user", "vc_user", "dh_note"}],
+     "permission": {"id_read", "id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, PATIENT_BRANCH_REQUIRED, PATIENT_FORBIDDEN, PATIENT_REQUIRED,
+    PATIENT_NOT_FOUND
+*/
+create or replace function ad.patient_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _perm       jsonb;
+  _patient    jsonb;
+  _notes      jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_get');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PATIENT_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('PATIENT_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+
+  select to_jsonb(p) - 'nr_operator'
+         || jsonb_build_object('qt_age', extract(year from age(current_date, p.dt_birth))::int)
+    into _patient
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient;
+  if _patient is null then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_note', n.nr_note,
+             'vc_note', n.vc_note,
+             'nr_user', n.nr_user,
+             'vc_user', u.vc_name,
+             'dh_note', n.dh_note)
+           order by n.dh_note desc, n.nr_note desc), '[]'::jsonb)
+    into _notes
+    from od.patient_note n
+    join ad.app_user u on u.nr_user = n.nr_user
+   where n.nr_company = _nr_company and n.nr_branch = _nr_branch and n.nr_patient = _nr_patient
+     and n.it_status = 1;
+
+  return jsonb_build_object('patient', _patient, 'notes', _notes, 'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.patient_get(jsonb) from public, anon;
+grant execute on function ad.patient_get(jsonb) to authenticated;

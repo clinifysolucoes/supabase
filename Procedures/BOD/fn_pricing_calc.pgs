@@ -1,0 +1,132 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_pricing_calc(jsonb)                                     ::
+  ::  UsedBy      : ad.procedure_list, ad.pricing_param_save (validacao)          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Calculo do preco de um procedimento. Unica fonte da formula no banco; o
+    app Flutter tem uma copia (PricingCalculator) para a simulacao ao vivo,
+    testada com o mesmo exemplo de tests/06_pricing.sql.
+
+      estrutura     = minutos / 60 x custo da estrutura por hora
+      profissional  = minutos / 60 x hora clinica do profissional
+      custo direto  = materiais + laboratorio + estrutura + profissional
+      s = (cartao + comissao + taxas) / 100   m = lucro / 100   r = IR / 100
+
+      PJ (IR sobre o faturamento): preco = custo / (1 - s - r - m)
+      PF (IR sobre o lucro):       preco = (1 - r) x custo / ((1 - r) x (1 - s) - m)
+      preco minimo = mesma formula com m = 0 (cobre tudo, lucro zero)
+
+    Percentuais de entrada em pontos percentuais (4 = 4%). Helper interno
+    (sem grant). Se o divisor nao for positivo (percentuais somam >= 100%),
+    id_valid = false e os valores de preco vem nulos.
+  Input p_json:
+    vl_material, vl_lab, qt_minutes, vl_structure_hour, vl_professional_hour,
+    pc_card, pc_commission, pc_fees, it_tax_regime (1 PF | 2 PJ), pc_tax, pc_profit
+  Output jsonb:
+    vl_material, vl_lab, vl_structure, vl_professional, vl_direct_cost,
+    vl_price, vl_price_min, vl_card, vl_commission, vl_fees, vl_tax, vl_profit,
+    pc_profit_real, pc_total, it_tax_regime, id_valid
+*/
+create or replace function od.fn_pricing_calc(p_json jsonb)
+returns jsonb
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  _vl_material    numeric  := coalesce((p_json ->> 'vl_material')::numeric, 0);
+  _vl_lab         numeric  := coalesce((p_json ->> 'vl_lab')::numeric, 0);
+  _qt_minutes     numeric  := coalesce((p_json ->> 'qt_minutes')::numeric, 0);
+  _vl_struct_hour numeric  := coalesce((p_json ->> 'vl_structure_hour')::numeric, 0);
+  _vl_prof_hour   numeric  := coalesce((p_json ->> 'vl_professional_hour')::numeric, 0);
+  _pc_card        numeric  := coalesce((p_json ->> 'pc_card')::numeric, 0);
+  _pc_commission  numeric  := coalesce((p_json ->> 'pc_commission')::numeric, 0);
+  _pc_fees        numeric  := coalesce((p_json ->> 'pc_fees')::numeric, 0);
+  _it_tax_regime  smallint := coalesce((p_json ->> 'it_tax_regime')::smallint, 1);
+  _pc_tax         numeric  := coalesce((p_json ->> 'pc_tax')::numeric, 0);
+  _pc_profit      numeric  := coalesce((p_json ->> 'pc_profit')::numeric, 0);
+  _vl_structure    numeric;
+  _vl_professional numeric;
+  _vl_direct       numeric;
+  _s               numeric;
+  _m               numeric;
+  _r               numeric;
+  _div             numeric;
+  _div_min         numeric;
+  _price           numeric;
+  _price_min       numeric;
+  _vl_card         numeric;
+  _vl_commission   numeric;
+  _vl_fees         numeric;
+  _vl_tax          numeric;
+  _vl_profit       numeric;
+  _id_valid        boolean := true;
+begin
+  if _it_tax_regime not in (1, 2) then
+    _it_tax_regime := 1;
+  end if;
+
+  _vl_structure    := round(_qt_minutes / 60 * _vl_struct_hour, 2);
+  _vl_professional := round(_qt_minutes / 60 * _vl_prof_hour, 2);
+  _vl_direct       := round(_vl_material + _vl_lab + _vl_structure + _vl_professional, 2);
+
+  _s := (_pc_card + _pc_commission + _pc_fees) / 100;
+  _m := _pc_profit / 100;
+  _r := _pc_tax / 100;
+
+  if _it_tax_regime = 2 then
+    _div     := 1 - _s - _r - _m;
+    _div_min := 1 - _s - _r;
+  else
+    _div     := (1 - _r) * (1 - _s) - _m;
+    _div_min := (1 - _r) * (1 - _s);
+  end if;
+
+  if _div <= 0 or _div_min <= 0 then
+    _id_valid := false;
+  else
+    if _it_tax_regime = 2 then
+      _price     := round(_vl_direct / _div, 2);
+      _price_min := round(_vl_direct / _div_min, 2);
+    else
+      _price     := round((1 - _r) * _vl_direct / _div, 2);
+      _price_min := round((1 - _r) * _vl_direct / _div_min, 2);
+    end if;
+    _vl_card       := round(_price * _pc_card / 100, 2);
+    _vl_commission := round(_price * _pc_commission / 100, 2);
+    _vl_fees       := round(_price * _pc_fees / 100, 2);
+    if _it_tax_regime = 2 then
+      _vl_tax := round(_price * _r, 2);
+    else
+      _vl_tax := round(_r * (_price - _vl_direct - _price * _s), 2);
+    end if;
+    _vl_profit := _price - _vl_direct - _vl_card - _vl_commission - _vl_fees - _vl_tax;
+  end if;
+
+  return jsonb_build_object(
+    'vl_material',     round(_vl_material, 2),
+    'vl_lab',          round(_vl_lab, 2),
+    'vl_structure',    _vl_structure,
+    'vl_professional', _vl_professional,
+    'vl_direct_cost',  _vl_direct,
+    'vl_price',        _price,
+    'vl_price_min',    _price_min,
+    'vl_card',         _vl_card,
+    'vl_commission',   _vl_commission,
+    'vl_fees',         _vl_fees,
+    'vl_tax',          _vl_tax,
+    'vl_profit',       _vl_profit,
+    'pc_profit_real',  case when _price is null or _price = 0 then 0 else round(_vl_profit / _price * 100, 2) end,
+    'pc_total',        round((_s + _m + _r) * 100, 2),
+    'it_tax_regime',   _it_tax_regime,
+    'id_valid',        _id_valid);
+end;
+$$;
+
+revoke all on function od.fn_pricing_calc(jsonb) from public, anon, authenticated;

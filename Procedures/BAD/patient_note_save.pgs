@@ -1,0 +1,124 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_note_save(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('patient_note_save')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Notas gerais do paciente (card "Notas gerais" da ficha).
+      vc_action = 'I'  adiciona uma nota (autor = usuario da sessao)  -> permissao CRIAR ou ALTERAR
+      vc_action = 'D'  exclui (it_status 90, a nota some da ficha)    -> permissao ALTERAR
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    vc_action   text     obrigatorio 'I' | 'D'
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_patient  bigint   obrigatorio
+    vc_note     text     obrigatorio em 'I' (ate 4000)
+    nr_note     bigint   obrigatorio em 'D'
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_patient", "nr_note"}
+
+  Errors: VERSION_MISMATCH, PATIENT_NOTE_ACTION_INVALID, PATIENT_BRANCH_REQUIRED, PATIENT_NOTE_FORBIDDEN,
+    PATIENT_REQUIRED, PATIENT_NOT_FOUND, PATIENT_NOTE_REQUIRED, PATIENT_NOTE_NOT_FOUND
+*/
+create or replace function ad.patient_note_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _vc_action  text;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_note    bigint;
+  _perm       jsonb;
+  _vc_note    text;
+  _vc_name    text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_note_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'D') then
+    raise exception '%', ad.fn_message('PATIENT_NOTE_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PATIENT_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_vc_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
+     or (_vc_action = 'D' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PATIENT_NOTE_FORBIDDEN');
+  end if;
+
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _vc_name
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+  /*------------------------------------------------------------------------*/
+    _vc_note := left(nullif(trim(p_json ->> 'vc_note'), ''), 4000);
+    if _vc_note is null then
+      raise exception '%', ad.fn_message('PATIENT_NOTE_REQUIRED');
+    end if;
+
+    select coalesce(max(n.nr_note), 0) + 1
+      into _nr_note
+      from od.patient_note n
+     where n.nr_company = _nr_company and n.nr_branch = _nr_branch and n.nr_patient = _nr_patient;
+
+    insert into od.patient_note (nr_company, nr_branch, nr_patient, nr_note, vc_note, nr_user, dh_note, it_status, nr_operator)
+    values (_nr_company, _nr_branch, _nr_patient, _nr_note, _vc_note, _nr_user, now(), 1, _nr_user);
+
+  /*------------------------------------------------------------------------*/
+  else /* 'D' */
+  /*------------------------------------------------------------------------*/
+    _nr_note := (p_json ->> 'nr_note')::bigint;
+    update od.patient_note n
+       set it_status = 90
+     where n.nr_company = _nr_company and n.nr_branch = _nr_branch
+       and n.nr_patient = _nr_patient and n.nr_note = _nr_note and n.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('PATIENT_NOTE_NOT_FOUND');
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS',
+    case when _vc_action = 'I' then 'CREATE' else 'DELETE' end,
+    'patient_note',
+    _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_note::text,
+    format('Nota %s no paciente %s', case when _vc_action = 'I' then 'adicionada' else 'excluída' end, _vc_name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_note', _nr_note));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch,
+                            'nr_patient', _nr_patient, 'nr_note', _nr_note);
+end;
+$$;
+
+revoke all on function ad.patient_note_save(jsonb) from public, anon;
+grant execute on function ad.patient_note_save(jsonb) to authenticated;

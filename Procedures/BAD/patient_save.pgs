@@ -1,0 +1,350 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_save(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('patient_save')          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastro do paciente (ficha completa).
+      vc_action = 'I'  cria (nr_patient sequencial por filial)   -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente                       -> permissao ALTERAR
+    Update parcial: chave presente no JSON altera (null limpa), ausente mantem.
+    Normaliza antes de validar: textos sem espacos nas pontas e cortados no
+    tamanho da coluna; CPF, RG nao, telefones e CEP so digitos; e-mail em
+    minusculas; UF em maiusculas. "Nao possui e-mail" (id_no_email) limpa o
+    e-mail. CPF valido (ad.fn_cpf_is_valid) e unico na filial. Nascimento
+    obrigatorio, entre 1900 e hoje. Grava ad.event_log (sem dados pessoais:
+    so nome, situacao e quais campos mudaram).
+
+  Input p_json:
+    nr_version    integer  obrigatorio = 1
+    vc_action     text     obrigatorio 'I' | 'U'
+    nr_company    bigint   obrigatorio
+    nr_branch     bigint   obrigatorio
+    nr_patient    bigint   obrigatorio em 'U'
+    vc_name       text     obrigatorio em 'I' (ate 120)
+    dt_birth      date     obrigatorio em 'I' (ISO yyyy-mm-dd)
+    it_status     integer  1 ativo | 90 inativo (so em 'U')
+    demais colunas de od.patient, opcionais (ver dicionario):
+      vc_nickname, vc_cpf, vc_rg, it_gender (1 masculino | 2 feminino | 3 outro),
+      it_marital_status (1 solteiro | 2 casado | 3 divorciado | 4 viuvo | 5 uniao estavel),
+      it_education (1 fundamental | 2 medio | 3 superior | 4 pos-graduacao),
+      it_source (1 Google | 2 Instagram | 3 Facebook | 4 indicacao | 5 escola | 6 outdoor |
+                 7 panfleto | 8 placa | 9 plano/convenio | 10 radio | 11 TV | 12 revista | 99 outros),
+      vc_referral, vc_notes, vc_phone, vc_mobile, vc_phone_other, vc_contact_name, vc_email,
+      id_no_email, vc_zip, vc_state, vc_city, vc_address, vc_address_number, vc_district,
+      vc_address_complement, vc_record_number, vc_profession, vc_workplace, vc_work_time,
+      vc_plan_name, vc_plan_number, vc_father_name, vc_father_cpf, vc_father_rg,
+      vc_father_profession, vc_mother_name, vc_mother_cpf, vc_mother_rg, vc_mother_profession,
+      vc_guardian_name, vc_guardian_cpf, vc_guardian_rg, vc_guardian_phone,
+      dt_return_alert, vc_return_alert
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_patient"}
+
+  Errors: VERSION_MISMATCH, PATIENT_ACTION_INVALID, PATIENT_BRANCH_REQUIRED, PATIENT_FORBIDDEN,
+    PATIENT_REQUIRED, PATIENT_NOT_FOUND, PATIENT_VALUE_INVALID {Field}, PATIENT_NAME_REQUIRED,
+    PATIENT_BIRTH_REQUIRED, PATIENT_BIRTH_INVALID, PATIENT_CPF_INVALID {Field},
+    PATIENT_CPF_IN_USE {Name}, PATIENT_EMAIL_INVALID, PATIENT_PHONE_INVALID {Field},
+    PATIENT_ZIP_INVALID, PATIENT_STATE_INVALID, PATIENT_STATUS_INVALID
+*/
+create or replace function ad.patient_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _vc_action  text;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _perm       jsonb;
+  _old        od.patient%rowtype;
+  _new        od.patient%rowtype;
+  _data       jsonb;
+  _js         jsonb;
+  _k          text;
+  _v          text;
+  _other      text;
+  -- colunas de texto e o tamanho da coluna (trim + corte)
+  _text_max constant jsonb := '{
+    "vc_name": 120, "vc_nickname": 60, "vc_rg": 20, "vc_referral": 120, "vc_notes": 20000,
+    "vc_contact_name": 80, "vc_email": 120, "vc_state": 2, "vc_city": 80, "vc_address": 120,
+    "vc_address_number": 10, "vc_district": 80, "vc_address_complement": 60,
+    "vc_record_number": 20, "vc_profession": 80, "vc_workplace": 80, "vc_work_time": 40,
+    "vc_plan_name": 80, "vc_plan_number": 40, "vc_father_name": 120, "vc_father_rg": 20,
+    "vc_father_profession": 80, "vc_mother_name": 120, "vc_mother_rg": 20,
+    "vc_mother_profession": 80, "vc_guardian_name": 120, "vc_guardian_rg": 20,
+    "vc_return_alert": 200}'::jsonb;
+  -- colunas guardadas so com digitos (a mascara e do app)
+  _digit_cols constant text[] := array['vc_cpf', 'vc_phone', 'vc_mobile', 'vc_phone_other', 'vc_zip',
+                                       'vc_father_cpf', 'vc_mother_cpf', 'vc_guardian_cpf', 'vc_guardian_phone'];
+  _int_cols   constant text[] := array['it_gender', 'it_marital_status', 'it_education', 'it_source', 'it_status'];
+  _date_cols  constant text[] := array['dt_birth', 'dt_return_alert'];
+  _cpf_cols   constant text[] := array['vc_cpf', 'vc_father_cpf', 'vc_mother_cpf', 'vc_guardian_cpf'];
+  _phone_cols constant text[] := array['vc_phone', 'vc_mobile', 'vc_phone_other', 'vc_guardian_phone'];
+  -- tudo que o app pode mandar (o resto do JSON e ignorado)
+  _allowed    constant text[] := array[
+    'vc_name', 'vc_nickname', 'vc_cpf', 'vc_rg', 'dt_birth', 'it_gender', 'it_marital_status',
+    'it_education', 'it_source', 'vc_referral', 'vc_notes', 'vc_phone', 'vc_mobile', 'vc_phone_other',
+    'vc_contact_name', 'vc_email', 'id_no_email', 'vc_zip', 'vc_state', 'vc_city', 'vc_address',
+    'vc_address_number', 'vc_district', 'vc_address_complement', 'vc_record_number', 'vc_profession',
+    'vc_workplace', 'vc_work_time', 'vc_plan_name', 'vc_plan_number', 'vc_father_name', 'vc_father_cpf',
+    'vc_father_rg', 'vc_father_profession', 'vc_mother_name', 'vc_mother_cpf', 'vc_mother_rg',
+    'vc_mother_profession', 'vc_guardian_name', 'vc_guardian_cpf', 'vc_guardian_rg', 'vc_guardian_phone',
+    'dt_return_alert', 'vc_return_alert', 'it_status'];
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('PATIENT_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PATIENT_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PATIENT_FORBIDDEN');
+  end if;
+
+  /*------------------------------------------------------------------------
+    1. so as colunas editaveis; situacao so na alteracao
+  ------------------------------------------------------------------------*/
+  select coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+    into _data
+    from jsonb_each(p_json) e
+   where e.key = any (_allowed);
+  if _vc_action = 'I' then
+    _data := _data - 'it_status';
+  end if;
+
+  /*------------------------------------------------------------------------
+    2. normalizacao: trim/corte, so digitos, e-mail minusculo, UF maiuscula
+  ------------------------------------------------------------------------*/
+  for _k, _v in select key, value from jsonb_each_text(_text_max) loop
+    if _data ? _k then
+      _data := jsonb_set(_data, array[_k],
+                 coalesce(to_jsonb(left(nullif(trim(_data ->> _k), ''), _v::int)), 'null'::jsonb));
+    end if;
+  end loop;
+  foreach _k in array _digit_cols loop
+    if _data ? _k then
+      _data := jsonb_set(_data, array[_k],
+                 coalesce(to_jsonb(nullif(regexp_replace(coalesce(_data ->> _k, ''), '\D', '', 'g'), '')), 'null'::jsonb));
+    end if;
+  end loop;
+  if _data ? 'vc_email' then
+    _data := jsonb_set(_data, '{vc_email}', coalesce(to_jsonb(lower(_data ->> 'vc_email')), 'null'::jsonb));
+  end if;
+  if _data ? 'vc_state' then
+    _data := jsonb_set(_data, '{vc_state}', coalesce(to_jsonb(upper(_data ->> 'vc_state')), 'null'::jsonb));
+  end if;
+
+  /*------------------------------------------------------------------------
+    3. tipos: mensagem amigavel em vez de erro de cast
+  ------------------------------------------------------------------------*/
+  foreach _k in array _int_cols loop
+    if _data ? _k and jsonb_typeof(_data -> _k) <> 'null' and (_data ->> _k) !~ '^\d{1,3}$' then
+      raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', _k));
+    end if;
+  end loop;
+  foreach _k in array _date_cols loop
+    if _data ? _k and jsonb_typeof(_data -> _k) <> 'null' then
+      if (_data ->> _k) !~ '^\d{4}-\d{2}-\d{2}$' then
+        raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', _k));
+      end if;
+      begin
+        perform (_data ->> _k)::date;
+      exception when others then
+        raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', _k));
+      end;
+    end if;
+  end loop;
+  if _data ? 'id_no_email' and jsonb_typeof(_data -> 'id_no_email') not in ('boolean', 'null')
+     and (_data ->> 'id_no_email') !~* '^(true|false)$' then
+    raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'id_no_email'));
+  end if;
+
+  /*------------------------------------------------------------------------
+    4. mescla: chave presente altera (null limpa), ausente mantem
+  ------------------------------------------------------------------------*/
+  if _vc_action = 'U' then
+    _nr_patient := (p_json ->> 'nr_patient')::bigint;
+    if _nr_patient is null then
+      raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+    end if;
+    select p.* into _old from od.patient p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+    end if;
+    _new := jsonb_populate_record(_old, _data);
+  else
+    _new := jsonb_populate_record(null::od.patient, _data);
+    _new.nr_company := _nr_company;
+    _new.nr_branch  := _nr_branch;
+    _new.it_status  := 1;
+  end if;
+  _new.id_no_email := coalesce(_new.id_no_email, false);
+  if _new.id_no_email then
+    _new.vc_email := null;
+  end if;
+
+  /*------------------------------------------------------------------------
+    5. validacoes de negocio
+  ------------------------------------------------------------------------*/
+  if _new.vc_name is null then
+    raise exception '%', ad.fn_message('PATIENT_NAME_REQUIRED');
+  end if;
+  if _new.dt_birth is null then
+    raise exception '%', ad.fn_message('PATIENT_BIRTH_REQUIRED');
+  end if;
+  if _new.dt_birth > current_date or _new.dt_birth < date '1900-01-01' then
+    raise exception '%', ad.fn_message('PATIENT_BIRTH_INVALID');
+  end if;
+
+  _js := to_jsonb(_new);
+  foreach _k in array _cpf_cols loop
+    if _js ->> _k is not null and not ad.fn_cpf_is_valid(_js ->> _k) then
+      raise exception '%', ad.fn_message('PATIENT_CPF_INVALID', jsonb_build_object('Field', _k));
+    end if;
+  end loop;
+  foreach _k in array _phone_cols loop
+    if _js ->> _k is not null and (_js ->> _k) !~ '^[0-9]{10,11}$' then
+      raise exception '%', ad.fn_message('PATIENT_PHONE_INVALID', jsonb_build_object('Field', _k));
+    end if;
+  end loop;
+  if _new.vc_cpf is not null then
+    select q.vc_name into _other
+      from od.patient q
+     where q.nr_company = _nr_company and q.nr_branch = _nr_branch and q.vc_cpf = _new.vc_cpf
+       and (_vc_action = 'I' or q.nr_patient <> _nr_patient);
+    if found then
+      raise exception '%', ad.fn_message('PATIENT_CPF_IN_USE', jsonb_build_object('Name', _other));
+    end if;
+  end if;
+  if _new.vc_email is not null and not ad.fn_email_is_valid(_new.vc_email) then
+    raise exception '%', ad.fn_message('PATIENT_EMAIL_INVALID');
+  end if;
+  if _new.vc_zip is not null and _new.vc_zip !~ '^[0-9]{8}$' then
+    raise exception '%', ad.fn_message('PATIENT_ZIP_INVALID');
+  end if;
+  if _new.vc_state is not null and _new.vc_state !~ '^[A-Z]{2}$' then
+    raise exception '%', ad.fn_message('PATIENT_STATE_INVALID');
+  end if;
+  if _new.it_gender is not null and _new.it_gender not in (1, 2, 3) then
+    raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'it_gender'));
+  end if;
+  if _new.it_marital_status is not null and _new.it_marital_status not between 1 and 5 then
+    raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'it_marital_status'));
+  end if;
+  if _new.it_education is not null and _new.it_education not between 1 and 4 then
+    raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'it_education'));
+  end if;
+  if _new.it_source is not null and not (_new.it_source between 1 and 12 or _new.it_source = 99) then
+    raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'it_source'));
+  end if;
+  if _new.it_status not in (1, 90) then
+    raise exception '%', ad.fn_message('PATIENT_STATUS_INVALID');
+  end if;
+
+  /*------------------------------------------------------------------------
+    6. grava
+  ------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+
+    select coalesce(max(p.nr_patient), 0) + 1
+      into _nr_patient
+      from od.patient p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch;
+
+    _new.nr_patient  := _nr_patient;
+    _new.nr_operator := _nr_user;
+    _new.dh_created  := now();
+    _new.dh_updated  := now();
+    insert into od.patient select (_new).*;
+  else
+    update od.patient p set
+      vc_name               = _new.vc_name,
+      vc_nickname           = _new.vc_nickname,
+      vc_cpf                = _new.vc_cpf,
+      vc_rg                 = _new.vc_rg,
+      dt_birth              = _new.dt_birth,
+      it_gender             = _new.it_gender,
+      it_marital_status     = _new.it_marital_status,
+      it_education          = _new.it_education,
+      it_source             = _new.it_source,
+      vc_referral           = _new.vc_referral,
+      vc_notes              = _new.vc_notes,
+      vc_phone              = _new.vc_phone,
+      vc_mobile             = _new.vc_mobile,
+      vc_phone_other        = _new.vc_phone_other,
+      vc_contact_name       = _new.vc_contact_name,
+      vc_email              = _new.vc_email,
+      id_no_email           = _new.id_no_email,
+      vc_zip                = _new.vc_zip,
+      vc_state              = _new.vc_state,
+      vc_city               = _new.vc_city,
+      vc_address            = _new.vc_address,
+      vc_address_number     = _new.vc_address_number,
+      vc_district           = _new.vc_district,
+      vc_address_complement = _new.vc_address_complement,
+      vc_record_number      = _new.vc_record_number,
+      vc_profession         = _new.vc_profession,
+      vc_workplace          = _new.vc_workplace,
+      vc_work_time          = _new.vc_work_time,
+      vc_plan_name          = _new.vc_plan_name,
+      vc_plan_number        = _new.vc_plan_number,
+      vc_father_name        = _new.vc_father_name,
+      vc_father_cpf         = _new.vc_father_cpf,
+      vc_father_rg          = _new.vc_father_rg,
+      vc_father_profession  = _new.vc_father_profession,
+      vc_mother_name        = _new.vc_mother_name,
+      vc_mother_cpf         = _new.vc_mother_cpf,
+      vc_mother_rg          = _new.vc_mother_rg,
+      vc_mother_profession  = _new.vc_mother_profession,
+      vc_guardian_name      = _new.vc_guardian_name,
+      vc_guardian_cpf       = _new.vc_guardian_cpf,
+      vc_guardian_rg        = _new.vc_guardian_rg,
+      vc_guardian_phone     = _new.vc_guardian_phone,
+      dt_return_alert       = _new.dt_return_alert,
+      vc_return_alert       = _new.vc_return_alert,
+      it_status             = _new.it_status
+    where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'patient', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text,
+    format('Paciente %s %s', _new.vc_name,
+           case when _vc_action = 'I' then 'cadastrado'
+                when _old.it_status = 1 and _new.it_status = 90 then 'inativado'
+                when _old.it_status = 90 and _new.it_status = 1 then 'reativado'
+                else 'alterado' end),
+    jsonb_build_object(
+      'vc_name',   _new.vc_name,
+      'it_status', _new.it_status,
+      'fields',    (select coalesce(jsonb_agg(k order by k), '[]'::jsonb) from jsonb_object_keys(_data) k)));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_patient', _nr_patient);
+end;
+$$;
+
+revoke all on function ad.patient_save(jsonb) from public, anon;
+grant execute on function ad.patient_save(jsonb) to authenticated;

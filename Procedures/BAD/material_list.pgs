@@ -1,0 +1,90 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.material_list(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('material_list')         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Catalogo de materiais da filial com o custo por unidade de uso:
+      vl_unit_cost = preco da embalagem / (rendimento x (1 - perda))
+    e em quantos procedimentos cada material e usado. Exige permissao de
+    LEITURA na tela PRICING.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    id_include_inactive  boolean  opcional (default false)
+    vc_search            text     opcional (nome ou embalagem, contem)
+
+  Output jsonb:
+    {"materials": [{"nr_material", "vc_name", "vc_package", "vl_package_price", "qt_yield",
+                    "vc_unit", "pc_waste", "vl_unit_cost", "it_price_source", "vc_price_source",
+                    "dh_price_updated", "it_status", "qt_procedures"}]}
+    it_price_source: 1 manual | 2 pesquisa de mercado
+
+  Errors: VERSION_MISMATCH, PRICING_BRANCH_REQUIRED, PRICING_FORBIDDEN
+*/
+create or replace function ad.material_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _search     text    := nullif(trim(p_json ->> 'vc_search'), '');
+  _materials  jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'material_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('PRICING_FORBIDDEN');
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_material',      m.nr_material,
+             'vc_name',          m.vc_name,
+             'vc_package',       m.vc_package,
+             'vl_package_price', m.vl_package_price,
+             'qt_yield',         m.qt_yield,
+             'vc_unit',          m.vc_unit,
+             'pc_waste',         m.pc_waste,
+             'vl_unit_cost',     round(m.vl_package_price / (m.qt_yield * (1 - m.pc_waste / 100)), 4),
+             'it_price_source',  m.it_price_source,
+             'vc_price_source',  m.vc_price_source,
+             'dh_price_updated', m.dh_price_updated,
+             'it_status',        m.it_status,
+             'qt_procedures',    (select count(*) from od.procedure_material pm
+                                   where pm.nr_company  = m.nr_company
+                                     and pm.nr_branch   = m.nr_branch
+                                     and pm.nr_material = m.nr_material))
+           order by m.vc_name), '[]'::jsonb)
+    into _materials
+    from od.material m
+   where m.nr_company = _nr_company
+     and m.nr_branch  = _nr_branch
+     and (_inactive or m.it_status = 1)
+     and (_search is null
+          or m.vc_name ilike '%' || _search || '%'
+          or coalesce(m.vc_package, '') ilike '%' || _search || '%');
+
+  return jsonb_build_object('materials', _materials);
+end;
+$$;
+
+revoke all on function ad.material_list(jsonb) from public, anon;
+grant execute on function ad.material_list(jsonb) to authenticated;

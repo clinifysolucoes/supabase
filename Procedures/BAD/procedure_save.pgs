@@ -1,0 +1,247 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.procedure_save(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('procedure_save')        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastro de procedimentos precificados.
+      vc_action = 'I'  cria (nr_procedure sequencial por filial)  -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente                       -> permissao ALTERAR
+    materials, quando presente, SUBSTITUI todos os materiais do procedimento
+    (lista de {nr_material, qt_used}); material repetido fica com a ultima
+    quantidade. O preco em si nao e gravado: e calculado em procedure_list.
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    vc_action          text     obrigatorio 'I' | 'U'
+    nr_company         bigint   obrigatorio
+    nr_branch          bigint   obrigatorio
+    nr_procedure       bigint   obrigatorio em 'U'
+    vc_code            text     opcional (ate 10, unico na filial; null limpa)
+    vc_name            text     obrigatorio em 'I' (ate 80, unico na filial)
+    vc_category        text     opcional (ate 40, ex.: "Clínica Geral")
+    qt_minutes         numeric  >= 0 (tempo de cadeira)
+    vl_lab_cost        numeric  >= 0 (laboratorio / terceiros)
+    vl_material_other  numeric  >= 0 (materiais sem cadastro, valor informado)
+    vl_current_price   numeric  >= 0 ou null (valor cobrado hoje, so comparacao)
+    pc_commission      numeric  0..100 ou null (null = padrao da filial)
+    pc_profit          numeric  0..100 ou null (null = padrao da filial)
+    it_status          integer  1 ativo | 90 inativo (so em 'U')
+    materials          array    opcional [{"nr_material": 1, "qt_used": 2}]
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_procedure"}
+
+  Errors: VERSION_MISMATCH, PROCEDURE_ACTION_INVALID, PRICING_BRANCH_REQUIRED, PROCEDURE_FORBIDDEN,
+    PROCEDURE_NAME_REQUIRED, PROCEDURE_NAME_IN_USE {Name}, PROCEDURE_CODE_IN_USE {Code},
+    PROCEDURE_MINUTES_INVALID, PROCEDURE_VALUE_INVALID {Field}, PROCEDURE_PERCENT_INVALID {Field},
+    PROCEDURE_STATUS_INVALID, PROCEDURE_MATERIALS_INVALID, PROCEDURE_MATERIAL_INVALID {Material},
+    PROCEDURE_QUANTITY_INVALID {Material}, PROCEDURE_REQUIRED, PROCEDURE_NOT_FOUND
+*/
+create or replace function ad.procedure_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user      bigint;
+  _vc_action    text;
+  _nr_company   bigint;
+  _nr_branch    bigint;
+  _nr_procedure bigint;
+  _perm         jsonb;
+  _vc_name      varchar(80);
+  _vc_code      varchar(10);
+  _row          od.procedure%rowtype;
+  _item         jsonb;
+  _nr_material  bigint;
+  _field        text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'procedure_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('PROCEDURE_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PROCEDURE_FORBIDDEN');
+  end if;
+
+  if p_json ? 'vc_name' or _vc_action = 'I' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 80);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('PROCEDURE_NAME_REQUIRED');
+    end if;
+  end if;
+  _vc_code := left(nullif(trim(p_json ->> 'vc_code'), ''), 10);
+
+  if p_json ? 'qt_minutes' and coalesce((p_json ->> 'qt_minutes')::numeric, -1) < 0 then
+    raise exception '%', ad.fn_message('PROCEDURE_MINUTES_INVALID');
+  end if;
+  foreach _field in array array['vl_lab_cost', 'vl_material_other', 'vl_current_price'] loop
+    if p_json ? _field and (p_json ->> _field) is not null and (p_json ->> _field)::numeric < 0 then
+      raise exception '%', ad.fn_message('PROCEDURE_VALUE_INVALID', jsonb_build_object('Field', _field));
+    end if;
+  end loop;
+  foreach _field in array array['pc_commission', 'pc_profit'] loop
+    if p_json ? _field and (p_json ->> _field) is not null
+       and ((p_json ->> _field)::numeric < 0 or (p_json ->> _field)::numeric > 100) then
+      raise exception '%', ad.fn_message('PROCEDURE_PERCENT_INVALID', jsonb_build_object('Field', _field));
+    end if;
+  end loop;
+  if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
+    raise exception '%', ad.fn_message('PROCEDURE_STATUS_INVALID');
+  end if;
+
+  /* materiais: valida antes de gravar qualquer coisa                        */
+  if p_json ? 'materials' then
+    if p_json -> 'materials' is null or jsonb_typeof(p_json -> 'materials') <> 'array' then
+      raise exception '%', ad.fn_message('PROCEDURE_MATERIALS_INVALID');
+    end if;
+    for _item in select * from jsonb_array_elements(p_json -> 'materials') loop
+      _nr_material := (_item ->> 'nr_material')::bigint;
+      if _nr_material is null or not exists (
+           select 1 from od.material m
+            where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+              and m.nr_material = _nr_material and m.it_status = 1) then
+        raise exception '%', ad.fn_message('PROCEDURE_MATERIAL_INVALID',
+          jsonb_build_object('Material', coalesce(_item ->> 'nr_material', '')));
+      end if;
+      if coalesce((_item ->> 'qt_used')::numeric, 0) <= 0 then
+        raise exception '%', ad.fn_message('PROCEDURE_QUANTITY_INVALID',
+          jsonb_build_object('Material', (select m.vc_name from od.material m
+                                           where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+                                             and m.nr_material = _nr_material)));
+      end if;
+    end loop;
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+  /*------------------------------------------------------------------------*/
+    if exists (select 1 from od.procedure p
+                where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                  and lower(p.vc_name) = lower(_vc_name)) then
+      raise exception '%', ad.fn_message('PROCEDURE_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+    end if;
+    if _vc_code is not null and exists (
+         select 1 from od.procedure p
+          where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+            and lower(p.vc_code) = lower(_vc_code)) then
+      raise exception '%', ad.fn_message('PROCEDURE_CODE_IN_USE', jsonb_build_object('Code', _vc_code));
+    end if;
+
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+
+    select coalesce(max(p.nr_procedure), 0) + 1
+      into _nr_procedure
+      from od.procedure p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch;
+
+    insert into od.procedure (
+      nr_company, nr_branch, nr_procedure, vc_code, vc_name, vc_category, qt_minutes, vl_lab_cost,
+      vl_material_other, vl_current_price, pc_commission, pc_profit, it_status, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr_procedure, _vc_code, _vc_name,
+      left(nullif(trim(p_json ->> 'vc_category'), ''), 40),
+      coalesce((p_json ->> 'qt_minutes')::numeric, 0),
+      coalesce((p_json ->> 'vl_lab_cost')::numeric, 0),
+      coalesce((p_json ->> 'vl_material_other')::numeric, 0),
+      (p_json ->> 'vl_current_price')::numeric,
+      (p_json ->> 'pc_commission')::numeric,
+      (p_json ->> 'pc_profit')::numeric,
+      1, _nr_user)
+    returning * into _row;
+
+  /*------------------------------------------------------------------------*/
+  else /* 'U' */
+  /*------------------------------------------------------------------------*/
+    _nr_procedure := (p_json ->> 'nr_procedure')::bigint;
+    if _nr_procedure is null then
+      raise exception '%', ad.fn_message('PROCEDURE_REQUIRED');
+    end if;
+    if not exists (select 1 from od.procedure p
+                    where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                      and p.nr_procedure = _nr_procedure) then
+      raise exception '%', ad.fn_message('PROCEDURE_NOT_FOUND');
+    end if;
+    if _vc_name is not null and exists (
+         select 1 from od.procedure p
+          where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+            and lower(p.vc_name) = lower(_vc_name) and p.nr_procedure <> _nr_procedure) then
+      raise exception '%', ad.fn_message('PROCEDURE_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+    end if;
+    if p_json ? 'vc_code' and _vc_code is not null and exists (
+         select 1 from od.procedure p
+          where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+            and lower(p.vc_code) = lower(_vc_code) and p.nr_procedure <> _nr_procedure) then
+      raise exception '%', ad.fn_message('PROCEDURE_CODE_IN_USE', jsonb_build_object('Code', _vc_code));
+    end if;
+
+    update od.procedure p set
+      vc_code           = case when p_json ? 'vc_code'           then _vc_code                                                 else p.vc_code end,
+      vc_name           = case when p_json ? 'vc_name'           then _vc_name                                                 else p.vc_name end,
+      vc_category       = case when p_json ? 'vc_category'       then left(nullif(trim(p_json ->> 'vc_category'), ''), 40)     else p.vc_category end,
+      qt_minutes        = case when p_json ? 'qt_minutes'        then coalesce((p_json ->> 'qt_minutes')::numeric, 0)          else p.qt_minutes end,
+      vl_lab_cost       = case when p_json ? 'vl_lab_cost'       then coalesce((p_json ->> 'vl_lab_cost')::numeric, 0)         else p.vl_lab_cost end,
+      vl_material_other = case when p_json ? 'vl_material_other' then coalesce((p_json ->> 'vl_material_other')::numeric, 0)   else p.vl_material_other end,
+      vl_current_price  = case when p_json ? 'vl_current_price'  then (p_json ->> 'vl_current_price')::numeric                 else p.vl_current_price end,
+      pc_commission     = case when p_json ? 'pc_commission'     then (p_json ->> 'pc_commission')::numeric                    else p.pc_commission end,
+      pc_profit         = case when p_json ? 'pc_profit'         then (p_json ->> 'pc_profit')::numeric                        else p.pc_profit end,
+      it_status         = case when p_json ? 'it_status'         then (p_json ->> 'it_status')::smallint                       else p.it_status end
+    where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_procedure = _nr_procedure
+    returning p.* into _row;
+  end if;
+
+  /* materiais: presente = substitui todos                                   */
+  if p_json ? 'materials' then
+    delete from od.procedure_material pm
+     where pm.nr_company = _nr_company and pm.nr_branch = _nr_branch and pm.nr_procedure = _nr_procedure;
+
+    insert into od.procedure_material (nr_company, nr_branch, nr_procedure, nr_material, qt_used, nr_operator)
+    select _nr_company, _nr_branch, _nr_procedure, (x.item ->> 'nr_material')::bigint, (x.item ->> 'qt_used')::numeric, _nr_user
+      from (select distinct on ((t.item ->> 'nr_material')::bigint) t.item
+              from jsonb_array_elements(p_json -> 'materials') with ordinality as t(item, ord)
+             order by (t.item ->> 'nr_material')::bigint, t.ord desc) x;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PRICING',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'procedure', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_procedure::text,
+    format('Procedimento %s %s', _row.vc_name, case when _vc_action = 'I' then 'cadastrado' else 'alterado' end),
+    jsonb_build_object(
+      'vc_code',          _row.vc_code,
+      'vc_name',          _row.vc_name,
+      'vc_category',      _row.vc_category,
+      'qt_minutes',       _row.qt_minutes,
+      'vl_lab_cost',      _row.vl_lab_cost,
+      'vl_current_price', _row.vl_current_price,
+      'it_status',        _row.it_status,
+      'qt_materials',     (select count(*) from od.procedure_material pm
+                            where pm.nr_company = _nr_company and pm.nr_branch = _nr_branch
+                              and pm.nr_procedure = _nr_procedure)));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_procedure', _nr_procedure);
+end;
+$$;
+
+revoke all on function ad.procedure_save(jsonb) from public, anon;
+grant execute on function ad.procedure_save(jsonb) to authenticated;

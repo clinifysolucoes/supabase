@@ -1,0 +1,121 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_list(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('patient_list')          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lista paginada de pacientes da filial, ordenada por nome, para a tela
+    Pacientes (busca + grid). Exige permissao de LEITURA na tela PATIENTS.
+
+    Busca (vc_search): "contem" no nome, apelido e e-mail (ILIKE: o usuario
+    pode usar % como curinga, ex. "%silva" para sobrenome); se o texto tiver
+    digitos, tambem compara com CPF (inicio), celular / telefone (contem) e
+    numero do prontuario (igual).
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    vc_search            text     opcional
+    id_include_inactive  boolean  opcional (default false)
+    nr_page              integer  opcional (default 1)
+    qt_page_size         integer  opcional (default 50, maximo 200)
+
+  Output jsonb:
+    {"patients": [{"nr_patient", "vc_name", "vc_nickname", "vc_cpf", "dt_birth", "qt_age",
+                   "it_gender", "vc_mobile", "vc_phone", "vc_email", "id_no_email", "it_source",
+                   "vc_referral", "dt_return_alert", "it_status", "dh_created"}],
+     "qt_total": n, "nr_page": 1, "qt_page_size": 50,
+     "permission": {"id_read", "id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, PATIENT_BRANCH_REQUIRED, PATIENT_FORBIDDEN
+*/
+create or replace function ad.patient_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _search     text    := nullif(trim(p_json ->> 'vc_search'), '');
+  _digits     text;
+  _nr_page    integer;
+  _qt_page    integer;
+  _perm       jsonb;
+  _patients   jsonb;
+  _qt_total   bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PATIENT_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('PATIENT_FORBIDDEN');
+  end if;
+
+  _nr_page := greatest(coalesce((p_json ->> 'nr_page')::integer, 1), 1);
+  _qt_page := least(greatest(coalesce((p_json ->> 'qt_page_size')::integer, 50), 1), 200);
+  _digits  := nullif(regexp_replace(coalesce(_search, ''), '\D', '', 'g'), '');
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_patient',      x.nr_patient,
+             'vc_name',         x.vc_name,
+             'vc_nickname',     x.vc_nickname,
+             'vc_cpf',          x.vc_cpf,
+             'dt_birth',        x.dt_birth,
+             'qt_age',          extract(year from age(current_date, x.dt_birth))::int,
+             'it_gender',       x.it_gender,
+             'vc_mobile',       x.vc_mobile,
+             'vc_phone',        x.vc_phone,
+             'vc_email',        x.vc_email,
+             'id_no_email',     x.id_no_email,
+             'it_source',       x.it_source,
+             'vc_referral',     x.vc_referral,
+             'dt_return_alert', x.dt_return_alert,
+             'it_status',       x.it_status,
+             'dh_created',      x.dh_created)
+           order by x.vc_name, x.nr_patient), '[]'::jsonb),
+         coalesce(max(x.qt_total), 0)
+    into _patients, _qt_total
+    from (select p.*, count(*) over () as qt_total
+            from od.patient p
+           where p.nr_company = _nr_company
+             and p.nr_branch  = _nr_branch
+             and (_inactive or p.it_status = 1)
+             and (_search is null
+                  or p.vc_name ilike '%' || _search || '%'
+                  or coalesce(p.vc_nickname, '') ilike '%' || _search || '%'
+                  or coalesce(p.vc_email, '')    ilike '%' || _search || '%'
+                  or (_digits is not null
+                      and (p.vc_cpf like _digits || '%'
+                           or coalesce(p.vc_mobile, '') like '%' || _digits || '%'
+                           or coalesce(p.vc_phone, '')  like '%' || _digits || '%'
+                           or p.vc_record_number = _digits)))
+           order by p.vc_name, p.nr_patient
+           limit _qt_page offset (_nr_page - 1) * _qt_page) x;
+
+  return jsonb_build_object(
+    'patients',     _patients,
+    'qt_total',     _qt_total,
+    'nr_page',      _nr_page,
+    'qt_page_size', _qt_page,
+    'permission',   _perm);
+end;
+$$;
+
+revoke all on function ad.patient_list(jsonb) from public, anon;
+grant execute on function ad.patient_list(jsonb) to authenticated;

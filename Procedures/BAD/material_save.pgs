@@ -1,0 +1,194 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.material_save(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('material_save')         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastro de materiais da filial.
+      vc_action = 'I'  cria (nr_material sequencial por filial)   -> permissao CRIAR
+      vc_action = 'U'  atualiza parcialmente                       -> permissao ALTERAR
+    O preco pode ser digitado (it_price_source 1) ou vir da pesquisa de mercado
+    da Edge Function material-price-lookup (2, com a loja/URL em vc_price_source).
+    Qualquer mudanca em preco, rendimento ou perda atualiza dh_price_updated.
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version        integer  obrigatorio = 1
+    vc_action         text     obrigatorio 'I' | 'U'
+    nr_company        bigint   obrigatorio
+    nr_branch         bigint   obrigatorio
+    nr_material       bigint   obrigatorio em 'U'
+    vc_name           text     obrigatorio em 'I' (ate 80, unico na filial)
+    vc_package        text     opcional (ate 40, ex.: "Caixa 100")
+    vl_package_price  numeric  >= 0
+    qt_yield          numeric  > 0 (unidades de uso por embalagem)
+    vc_unit           text     opcional (ate 20, ex.: "unidade", "g", "aplicação")
+    pc_waste          numeric  0 <= perda < 100
+    it_price_source   integer  1 manual | 2 pesquisa de mercado
+    vc_price_source   text     opcional (loja / URL, ate 200)
+    it_status         integer  1 ativo | 90 inativo (so em 'U')
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_material"}
+
+  Errors: VERSION_MISMATCH, MATERIAL_ACTION_INVALID, PRICING_BRANCH_REQUIRED, MATERIAL_FORBIDDEN,
+    MATERIAL_NAME_REQUIRED, MATERIAL_NAME_IN_USE {Name}, MATERIAL_PRICE_INVALID, MATERIAL_YIELD_INVALID,
+    MATERIAL_WASTE_INVALID, MATERIAL_SOURCE_INVALID, MATERIAL_STATUS_INVALID, MATERIAL_REQUIRED,
+    MATERIAL_NOT_FOUND
+*/
+create or replace function ad.material_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user       bigint;
+  _vc_action     text;
+  _nr_company    bigint;
+  _nr_branch     bigint;
+  _nr_material   bigint;
+  _perm          jsonb;
+  _old           od.material%rowtype;
+  _row           od.material%rowtype;
+  _vc_name       varchar(80);
+  _price_changed boolean := false;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'material_save');
+
+  _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
+  if _vc_action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('MATERIAL_ACTION_INVALID');
+  end if;
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
+  if _nr_user is null
+     or (_vc_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_vc_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('MATERIAL_FORBIDDEN');
+  end if;
+
+  if p_json ? 'vc_name' or _vc_action = 'I' then
+    _vc_name := left(nullif(trim(p_json ->> 'vc_name'), ''), 80);
+    if _vc_name is null then
+      raise exception '%', ad.fn_message('MATERIAL_NAME_REQUIRED');
+    end if;
+  end if;
+  if p_json ? 'vl_package_price' and coalesce((p_json ->> 'vl_package_price')::numeric, -1) < 0 then
+    raise exception '%', ad.fn_message('MATERIAL_PRICE_INVALID');
+  end if;
+  if p_json ? 'qt_yield' and coalesce((p_json ->> 'qt_yield')::numeric, 0) <= 0 then
+    raise exception '%', ad.fn_message('MATERIAL_YIELD_INVALID');
+  end if;
+  if p_json ? 'pc_waste' and (coalesce((p_json ->> 'pc_waste')::numeric, -1) < 0 or (p_json ->> 'pc_waste')::numeric >= 100) then
+    raise exception '%', ad.fn_message('MATERIAL_WASTE_INVALID');
+  end if;
+  if p_json ? 'it_price_source' and coalesce((p_json ->> 'it_price_source')::smallint, 0) not in (1, 2) then
+    raise exception '%', ad.fn_message('MATERIAL_SOURCE_INVALID');
+  end if;
+  if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
+    raise exception '%', ad.fn_message('MATERIAL_STATUS_INVALID');
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _vc_action = 'I' then
+  /*------------------------------------------------------------------------*/
+    if exists (select 1 from od.material m
+                where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+                  and lower(m.vc_name) = lower(_vc_name)) then
+      raise exception '%', ad.fn_message('MATERIAL_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+    end if;
+
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+
+    select coalesce(max(m.nr_material), 0) + 1
+      into _nr_material
+      from od.material m
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch;
+
+    insert into od.material (
+      nr_company, nr_branch, nr_material, vc_name, vc_package, vl_package_price, qt_yield, vc_unit,
+      pc_waste, it_price_source, vc_price_source, dh_price_updated, it_status, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr_material, _vc_name,
+      left(nullif(trim(p_json ->> 'vc_package'), ''), 40),
+      coalesce((p_json ->> 'vl_package_price')::numeric, 0),
+      coalesce((p_json ->> 'qt_yield')::numeric, 1),
+      left(nullif(trim(p_json ->> 'vc_unit'), ''), 20),
+      coalesce((p_json ->> 'pc_waste')::numeric, 0),
+      coalesce((p_json ->> 'it_price_source')::smallint, 1),
+      left(nullif(trim(p_json ->> 'vc_price_source'), ''), 200),
+      case when coalesce((p_json ->> 'vl_package_price')::numeric, 0) > 0 then now() end,
+      1, _nr_user)
+    returning * into _row;
+
+  /*------------------------------------------------------------------------*/
+  else /* 'U' */
+  /*------------------------------------------------------------------------*/
+    _nr_material := (p_json ->> 'nr_material')::bigint;
+    if _nr_material is null then
+      raise exception '%', ad.fn_message('MATERIAL_REQUIRED');
+    end if;
+    select m.* into _old from od.material m
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_material = _nr_material;
+    if not found then
+      raise exception '%', ad.fn_message('MATERIAL_NOT_FOUND');
+    end if;
+    if _vc_name is not null and exists (
+         select 1 from od.material m
+          where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+            and lower(m.vc_name) = lower(_vc_name) and m.nr_material <> _nr_material) then
+      raise exception '%', ad.fn_message('MATERIAL_NAME_IN_USE', jsonb_build_object('Name', _vc_name));
+    end if;
+
+    _price_changed :=
+         (p_json ? 'vl_package_price' and (p_json ->> 'vl_package_price')::numeric is distinct from _old.vl_package_price)
+      or (p_json ? 'qt_yield'         and (p_json ->> 'qt_yield')::numeric         is distinct from _old.qt_yield)
+      or (p_json ? 'pc_waste'         and (p_json ->> 'pc_waste')::numeric         is distinct from _old.pc_waste)
+      or (p_json ? 'it_price_source'  and (p_json ->> 'it_price_source')::smallint is distinct from _old.it_price_source);
+
+    update od.material m set
+      vc_name          = case when p_json ? 'vc_name'          then _vc_name                                                  else m.vc_name end,
+      vc_package       = case when p_json ? 'vc_package'       then left(nullif(trim(p_json ->> 'vc_package'), ''), 40)       else m.vc_package end,
+      vl_package_price = case when p_json ? 'vl_package_price' then (p_json ->> 'vl_package_price')::numeric                  else m.vl_package_price end,
+      qt_yield         = case when p_json ? 'qt_yield'         then (p_json ->> 'qt_yield')::numeric                          else m.qt_yield end,
+      vc_unit          = case when p_json ? 'vc_unit'          then left(nullif(trim(p_json ->> 'vc_unit'), ''), 20)          else m.vc_unit end,
+      pc_waste         = case when p_json ? 'pc_waste'         then (p_json ->> 'pc_waste')::numeric                          else m.pc_waste end,
+      it_price_source  = case when p_json ? 'it_price_source'  then (p_json ->> 'it_price_source')::smallint                  else m.it_price_source end,
+      vc_price_source  = case when p_json ? 'vc_price_source'  then left(nullif(trim(p_json ->> 'vc_price_source'), ''), 200) else m.vc_price_source end,
+      it_status        = case when p_json ? 'it_status'        then (p_json ->> 'it_status')::smallint                        else m.it_status end,
+      dh_price_updated = case when _price_changed then now() else m.dh_price_updated end
+    where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_material = _nr_material
+    returning m.* into _row;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PRICING',
+    case when _vc_action = 'I' then 'CREATE' else 'UPDATE' end,
+    'material', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_material::text,
+    format('Material %s %s', _row.vc_name, case when _vc_action = 'I' then 'cadastrado' else 'alterado' end),
+    jsonb_build_object(
+      'vc_name',          _row.vc_name,
+      'vl_package_price', _row.vl_package_price,
+      'qt_yield',         _row.qt_yield,
+      'pc_waste',         _row.pc_waste,
+      'it_price_source',  _row.it_price_source,
+      'it_status',        _row.it_status));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_material', _nr_material);
+end;
+$$;
+
+revoke all on function ad.material_save(jsonb) from public, anon;
+grant execute on function ad.material_save(jsonb) to authenticated;

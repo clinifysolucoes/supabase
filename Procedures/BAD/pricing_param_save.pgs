@@ -1,0 +1,244 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.pricing_param_save(jsonb)                                  ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('pricing_param_save')    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Salva os parametros de precificacao da filial (cria a linha no primeiro
+    salvamento), as despesas e as taxas adicionais. params e parcial: chave
+    presente atualiza, ausente mantem (ou o padrao, na primeira vez).
+    expenses / fees, quando presentes, SUBSTITUEM a lista inteira da filial.
+    Depois de gravar, valida com od.fn_pricing_calc que os percentuais do
+    regime escolhido deixam um divisor positivo; senao desfaz tudo
+    (PRICING_PERCENT_TOO_HIGH). Permissao: CRIAR na tela PRICING no primeiro
+    salvamento, ALTERAR depois. Grava ad.event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    params      object   opcional {qt_rooms, qt_hours_week, qt_weeks_month, pc_occupancy,
+                         vl_professional_hour, pc_card, pc_commission, it_tax_regime (1 PF | 2 PJ),
+                         pc_tax_pf, pc_tax_pj, pc_profit,
+                         vl_structure_hour_manual (null = usar o calculo das despesas)}
+                         (percentuais em pontos: 4 = 4%)
+    expenses    array    opcional [{vc_name, it_type (1..4), vl_amount}]
+    fees        array    opcional [{vc_name, vc_hint, pc_rate, id_active}]
+
+  Output jsonb: {"nr_company", "nr_branch", "id_saved": true}
+
+  Errors: VERSION_MISMATCH, PRICING_BRANCH_REQUIRED, PRICING_FORBIDDEN,
+    PRICING_PARAM_INVALID {Field}, PRICING_EXPENSES_INVALID, PRICING_EXPENSE_NAME_REQUIRED,
+    PRICING_EXPENSE_TYPE_INVALID {Expense}, PRICING_EXPENSE_AMOUNT_INVALID {Expense},
+    PRICING_FEES_INVALID, PRICING_FEE_NAME_REQUIRED, PRICING_FEE_RATE_INVALID {Fee},
+    PRICING_PERCENT_TOO_HIGH {Total}
+*/
+create or replace function ad.pricing_param_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _id_saved   boolean;
+  _in         jsonb := coalesce(p_json -> 'params', '{}'::jsonb);
+  _cur        jsonb;
+  _p          od.pricing_param%rowtype;
+  _item       jsonb;
+  _n          integer;
+  _calc       jsonb;
+  _ctx        jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'pricing_param_save');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+
+  _nr_user  := private.fn_current_user_nr();
+  _perm     := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
+  _id_saved := exists (select 1 from od.pricing_param pp
+                        where pp.nr_company = _nr_company and pp.nr_branch = _nr_branch);
+  if _nr_user is null
+     or (_id_saved and not (_perm ->> 'id_update')::boolean)
+     or (not _id_saved and not (_perm ->> 'id_create')::boolean) then
+    raise exception '%', ad.fn_message('PRICING_FORBIDDEN');
+  end if;
+
+  /* valor atual (ou padrao) + chaves presentes -------------------------------*/
+  _cur := od.fn_pricing_context(_nr_company, _nr_branch) -> 'params';
+  _p.qt_rooms             := coalesce((_in ->> 'qt_rooms')::smallint,            (_cur ->> 'qt_rooms')::smallint);
+  _p.qt_hours_week        := coalesce((_in ->> 'qt_hours_week')::numeric,        (_cur ->> 'qt_hours_week')::numeric);
+  _p.qt_weeks_month       := coalesce((_in ->> 'qt_weeks_month')::numeric,       (_cur ->> 'qt_weeks_month')::numeric);
+  _p.pc_occupancy         := coalesce((_in ->> 'pc_occupancy')::numeric,         (_cur ->> 'pc_occupancy')::numeric);
+  _p.vl_professional_hour := coalesce((_in ->> 'vl_professional_hour')::numeric, (_cur ->> 'vl_professional_hour')::numeric);
+  _p.pc_card              := coalesce((_in ->> 'pc_card')::numeric,              (_cur ->> 'pc_card')::numeric);
+  _p.pc_commission        := coalesce((_in ->> 'pc_commission')::numeric,        (_cur ->> 'pc_commission')::numeric);
+  _p.it_tax_regime        := coalesce((_in ->> 'it_tax_regime')::smallint,       (_cur ->> 'it_tax_regime')::smallint);
+  _p.pc_tax_pf            := coalesce((_in ->> 'pc_tax_pf')::numeric,            (_cur ->> 'pc_tax_pf')::numeric);
+  _p.pc_tax_pj            := coalesce((_in ->> 'pc_tax_pj')::numeric,            (_cur ->> 'pc_tax_pj')::numeric);
+  _p.pc_profit            := coalesce((_in ->> 'pc_profit')::numeric,            (_cur ->> 'pc_profit')::numeric);
+  /* chave presente com null limpa o valor manual (volta ao calculo) */
+  _p.vl_structure_hour_manual := case when _in ? 'vl_structure_hour_manual'
+                                      then (_in ->> 'vl_structure_hour_manual')::numeric
+                                      else (_cur ->> 'vl_structure_hour_manual')::numeric end;
+  if _p.vl_structure_hour_manual is not null and _p.vl_structure_hour_manual < 0 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'vl_structure_hour_manual'));
+  end if;
+
+  if _p.qt_rooms is null or _p.qt_rooms < 1 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'qt_rooms'));
+  end if;
+  if _p.qt_hours_week is null or _p.qt_hours_week <= 0 or _p.qt_hours_week > 168 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'qt_hours_week'));
+  end if;
+  if _p.qt_weeks_month is null or _p.qt_weeks_month <= 0 or _p.qt_weeks_month > 5 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'qt_weeks_month'));
+  end if;
+  if _p.pc_occupancy is null or _p.pc_occupancy <= 0 or _p.pc_occupancy > 100 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'pc_occupancy'));
+  end if;
+  if _p.vl_professional_hour is null or _p.vl_professional_hour < 0 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'vl_professional_hour'));
+  end if;
+  if _p.it_tax_regime is null or _p.it_tax_regime not in (1, 2) then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'it_tax_regime'));
+  end if;
+  if _p.pc_card is null or _p.pc_card < 0 or _p.pc_card > 100 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'pc_card'));
+  end if;
+  if _p.pc_commission is null or _p.pc_commission < 0 or _p.pc_commission > 100 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'pc_commission'));
+  end if;
+  if _p.pc_tax_pf is null or _p.pc_tax_pf < 0 or _p.pc_tax_pf > 100 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'pc_tax_pf'));
+  end if;
+  if _p.pc_tax_pj is null or _p.pc_tax_pj < 0 or _p.pc_tax_pj > 100 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'pc_tax_pj'));
+  end if;
+  if _p.pc_profit is null or _p.pc_profit < 0 or _p.pc_profit > 100 then
+    raise exception '%', ad.fn_message('PRICING_PARAM_INVALID', jsonb_build_object('Field', 'pc_profit'));
+  end if;
+
+  /* despesas e taxas: valida tudo antes de gravar ----------------------------*/
+  if p_json ? 'expenses' then
+    if p_json -> 'expenses' is null or jsonb_typeof(p_json -> 'expenses') <> 'array' then
+      raise exception '%', ad.fn_message('PRICING_EXPENSES_INVALID');
+    end if;
+    for _item in select * from jsonb_array_elements(p_json -> 'expenses') loop
+      if nullif(trim(_item ->> 'vc_name'), '') is null then
+        raise exception '%', ad.fn_message('PRICING_EXPENSE_NAME_REQUIRED');
+      end if;
+      if coalesce((_item ->> 'it_type')::smallint, 1) not in (1, 2, 3, 4) then
+        raise exception '%', ad.fn_message('PRICING_EXPENSE_TYPE_INVALID', jsonb_build_object('Expense', _item ->> 'vc_name'));
+      end if;
+      if coalesce((_item ->> 'vl_amount')::numeric, 0) < 0 then
+        raise exception '%', ad.fn_message('PRICING_EXPENSE_AMOUNT_INVALID', jsonb_build_object('Expense', _item ->> 'vc_name'));
+      end if;
+    end loop;
+  end if;
+
+  if p_json ? 'fees' then
+    if p_json -> 'fees' is null or jsonb_typeof(p_json -> 'fees') <> 'array' then
+      raise exception '%', ad.fn_message('PRICING_FEES_INVALID');
+    end if;
+    for _item in select * from jsonb_array_elements(p_json -> 'fees') loop
+      if nullif(trim(_item ->> 'vc_name'), '') is null then
+        raise exception '%', ad.fn_message('PRICING_FEE_NAME_REQUIRED');
+      end if;
+      if coalesce((_item ->> 'pc_rate')::numeric, 0) < 0 or coalesce((_item ->> 'pc_rate')::numeric, 0) > 100 then
+        raise exception '%', ad.fn_message('PRICING_FEE_RATE_INVALID', jsonb_build_object('Fee', _item ->> 'vc_name'));
+      end if;
+    end loop;
+  end if;
+
+  /* grava -------------------------------------------------------------------*/
+  insert into od.pricing_param (
+    nr_company, nr_branch, qt_rooms, qt_hours_week, qt_weeks_month, pc_occupancy,
+    vl_professional_hour, pc_card, pc_commission, it_tax_regime, pc_tax_pf, pc_tax_pj, pc_profit,
+    vl_structure_hour_manual, nr_operator)
+  values (
+    _nr_company, _nr_branch, _p.qt_rooms, _p.qt_hours_week, _p.qt_weeks_month, _p.pc_occupancy,
+    _p.vl_professional_hour, _p.pc_card, _p.pc_commission, _p.it_tax_regime, _p.pc_tax_pf, _p.pc_tax_pj, _p.pc_profit,
+    _p.vl_structure_hour_manual, _nr_user)
+  on conflict (nr_company, nr_branch) do update set
+    qt_rooms             = excluded.qt_rooms,
+    qt_hours_week        = excluded.qt_hours_week,
+    qt_weeks_month       = excluded.qt_weeks_month,
+    pc_occupancy         = excluded.pc_occupancy,
+    vl_professional_hour = excluded.vl_professional_hour,
+    pc_card              = excluded.pc_card,
+    pc_commission        = excluded.pc_commission,
+    it_tax_regime        = excluded.it_tax_regime,
+    pc_tax_pf            = excluded.pc_tax_pf,
+    pc_tax_pj            = excluded.pc_tax_pj,
+    pc_profit            = excluded.pc_profit,
+    vl_structure_hour_manual = excluded.vl_structure_hour_manual;
+
+  if p_json ? 'expenses' then
+    delete from od.clinic_expense e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    _n := 0;
+    for _item in select * from jsonb_array_elements(p_json -> 'expenses') loop
+      _n := _n + 1;
+      insert into od.clinic_expense (nr_company, nr_branch, nr_expense, vc_name, it_type, vl_amount, it_status, nr_operator)
+      values (_nr_company, _nr_branch, _n, left(trim(_item ->> 'vc_name'), 60),
+              coalesce((_item ->> 'it_type')::smallint, 1), coalesce((_item ->> 'vl_amount')::numeric, 0), 1, _nr_user);
+    end loop;
+  end if;
+
+  if p_json ? 'fees' then
+    delete from od.pricing_fee f where f.nr_company = _nr_company and f.nr_branch = _nr_branch;
+    _n := 0;
+    for _item in select * from jsonb_array_elements(p_json -> 'fees') loop
+      _n := _n + 1;
+      insert into od.pricing_fee (nr_company, nr_branch, nr_fee, vc_name, vc_hint, pc_rate, id_active, nr_operator)
+      values (_nr_company, _nr_branch, _n, left(trim(_item ->> 'vc_name'), 60), left(_item ->> 'vc_hint', 200),
+              coalesce((_item ->> 'pc_rate')::numeric, 0), coalesce((_item ->> 'id_active')::boolean, false), _nr_user);
+    end loop;
+  end if;
+
+  /* os percentuais do regime escolhido precisam deixar divisor positivo ------*/
+  _ctx  := od.fn_pricing_context(_nr_company, _nr_branch);
+  _calc := od.fn_pricing_calc(jsonb_build_object(
+             'vl_material', 100, 'qt_minutes', 0,
+             'pc_card',       _ctx -> 'params' ->> 'pc_card',
+             'pc_commission', _ctx -> 'params' ->> 'pc_commission',
+             'pc_fees',       _ctx -> 'summary' ->> 'pc_fees',
+             'it_tax_regime', _ctx -> 'params' ->> 'it_tax_regime',
+             'pc_tax',        _ctx -> 'summary' ->> 'pc_tax',
+             'pc_profit',     _ctx -> 'params' ->> 'pc_profit'));
+  if not (_calc ->> 'id_valid')::boolean then
+    raise exception '%', ad.fn_message('PRICING_PERCENT_TOO_HIGH',
+      jsonb_build_object('Total', _calc ->> 'pc_total'));
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PRICING',
+    case when _id_saved then 'UPDATE' else 'CREATE' end,
+    'pricing_param', _nr_company::text || '/' || _nr_branch::text,
+    'Parâmetros de precificação ' || case when _id_saved then 'alterados' else 'definidos' end,
+    jsonb_build_object(
+      'vl_monthly_cost',   _ctx -> 'summary' -> 'vl_monthly_cost',
+      'vl_structure_hour', _ctx -> 'summary' -> 'vl_structure_hour',
+      'it_tax_regime',     _p.it_tax_regime,
+      'pc_profit',         _p.pc_profit,
+      'qt_expenses',       (select count(*) from od.clinic_expense e where e.nr_company = _nr_company and e.nr_branch = _nr_branch),
+      'qt_fees_active',    (select count(*) from od.pricing_fee f where f.nr_company = _nr_company and f.nr_branch = _nr_branch and f.id_active)));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'id_saved', true);
+end;
+$$;
+
+revoke all on function ad.pricing_param_save(jsonb) from public, anon;
+grant execute on function ad.pricing_param_save(jsonb) to authenticated;

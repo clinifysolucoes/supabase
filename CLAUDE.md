@@ -2,14 +2,21 @@
 
 ## O que é este projeto
 
-Hoje este repositório contém **apenas o núcleo de autenticação e acesso**: empresas, filiais, usuários
-multi-empresa, perfis de acesso por filial e log de sessão — rodando em **Supabase** (PostgreSQL + Auth +
-PostgREST). Tabelas, functions e policies vivem no schema `ad` (Administrative); os helpers de RLS vivem no schema
-`private`, que nunca é exposto na API.
+Este repositório contém o **núcleo de autenticação e acesso** (empresas, filiais, usuários multi-empresa,
+perfis de acesso por filial, telas/permissões e logs) e o **primeiro módulo de negócio: precificação de
+procedimentos** — rodando em **Supabase** (PostgreSQL + Auth + PostgREST). Três schemas:
 
-**No futuro** será um sistema de odontologia (agenda, pacientes, prontuário, orçamentos, financeiro).
-Tudo isso virá em novos schemas (ex.: `od`) **em cima** desta base: toda tabela de negócio terá
-`(nr_company, nr_branch)` e uma policy RLS baseada em `private.fn_my_branches()`.
+| Schema | Papel | Exposto na API |
+|---|---|---|
+| `ad` (Administrative) | empresas, filiais, usuários, perfis, telas, logs | sim |
+| `od` (Odontologia) | tabelas e helpers do negócio; hoje: precificação (materiais, procedimentos, parâmetros) e pacientes (ficha + notas) | **não** (o app só chega por RPC em `ad`) |
+| `private` | helpers de RLS | **nunca** |
+
+**No futuro** o schema `od` recebe agenda, pacientes, prontuário, orçamentos e financeiro, sempre **em cima**
+desta base: toda tabela de negócio tem `(nr_company, nr_branch)`, policy RLS baseada em
+`private.fn_my_branches()` e escrita só por RPC que checa a permissão por tela (`ad.fn_screen_permission`).
+**Toda RPC exposta ao app fica em `ad`** (único schema na API): assim nenhum módulo novo exige mexer em
+"Exposed schemas" no dashboard. O schema de negócio guarda tabelas, policies e helpers `fn_*`.
 
 O app será um único código **Flutter** (web + Android + iOS) usando `supabase_flutter`.
 As telas ainda não existem neste repo — aqui é só banco.
@@ -35,7 +42,16 @@ Objetos principais:
 | `ad.company_user_save` / `ad.user_update` | usuários da empresa / próprio cadastro |
 | `ad.fn_check_version` | versão do contrato (`nr_version` dentro do `p_json`) |
 | `ad.fn_message` | erro i18n `{"Message": "CHAVE", "Parameters": {...}}` |
+| `ad.fn_screen_permission` | `{id_read, id_create, id_update}` do usuário numa tela × filial; toda RPC de negócio usa |
 | `private.fn_*` | helpers de RLS (`fn_current_user_nr`, `fn_my_branches`, `fn_my_companies`, `fn_is_company_admin`, `fn_is_admin_of_user`), fora da API |
+| `od.pricing_param` / `od.clinic_expense` / `od.pricing_fee` | parâmetros de precificação da filial, despesas (custo mensal → estrutura/hora) e taxas adicionais |
+| `od.material` / `od.procedure` / `od.procedure_material` | catálogo de materiais (custo por unidade de uso), procedimentos e materiais × quantidade |
+| `ad.pricing_param_get` / `ad.pricing_param_save` | aba Parâmetros da tela Precificação |
+| `ad.material_list` / `ad.material_save` / `ad.procedure_list` / `ad.procedure_save` | CRUD da tela; `procedure_list` devolve o preço calculado |
+| `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
+| `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
+| `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |
+| Edge Function `material-price-lookup` | pesquisa de preço de mercado de um material (Claude + web search; secret `ANTHROPIC_API_KEY`) |
 
 ---
 
@@ -107,6 +123,7 @@ no JSON, com descrição em português.
 
 - **Tabela nova**: bloco em `tables[]` com `title`, `description`, `rls` e todas as colunas
   (as de auditoria são adicionadas automaticamente). Relação nova em `relations[]` para o ERD.
+  Tabela fora de `ad` leva `"schema": "od"` no bloco (o gerador assume `ad` quando ausente).
 - **Coluna nova**: entrada em `columns[]` com `type`, `nullable`, `default`, `description`
   e `values` quando for `it_*`.
 - **Function nova ou contrato alterado**: `functions[]` com `signature`, `kind` (`rpc`/`helper`/`trigger`),
@@ -124,7 +141,8 @@ ou function no schema `ad` sem comentário, ou seja, sem entrada no JSON.
 
 ```
 Supabase/
-├── Procedures/BAD/<nome>.pgs      # REPEATABLES: functions, triggers e RLS policies (Flyway reaplica se o checksum mudar)
+├── Procedures/BAD/<nome>.pgs      # REPEATABLES do schema ad: functions, triggers e RLS policies (Flyway reaplica se o checksum mudar)
+├── Procedures/BOD/<nome>.pgs      # REPEATABLES do schema od (negócio): fn_pricing_*, rls_od_policies, trg_od_audit (RPCs ficam em BAD)
 ├── Procedures/BPRIVATE/fn_*.pgs   # helpers de RLS no schema private (fora da API)
 ├── Scripts/YYYY/MM/V<YYYYMMDD>_<HHMM>__<desc>.sql   # VERSIONADAS: DDL (uma vez, em ordem)
 ├── docs/
@@ -142,10 +160,12 @@ Supabase/
 └── .github/workflows/{sql-validate,sql-deploy-staging,sql-deploy-production}.yml
 ```
 
-### Repeatables (`Procedures/BAD/*.pgs`)
+### Repeatables (`Procedures/BAD/*.pgs`, `Procedures/BOD/*.pgs`, `Procedures/BPRIVATE/*.pgs`)
 
-- Nome do arquivo = nome do objeto, `snake_case` minúsculo. Um objeto por arquivo (policies de todas as
-  tabelas ficam juntas em `rls_policies.pgs`; triggers de auditoria em `trg_audit.pgs`).
+- Nome do arquivo = nome do objeto, `snake_case` minúsculo, **único entre todas as pastas** (o Flyway vê
+  só `R__<nome>`). Um objeto por arquivo (policies de todas as tabelas de um schema ficam juntas:
+  `rls_policies.pgs` para `ad`, `rls_od_policies.pgs` para `od`; triggers de auditoria em `trg_audit.pgs`
+  e `trg_od_audit.pgs`, que reusa `ad.trg_audit()`).
 - **Ordem alfabética importa**: o Flyway aplica repeatables pela descrição. Convenção de prefixos que já
   garante a ordem certa na primeira carga: `<entidade>_<ação>` (RPC) → `fn_*` (helpers) → `rls_*` →
   `session_context` → `trg_*` → `zz_*` (gerados). Policies referenciam `fn_*` em tempo de criação, por
@@ -153,7 +173,7 @@ Supabase/
   alfabeto; na dúvida use `plpgsql` (resolve em runtime).
 - Todo `.pgs` tem o header corporativo (`Project`, `Schema`, `Object`, `UsedBy`, `Programmer`, `Date`,
   `Change`) e a seção `Description` com Input/Output/Errors.
-- Prefixos: `fn_` = helper interno (em `ad`, sem grant) ou de RLS (em `private`, `EXECUTE` para
+- Prefixos: `fn_` = helper interno (em `ad`/`od`, sem grant) ou de RLS (em `private`, `EXECUTE` para
   `authenticated`), nunca chamado pelo app; sem prefixo = RPC exposta ao app;
   `trg_` = trigger function; `rls_` = policies.
 
@@ -187,7 +207,7 @@ sem comentário — ou seja, **sem entrada no JSON**. Colunas de auditoria são 
 
 ### Tabelas
 
-Inglês, singular, `snake_case`, sempre no schema `ad` (futuro: `od` para odontologia). Chave de negócio
+Inglês, singular, `snake_case`, no schema `ad` (administrativo) ou `od` (odontologia). Chave de negócio
 composta: filial é `(nr_company, nr_branch)`, perfil é `(nr_company, nr_profile)`,
 numerados sequencialmente **por empresa** (a function trava a empresa com `FOR UPDATE` antes do `max+1`).
 
@@ -238,12 +258,14 @@ preenchidas pelo trigger `ad.trg_audit` (não precisa setar nas functions).
    Nunca reimplemente a regra em outra policy. Os helpers de RLS ficam no schema `private`
    (`Procedures/BPRIVATE/`): as policies rodam como o usuário, então `authenticated` precisa de `EXECUTE`
    neles, e em `ad` eles apareceriam em `/rest/v1/rpc/` (lint 0029 da Supabase). `private` nunca entra em
-   Exposed schemas.
+   Exposed schemas. Hoje: `Procedures/BOD/rls_od_policies.pgs` (uma policy por tabela de `od`).
 8. **Permissão por tela**: `ad.screen` é o catálogo (uuid fixo por tela, seed na versionada);
    `ad.access_profile_screen` diz o que cada perfil pode (ler / criar / alterar). Perfil nível 100
    ignora a tabela. `session_context` entrega as permissões efetivas por filial e o app esconde o que
    o usuário não pode. **Tela nova = linha nova em `ad.screen`** (versionada) com uuid fixo.
-   Toda RPC que altera dados grava `ad.fn_event_log(...)` com o código da tela.
+   Toda RPC que altera dados grava `ad.fn_event_log(...)` com o código da tela. RPC de negócio (em `ad`,
+   sobre tabelas de `od`) checa `ad.fn_screen_permission(nr_company, nr_branch, 'TELA')`: `id_read` para listar, `id_create`
+   para `vc_action = 'I'`, `id_update` para `'U'` (nunca `fn_is_company_admin`: admin já tem tudo).
 8b. **Anti-lockout**: operações que mexem em perfis/vínculos terminam com `ad.fn_company_has_admin` e
    desfazem a transação se a empresa ficaria sem administrador ativo.
 9. **Situação e bloqueio** (`it_status`, `id_blocked`) de empresa/filial/usuário são operações de
@@ -290,13 +312,49 @@ grant execute on function ad.<entidade>_<acao>(jsonb) to authenticated;
 
 ---
 
+## Pacientes (schema `od`) — ficha
+
+Tela `PATIENTS` (uuid `0d6a1f3e-1b2c-4d5e-8f90-000000000006`). `od.patient` é a ficha completa, inspirada nas
+fichas clássicas de clínica: dados cadastrais, contato/endereço, complementares (prontuário, plano, filiação,
+representante legal) e alerta de retorno; `od.patient_note` são as notas gerais (exclusão lógica).
+Regras que valem para todo cadastro de pessoa daqui em diante:
+
+- Documentos, telefones e CEP são gravados **só com dígitos** (a máscara é do app); e-mail minúsculo; UF maiúscula.
+- `patient_save` normaliza antes de validar e faz update parcial (chave presente altera, `null` limpa, ausente mantém),
+  mesclando o JSON na linha atual com `jsonb_populate_record`. CPF validado por `ad.fn_cpf_is_valid` e único na filial.
+- A busca (`patient_list`) é por nome/apelido/e-mail (ILIKE, `%` como curinga) e, se o texto tiver dígitos, por CPF,
+  telefone e número do prontuário. Sempre paginada.
+- O `event_log` de pacientes não guarda dados pessoais: só nome, situação e quais campos mudaram.
+
+## Precificação (schema `od`) — modelo e fórmula
+
+Consolidado das planilhas da clínica (custos → estrutura por hora → preço por procedimento), corrigindo
+o que estava errado nelas (comissão/cartão/lucro/IR somados "por fora" do custo, colunas vazias, `#REF!`).
+
+- **Custo mensal** = despesas fixas + variáveis + eventuais anuais ÷ 12 + publicidade (`od.clinic_expense`).
+- **Estrutura por hora** = custo mensal ÷ (salas × horas/semana × semanas/mês × ocupação) (`od.pricing_param`),
+  ou o valor manual `vl_structure_hour_manual` quando preenchido.
+- **Custo direto** = materiais (`qt_used` × custo unitário; unitário = preço da embalagem ÷ (rendimento × (1 − perda)))
+  + outros materiais + laboratório + minutos/60 × estrutura/hora + minutos/60 × hora clínica do profissional.
+- **Percentuais sobre o preço**: cartão, comissão (padrão da filial ou do procedimento), taxas adicionais ativas
+  (`od.pricing_fee`: ISS, inadimplência, antecipação...), lucro desejado (padrão ou do procedimento) e IR:
+  - **PJ** (`it_tax_regime = 2`, IR sobre o faturamento): `preço = custo ÷ (1 − cartão − comissão − taxas − IR − lucro)`
+  - **PF** (`it_tax_regime = 1`, IR sobre o lucro): `preço = (1 − IR) × custo ÷ ((1 − IR) × (1 − cartão − comissão − taxas) − lucro)`
+  - **Preço mínimo** = mesma fórmula com lucro zero. Soma ≥ 100% → `PRICING_PERCENT_TOO_HIGH`.
+- A fórmula vive em `od.fn_pricing_calc` (e numa cópia testada no app, `PricingCalculator`, para a simulação ao
+  vivo). `procedure_list` sempre recalcula: o preço nunca é gravado. Percentuais em pontos (4 = 4%).
+- Preço de mercado dos materiais: Edge Function `material-price-lookup` (o usuário escolhe a oferta;
+  `material_save` grava `it_price_source = 2` e a loja/URL).
+- RPCs em `ad` (`ad.pricing_param_get/save`, `ad.material_list/save`, `ad.procedure_list/save`); tabelas,
+  policies e helpers em `od`. `od` **não** entra em Exposed schemas.
+
 ## Flyway — fluxo de mudança
 
 | Caso | O que fazer |
 |---|---|
 | Nova function / policy / trigger | cria `Procedures/BAD/<nome>.pgs` + entrada em `schema.json` |
 | Alterou function | edita o `.pgs`; Flyway reaplica (checksum) |
-| Nova tabela / coluna | `Scripts/YYYY/MM/V<ts>__<desc>.sql` com RLS + trigger em `trg_audit.pgs` + policy em `rls_policies.pgs` + `schema.json` |
+| Nova tabela / coluna | `Scripts/YYYY/MM/V<ts>__<desc>.sql` com RLS + trigger em `trg_audit.pgs` (`ad`) ou `trg_od_audit.pgs` (`od`) + policy em `rls_policies.pgs` / `rls_od_policies.pgs` + `schema.json` |
 | Alterou descrição | só `schema.json` + `node tools/gen-dictionary.mjs` (o COMMENT ON é repeatable) |
 
 Antes de abrir PR, rode o ciclo completo local (precisa de Docker e Node):
@@ -332,7 +390,7 @@ O repo versiona `.mcp.json` com o servidor `supabase` (HTTP, `project_ref` do pr
   projeto de desenvolvimento, nunca em produção.
 - **Produção**: se um dia for conectado, usar `read_only=true` na URL e um `project_ref` separado.
 - Ao abrir o projeto no Supabase pela primeira vez, conferir com o MCP os advisors (nenhum aviso de
-  RLS desligada ou `search_path mutable`) e se `ad` está em Exposed schemas.
+  RLS desligada ou `search_path mutable`) e se `ad` está em Exposed schemas (`od` e `private` ficam fora).
 
 ### Edge Functions (`supabase/functions/<nome>/index.ts`)
 
@@ -342,9 +400,15 @@ existir, o deploy em **homologação** pode ser feito pelo MCP (`deploy_edge_fun
 conteúdo do arquivo; nunca em produção. Edge Function é o único lugar onde `service_role` é usado, e
 sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 
+| Function | Faz | Secrets (Edge Functions → Secrets) |
+|---|---|---|
+| `user-create` | cria a conta no Auth (service_role) e vincula à empresa | nenhum extra |
+| `material-price-lookup` | pesquisa preço de mercado de um material (Claude + web search); valida acesso com `ad.pricing_param_get`; não grava nada | `ANTHROPIC_API_KEY` (obrigatório), `PRICE_LOOKUP_MODEL` (opcional) |
+
 ### Setup do projeto Supabase (uma vez por ambiente)
 
 1. Dashboard → **Project Settings → API → Exposed schemas**: adicionar `ad` (senão o PostgREST não enxerga).
+   Nunca `private` nem `od`: o app só chega aos dados de negócio por RPC em `ad`.
 2. **Authentication → URL Configuration**: Site URL e Redirect URLs do app.
 3. Rodar o workflow de deploy (ou `./flyway/scripts/deploy.sh staging` com as env vars).
 4. Conferir **Database → Advisors**: não pode haver aviso de RLS desligada nem `search_path mutable`.
@@ -386,4 +450,7 @@ final filiais = await sb.schema('ad').from('branch').select('nr_company, nr_bran
 - Operações de plataforma (bloquear empresa, inativar usuário): fazer por service_role ou futura RPC
   restrita a `app_user.it_level = 100`.
 - Empresa ativa no JWT (Auth Hook de custom claims) para policies sem subquery — só se a performance pedir.
-- Schema `od` (odontologia) e Storage para avatar/logo.
+- Próximos módulos do schema `od`: agenda, prontuário/anamnese/odontograma (em cima de `od.patient`), orçamentos (usando a precificação), financeiro.
+- Storage para avatar/logo.
+- Deploy da Edge Function `material-price-lookup` em produção (depende do secret `SUPABASE_ACCESS_TOKEN`
+  do workflow e do `ANTHROPIC_API_KEY` no projeto).

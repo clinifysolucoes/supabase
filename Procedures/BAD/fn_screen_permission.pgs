@@ -1,0 +1,72 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.fn_screen_permission(bigint, bigint, text)                 ::
+  ::  UsedBy      : RPCs de negocio (schema od) para checar a permissao por tela  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Permissao efetiva do usuario logado numa tela, numa filial: a mesma regra
+    do session_context. A filial precisa estar acessivel (private.fn_my_branches);
+    perfil nivel 100 tem tudo; senao vale a uniao das linhas de
+    ad.access_profile_screen dos perfis do usuario naquela filial.
+    Helper interno (sem grant): so as RPCs SECURITY DEFINER chamam.
+  Input:
+    p_nr_company, p_nr_branch   filial em questao
+    p_vc_screen                 codigo da tela (ad.screen.vc_code), ex.: 'PRICING'
+  Output jsonb: {"id_read": bool, "id_create": bool, "id_update": bool}
+    Tudo false sem sessao, sem acesso a filial ou tela inexistente/inativa.
+*/
+create or replace function ad.fn_screen_permission(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_vc_screen  text
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user   bigint  := private.fn_current_user_nr();
+  _id_admin  boolean := false;
+  _id_read   boolean := false;
+  _id_create boolean := false;
+  _id_update boolean := false;
+begin
+  if _nr_user is not null and p_nr_company is not null and p_nr_branch is not null
+     and exists (select 1
+                   from private.fn_my_branches() mb
+                  where mb.nr_company = p_nr_company
+                    and mb.nr_branch  = p_nr_branch) then
+    select coalesce(bool_or(ap.it_level >= 100), false),
+           coalesce(bool_or(aps.id_read),   false),
+           coalesce(bool_or(aps.id_create), false),
+           coalesce(bool_or(aps.id_update), false)
+      into _id_admin, _id_read, _id_create, _id_update
+      from ad.branch_user_profile bup
+      join ad.access_profile ap on ap.nr_company = bup.nr_company
+                               and ap.nr_profile = bup.nr_profile
+                               and ap.it_status  = 1
+      left join ad.screen s on s.vc_code   = upper(p_vc_screen)
+                           and s.it_status = 1
+      left join ad.access_profile_screen aps on aps.nr_company = ap.nr_company
+                                            and aps.nr_profile = ap.nr_profile
+                                            and aps.uu_screen  = s.uu_screen
+     where bup.nr_company = p_nr_company
+       and bup.nr_branch  = p_nr_branch
+       and bup.nr_user    = _nr_user;
+  end if;
+
+  return jsonb_build_object(
+    'id_read',   _id_admin or _id_read,
+    'id_create', _id_admin or _id_create,
+    'id_update', _id_admin or _id_update);
+end;
+$$;
+
+revoke all on function ad.fn_screen_permission(bigint, bigint, text) from public, anon, authenticated;

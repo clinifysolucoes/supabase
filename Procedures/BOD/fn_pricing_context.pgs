@@ -1,0 +1,131 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_pricing_context(bigint, bigint)                         ::
+  ::  UsedBy      : ad.pricing_param_get, ad.pricing_param_save, ad.procedure_list ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
+  ::  Date        : 14/10/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Parametros de precificacao da filial (ou os padroes sugeridos, quando a
+    filial ainda nao salvou nada) e o resumo calculado a partir das despesas:
+      custo mensal          = fixas + variaveis + eventuais anuais / 12 + publicidade
+      horas por mes         = salas x horas por semana x semanas por mes
+      horas produtivas      = horas por mes x ocupacao
+      custo estrutura/hora  = custo mensal / horas produtivas
+      pc_fees               = soma das taxas adicionais ativas
+      pc_tax                = IR do regime escolhido (PF ou PJ)
+    Helper interno (sem grant). Nao checa permissao: quem chama checou.
+  Input: p_nr_company, p_nr_branch
+  Output jsonb:
+    {"params": {... colunas de od.pricing_param ..., "id_saved": bool},
+     "summary": {"vl_fixed_monthly", "vl_variable_monthly", "vl_annual_eventual",
+                 "vl_marketing_monthly", "vl_monthly_cost", "qt_hours_month",
+                 "qt_productive_hours", "vl_structure_hour", "pc_fees", "pc_tax", "pc_total"}}
+*/
+create or replace function od.fn_pricing_context(p_nr_company bigint, p_nr_branch bigint)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _p                 od.pricing_param%rowtype;
+  _id_saved          boolean;
+  _vl_fixed          numeric := 0;
+  _vl_variable       numeric := 0;
+  _vl_annual         numeric := 0;
+  _vl_marketing      numeric := 0;
+  _vl_monthly        numeric;
+  _qt_hours_month    numeric;
+  _qt_productive     numeric;
+  _vl_structure_calc numeric;
+  _vl_structure_hour numeric;
+  _pc_fees           numeric := 0;
+  _pc_tax            numeric;
+begin
+  select pp.* into _p
+    from od.pricing_param pp
+   where pp.nr_company = p_nr_company
+     and pp.nr_branch  = p_nr_branch;
+  _id_saved := found;
+
+  if not _id_saved then
+    _p.nr_company           := p_nr_company;
+    _p.nr_branch            := p_nr_branch;
+    _p.qt_rooms             := 1;
+    _p.qt_hours_week        := 40;
+    _p.qt_weeks_month       := 4.33;
+    _p.pc_occupancy         := 70;
+    _p.vl_professional_hour := 0;
+    _p.pc_card              := 4;
+    _p.pc_commission        := 0;
+    _p.it_tax_regime        := 1;
+    _p.pc_tax_pf            := 27.5;
+    _p.pc_tax_pj            := 11.33;
+    _p.pc_profit            := 30;
+    _p.vl_structure_hour_manual := null;
+  end if;
+
+  select coalesce(sum(case when e.it_type = 1 then e.vl_amount end), 0),
+         coalesce(sum(case when e.it_type = 2 then e.vl_amount end), 0),
+         coalesce(sum(case when e.it_type = 3 then e.vl_amount end), 0),
+         coalesce(sum(case when e.it_type = 4 then e.vl_amount end), 0)
+    into _vl_fixed, _vl_variable, _vl_annual, _vl_marketing
+    from od.clinic_expense e
+   where e.nr_company = p_nr_company
+     and e.nr_branch  = p_nr_branch
+     and e.it_status  = 1;
+
+  select coalesce(sum(f.pc_rate), 0)
+    into _pc_fees
+    from od.pricing_fee f
+   where f.nr_company = p_nr_company
+     and f.nr_branch  = p_nr_branch
+     and f.id_active;
+
+  _vl_monthly        := _vl_fixed + _vl_variable + _vl_annual / 12 + _vl_marketing;
+  _qt_hours_month    := _p.qt_rooms * _p.qt_hours_week * _p.qt_weeks_month;
+  _qt_productive     := _qt_hours_month * _p.pc_occupancy / 100;
+  _vl_structure_calc := case when _qt_productive > 0 then round(_vl_monthly / _qt_productive, 2) else 0 end;
+  /* valor manual (como na planilha original, que digitava R$ 30 sobre os R$ 30,36 calculados) */
+  _vl_structure_hour := coalesce(_p.vl_structure_hour_manual, _vl_structure_calc);
+  _pc_tax            := case when _p.it_tax_regime = 2 then _p.pc_tax_pj else _p.pc_tax_pf end;
+
+  return jsonb_build_object(
+    'params', jsonb_build_object(
+      'nr_company',           _p.nr_company,
+      'nr_branch',            _p.nr_branch,
+      'qt_rooms',             _p.qt_rooms,
+      'qt_hours_week',        _p.qt_hours_week,
+      'qt_weeks_month',       _p.qt_weeks_month,
+      'pc_occupancy',         _p.pc_occupancy,
+      'vl_professional_hour', _p.vl_professional_hour,
+      'pc_card',              _p.pc_card,
+      'pc_commission',        _p.pc_commission,
+      'it_tax_regime',        _p.it_tax_regime,
+      'pc_tax_pf',            _p.pc_tax_pf,
+      'pc_tax_pj',            _p.pc_tax_pj,
+      'pc_profit',            _p.pc_profit,
+      'vl_structure_hour_manual', _p.vl_structure_hour_manual,
+      'id_saved',             _id_saved),
+    'summary', jsonb_build_object(
+      'vl_fixed_monthly',     round(_vl_fixed, 2),
+      'vl_variable_monthly',  round(_vl_variable, 2),
+      'vl_annual_eventual',   round(_vl_annual, 2),
+      'vl_marketing_monthly', round(_vl_marketing, 2),
+      'vl_monthly_cost',      round(_vl_monthly, 2),
+      'qt_hours_month',       round(_qt_hours_month, 2),
+      'qt_productive_hours',  round(_qt_productive, 2),
+      'vl_structure_hour',    _vl_structure_hour,
+      'vl_structure_hour_calc', _vl_structure_calc,
+      'pc_fees',              _pc_fees,
+      'pc_tax',               _pc_tax,
+      'pc_total',             _p.pc_card + _p.pc_commission + _pc_fees + _pc_tax + _p.pc_profit));
+end;
+$$;
+
+revoke all on function od.fn_pricing_context(bigint, bigint) from public, anon, authenticated;
