@@ -1884,6 +1884,192 @@ window.DICTIONARY = {
     },
     {
       "schema": "od",
+      "name": "professional",
+      "title": "Profissional da agenda",
+      "description": "Quem atende na filial (dentista, HOF, ASB...): uma coluna na agenda, com cor própria, intervalo dos horários e, opcionalmente, o usuário do sistema que é este profissional. nr_professional é sequencial por filial.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via professional_save (permissão na tela AGENDA).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_professional",
+          "type": "bigint",
+          "pk": 3,
+          "nullable": false,
+          "description": "Número sequencial do profissional na filial."
+        },
+        {
+          "name": "vc_name",
+          "type": "varchar(80)",
+          "uk": "professional_vc_name_uk",
+          "nullable": false,
+          "description": "Nome exibido na agenda (único na filial)."
+        },
+        {
+          "name": "vc_council",
+          "type": "varchar(30)",
+          "nullable": true,
+          "description": "Registro no conselho (ex.: CRO-PR 12345)."
+        },
+        {
+          "name": "vc_color",
+          "type": "varchar(7)",
+          "nullable": false,
+          "description": "Cor da coluna na agenda, #RRGGBB em maiúsculas (sem cor na criação: próxima da paleta padrão)."
+        },
+        {
+          "name": "qt_slot_minutes",
+          "type": "smallint",
+          "nullable": false,
+          "default": "30",
+          "description": "Intervalo dos horários na agenda deste profissional, em minutos (5 a 240)."
+        },
+        {
+          "name": "nr_user",
+          "type": "bigint",
+          "uk": "professional_nr_user_uk",
+          "fk": "app_user.nr_user",
+          "nullable": true,
+          "description": "Usuário do sistema que é este profissional (ativo na empresa; no máximo um profissional por usuário na filial)."
+        },
+        {
+          "name": "it_status",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Situação do profissional (inativo some da agenda).",
+          "values": {
+            "1": "Ativo",
+            "90": "Inativo"
+          }
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "professional_schedule",
+      "title": "Horário de atendimento",
+      "description": "Faixas de atendimento do profissional por dia da semana (várias por dia, sem sobrepor). Fora delas a agenda mostra o horário como indisponível. Substituído inteiro a cada professional_save com schedules.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via professional_save.",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "professional.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "professional.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_professional",
+          "type": "bigint",
+          "pk": 3,
+          "fk": "professional.nr_professional",
+          "nullable": false,
+          "description": "Profissional."
+        },
+        {
+          "name": "nr_schedule",
+          "type": "bigint",
+          "pk": 4,
+          "nullable": false,
+          "description": "Número da faixa no profissional (renumerado a cada gravação, por dia e hora)."
+        },
+        {
+          "name": "it_weekday",
+          "type": "smallint",
+          "nullable": false,
+          "description": "Dia da semana.",
+          "values": {
+            "0": "Domingo",
+            "1": "Segunda",
+            "2": "Terça",
+            "3": "Quarta",
+            "4": "Quinta",
+            "5": "Sexta",
+            "6": "Sábado"
+          }
+        },
+        {
+          "name": "qt_minute_start",
+          "type": "smallint",
+          "nullable": false,
+          "description": "Início da faixa, em minutos desde a meia-noite (480 = 08:00)."
+        },
+        {
+          "name": "qt_minute_end",
+          "type": "smallint",
+          "nullable": false,
+          "description": "Fim da faixa, em minutos desde a meia-noite (maior que o início; até 1440)."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
       "name": "patient",
       "title": "Paciente",
       "description": "Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial.",
@@ -2485,6 +2671,24 @@ window.DICTIONARY = {
       "label": "pacientes"
     },
     {
+      "from": "branch",
+      "to": "professional",
+      "card": "||--o{",
+      "label": "profissionais"
+    },
+    {
+      "from": "professional",
+      "to": "professional_schedule",
+      "card": "||--o{",
+      "label": "horário de atendimento"
+    },
+    {
+      "from": "app_user",
+      "to": "professional",
+      "card": "|o--o{",
+      "label": "é o profissional"
+    },
+    {
       "from": "patient",
       "to": "patient_note",
       "card": "||--o{",
@@ -2965,6 +3169,43 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "professional_list",
+      "signature": "ad.professional_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "AGENDA_BRANCH_REQUIRED",
+        "AGENDA_FORBIDDEN"
+      ]
+    },
+    {
+      "name": "professional_save",
+      "signature": "ad.professional_save(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "PROFESSIONAL_ACTION_INVALID",
+        "AGENDA_BRANCH_REQUIRED",
+        "PROFESSIONAL_FORBIDDEN",
+        "PROFESSIONAL_NAME_REQUIRED",
+        "PROFESSIONAL_NAME_IN_USE",
+        "PROFESSIONAL_COLOR_INVALID",
+        "PROFESSIONAL_SLOT_INVALID",
+        "PROFESSIONAL_USER_INVALID",
+        "PROFESSIONAL_USER_IN_USE",
+        "PROFESSIONAL_STATUS_INVALID",
+        "PROFESSIONAL_SCHEDULES_INVALID",
+        "PROFESSIONAL_SCHEDULE_INVALID",
+        "PROFESSIONAL_SCHEDULE_OVERLAP",
+        "PROFESSIONAL_REQUIRED",
+        "PROFESSIONAL_NOT_FOUND"
+      ]
+    },
+    {
       "name": "specialty_list",
       "signature": "ad.specialty_list(p_json jsonb)",
       "kind": "rpc",
@@ -3086,5 +3327,5 @@ window.DICTIONARY = {
       ]
     }
   ],
-  "mermaid": "erDiagram\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  branch ||--o| pricing_param : \"parâmetros de preço\"\n  branch ||--o{ clinic_expense : \"despesas\"\n  branch ||--o{ pricing_fee : \"taxas adicionais\"\n  branch ||--o{ material : \"materiais\"\n  branch ||--o{ specialty : \"especialidades\"\n  specialty |o--o{ procedure : \"agrupa procedimentos\"\n  branch ||--o{ procedure : \"procedimentos\"\n  procedure ||--o{ procedure_material : \"usa materiais\"\n  material ||--o{ procedure_material : \"usado em\"\n  branch ||--o{ patient : \"pacientes\"\n  patient ||--o{ patient_note : \"notas\"\n  app_user ||--o{ patient_note : \"autor\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }\n  pricing_param {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_rooms\n    numeric qt_hours_week\n    numeric qt_weeks_month\n    numeric pc_occupancy\n    numeric vl_professional_hour\n    numeric pc_card\n    numeric pc_commission\n    smallint it_tax_regime\n    numeric pc_tax_pf\n    numeric pc_tax_pj\n    numeric pc_profit\n    numeric vl_structure_hour_manual\n  }\n  clinic_expense {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_expense PK\n    varchar vc_name\n    smallint it_type\n    numeric vl_amount\n    smallint it_status\n  }\n  pricing_fee {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_fee PK\n    varchar vc_name\n    varchar vc_hint\n    numeric pc_rate\n    boolean id_active\n  }\n  material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK\n    varchar vc_name UK\n    varchar vc_package\n    numeric vl_package_price\n    numeric qt_yield\n    varchar vc_unit\n    numeric pc_waste\n    smallint it_price_source\n    varchar vc_price_source\n    timestamptz dh_price_updated\n    smallint it_status\n  }\n  specialty {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_specialty PK\n    varchar vc_name UK\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_template {\n    bigint nr_template PK\n    varchar vc_specialty UK\n    varchar vc_code\n    varchar vc_name UK\n    numeric qt_minutes\n    numeric vl_material_other\n    numeric vl_lab_cost\n    numeric vl_reference_price\n    integer nr_order\n    smallint it_status\n  }\n  procedure {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK\n    varchar vc_code UK\n    varchar vc_name UK\n    bigint nr_specialty FK\n    numeric qt_minutes\n    numeric vl_lab_cost\n    numeric vl_material_other\n    numeric vl_current_price\n    numeric pc_commission\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK, FK\n    bigint nr_material PK, FK\n    numeric qt_used\n  }\n  patient {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK\n    varchar vc_name\n    varchar vc_nickname\n    varchar vc_cpf UK\n    varchar vc_rg\n    date dt_birth\n    smallint it_gender\n    smallint it_marital_status\n    smallint it_education\n    smallint it_source\n    varchar vc_referral\n    text vc_notes\n    varchar vc_phone\n    varchar vc_mobile\n    varchar vc_phone_other\n    varchar vc_contact_name\n    varchar vc_email\n    boolean id_no_email\n    varchar vc_zip\n    varchar vc_state\n    varchar vc_city\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_district\n    varchar vc_address_complement\n    varchar vc_record_number\n    varchar vc_profession\n    varchar vc_workplace\n    varchar vc_work_time\n    varchar vc_plan_name\n    varchar vc_plan_number\n    varchar vc_father_name\n    varchar vc_father_cpf\n    varchar vc_father_rg\n    varchar vc_father_profession\n    varchar vc_mother_name\n    varchar vc_mother_cpf\n    varchar vc_mother_rg\n    varchar vc_mother_profession\n    varchar vc_guardian_name\n    varchar vc_guardian_cpf\n    varchar vc_guardian_rg\n    varchar vc_guardian_phone\n    date dt_return_alert\n    varchar vc_return_alert\n    smallint it_status\n  }\n  patient_note {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_note PK\n    text vc_note\n    bigint nr_user FK\n    timestamptz dh_note\n    smallint it_status\n  }"
+  "mermaid": "erDiagram\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  branch ||--o| pricing_param : \"parâmetros de preço\"\n  branch ||--o{ clinic_expense : \"despesas\"\n  branch ||--o{ pricing_fee : \"taxas adicionais\"\n  branch ||--o{ material : \"materiais\"\n  branch ||--o{ specialty : \"especialidades\"\n  specialty |o--o{ procedure : \"agrupa procedimentos\"\n  branch ||--o{ procedure : \"procedimentos\"\n  procedure ||--o{ procedure_material : \"usa materiais\"\n  material ||--o{ procedure_material : \"usado em\"\n  branch ||--o{ patient : \"pacientes\"\n  branch ||--o{ professional : \"profissionais\"\n  professional ||--o{ professional_schedule : \"horário de atendimento\"\n  app_user |o--o{ professional : \"é o profissional\"\n  patient ||--o{ patient_note : \"notas\"\n  app_user ||--o{ patient_note : \"autor\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }\n  pricing_param {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_rooms\n    numeric qt_hours_week\n    numeric qt_weeks_month\n    numeric pc_occupancy\n    numeric vl_professional_hour\n    numeric pc_card\n    numeric pc_commission\n    smallint it_tax_regime\n    numeric pc_tax_pf\n    numeric pc_tax_pj\n    numeric pc_profit\n    numeric vl_structure_hour_manual\n  }\n  clinic_expense {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_expense PK\n    varchar vc_name\n    smallint it_type\n    numeric vl_amount\n    smallint it_status\n  }\n  pricing_fee {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_fee PK\n    varchar vc_name\n    varchar vc_hint\n    numeric pc_rate\n    boolean id_active\n  }\n  material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK\n    varchar vc_name UK\n    varchar vc_package\n    numeric vl_package_price\n    numeric qt_yield\n    varchar vc_unit\n    numeric pc_waste\n    smallint it_price_source\n    varchar vc_price_source\n    timestamptz dh_price_updated\n    smallint it_status\n  }\n  specialty {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_specialty PK\n    varchar vc_name UK\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_template {\n    bigint nr_template PK\n    varchar vc_specialty UK\n    varchar vc_code\n    varchar vc_name UK\n    numeric qt_minutes\n    numeric vl_material_other\n    numeric vl_lab_cost\n    numeric vl_reference_price\n    integer nr_order\n    smallint it_status\n  }\n  procedure {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK\n    varchar vc_code UK\n    varchar vc_name UK\n    bigint nr_specialty FK\n    numeric qt_minutes\n    numeric vl_lab_cost\n    numeric vl_material_other\n    numeric vl_current_price\n    numeric pc_commission\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK, FK\n    bigint nr_material PK, FK\n    numeric qt_used\n  }\n  professional {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK\n    varchar vc_name UK\n    varchar vc_council\n    varchar vc_color\n    smallint qt_slot_minutes\n    bigint nr_user FK, UK\n    smallint it_status\n  }\n  professional_schedule {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK, FK\n    bigint nr_schedule PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  patient {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK\n    varchar vc_name\n    varchar vc_nickname\n    varchar vc_cpf UK\n    varchar vc_rg\n    date dt_birth\n    smallint it_gender\n    smallint it_marital_status\n    smallint it_education\n    smallint it_source\n    varchar vc_referral\n    text vc_notes\n    varchar vc_phone\n    varchar vc_mobile\n    varchar vc_phone_other\n    varchar vc_contact_name\n    varchar vc_email\n    boolean id_no_email\n    varchar vc_zip\n    varchar vc_state\n    varchar vc_city\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_district\n    varchar vc_address_complement\n    varchar vc_record_number\n    varchar vc_profession\n    varchar vc_workplace\n    varchar vc_work_time\n    varchar vc_plan_name\n    varchar vc_plan_number\n    varchar vc_father_name\n    varchar vc_father_cpf\n    varchar vc_father_rg\n    varchar vc_father_profession\n    varchar vc_mother_name\n    varchar vc_mother_cpf\n    varchar vc_mother_rg\n    varchar vc_mother_profession\n    varchar vc_guardian_name\n    varchar vc_guardian_cpf\n    varchar vc_guardian_rg\n    varchar vc_guardian_phone\n    date dt_return_alert\n    varchar vc_return_alert\n    smallint it_status\n  }\n  patient_note {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_note PK\n    text vc_note\n    bigint nr_user FK\n    timestamptz dh_note\n    smallint it_status\n  }"
 };
