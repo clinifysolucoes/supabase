@@ -4,7 +4,7 @@
   "schema": "ad",
   "schema_title": "AD - Administrative",
   "schemas": { "ad": "AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)", "od": "OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)", "private": "helpers de RLS, fora da API" },
-  "updated": "2026-11-03",
+  "updated": "2026-11-04",
   "prefixes": {
     "nr_": "Numérico / identificador (bigint, smallint)",
     "vc_": "Texto (varchar, text)",
@@ -321,6 +321,26 @@
     },
     {
       "schema": "od",
+      "name": "procedure_template",
+      "title": "Catálogo de procedimentos (referência)",
+      "description": "Catálogo GLOBAL de procedimentos por especialidade, com os dados da planilha de precificação da clínica (código, nome, tempo, material informado, laboratório e valor de referência). Alimenta o auto complete do cadastro de procedimento (procedure_suggest), que sugere o que a filial ainda não cadastrou. A especialidade é casada pelo nome com od.specialty. Mantido só por migration.",
+      "rls": "Ligada e sem policy: leitura só pela RPC procedure_suggest (SECURITY DEFINER); escrita só por migration.",
+      "columns": [
+        { "name": "nr_template", "type": "bigint", "pk": 1, "nullable": false, "default": "identity", "description": "Identificador do item do catálogo." },
+        { "name": "vc_specialty", "type": "varchar(40)", "uk": "procedure_template_name_uk", "nullable": false, "description": "Nome da especialidade (Clínica Geral, Endodontia, Implante, Ortodontia, HOF...), casado sem diferenciar maiúsculas com od.specialty.vc_name." },
+        { "name": "vc_code", "type": "varchar(10)", "nullable": true, "description": "Código da tabela da planilha (ex.: 3.1). Vai nulo na sugestão quando a filial já usa o código." },
+        { "name": "vc_name", "type": "varchar(80)", "uk": "procedure_template_name_uk", "nullable": false, "description": "Nome do procedimento (único por especialidade)." },
+        { "name": "qt_minutes", "type": "numeric(7,2)", "nullable": false, "default": "0", "description": "Tempo de cadeira sugerido, em minutos." },
+        { "name": "vl_material_other", "type": "numeric(12,2)", "nullable": false, "default": "0", "description": "Custo de material informado na planilha (R$), sugerido como \"outros materiais\"." },
+        { "name": "vl_lab_cost", "type": "numeric(12,2)", "nullable": false, "default": "0", "description": "Laboratório / terceiros sugerido (R$)." },
+        { "name": "vl_reference_price", "type": "numeric(12,2)", "nullable": true, "description": "Valor cobrado na planilha (R$), sugerido como valor cobrado hoje." },
+        { "name": "nr_order", "type": "integer", "nullable": false, "default": "0", "description": "Ordem de exibição (a da planilha)." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação do item do catálogo.",
+          "values": { "1": "Ativo", "90": "Inativo" } }
+      ]
+    },
+    {
+      "schema": "od",
       "name": "procedure",
       "title": "Procedimento",
       "description": "Procedimento precificado, ligado a uma especialidade: tempo de cadeira, laboratório/terceiros, outros materiais (valor informado), valor cobrado hoje (comparado ao custo, ao preço mínimo e ao sugerido para gerar o alerta) e, opcionalmente, comissão e lucro próprios. O preço não é gravado: procedure_list calcula sempre com os parâmetros atuais (od.fn_pricing_calc).",
@@ -565,6 +585,9 @@
     { "name": "procedure_save", "signature": "ad.procedure_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
       "description": "Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log.",
       "errors": ["VERSION_MISMATCH", "PROCEDURE_ACTION_INVALID", "PRICING_BRANCH_REQUIRED", "PROCEDURE_FORBIDDEN", "PROCEDURE_NAME_REQUIRED", "PROCEDURE_NAME_IN_USE", "PROCEDURE_CODE_IN_USE", "PROCEDURE_MINUTES_INVALID", "PROCEDURE_VALUE_INVALID", "PROCEDURE_PERCENT_INVALID", "PROCEDURE_STATUS_INVALID", "PROCEDURE_MATERIALS_INVALID", "PROCEDURE_MATERIAL_INVALID", "PROCEDURE_QUANTITY_INVALID", "PROCEDURE_SPECIALTY_INVALID", "PROCEDURE_REQUIRED", "PROCEDURE_NOT_FOUND"] },
+    { "name": "procedure_suggest", "signature": "ad.procedure_suggest(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
+      "description": "Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 50 de cada. Exige leitura na tela PRICING.",
+      "errors": ["VERSION_MISMATCH", "PRICING_BRANCH_REQUIRED", "PRICING_FORBIDDEN"] },
     { "name": "specialty_list", "signature": "ad.specialty_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated",
       "description": "Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING.",
       "errors": ["VERSION_MISMATCH", "PRICING_BRANCH_REQUIRED", "PRICING_FORBIDDEN"] },

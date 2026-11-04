@@ -1,6 +1,6 @@
 # Dicionário de dados — Supabase multi-company login
 
-> Base multi-empresa / multi-filial do futuro sistema de odontologia. Schemas: **`ad`** (AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)), **`od`** (OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)), **`private`** (helpers de RLS, fora da API). Atualizado em 2026-11-03.
+> Base multi-empresa / multi-filial do futuro sistema de odontologia. Schemas: **`ad`** (AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)), **`od`** (OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)), **`private`** (helpers de RLS, fora da API). Atualizado em 2026-11-04.
 >
 > **Gerado** por `node tools/gen-dictionary.mjs` a partir de [`docs/dictionary/schema.json`](dictionary/schema.json). Não edite este arquivo à mão.
 > Viewer interativo: abra [`docs/dictionary/index.html`](dictionary/index.html) no navegador.
@@ -50,6 +50,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.pricing_fee`](#odpricingfee) | Taxa adicional de precificação | Taxas adicionais sobre o preço que a clínica liga ou desliga por filial (ISS, inadimplência, antecipação de recebíveis, garantia/retrabalho, margem de negociação, convênios...). Só as ativas entram no cálculo (somadas aos percentuais sobre o preço). pricing_param_get sugere uma lista inicial; a lista inteira é substituída a cada pricing_param_save. |
 | [`od.material`](#odmaterial) | Material | Catálogo de materiais da filial. Custo por unidade de uso = preço da embalagem ÷ (rendimento × (1 − perda)). O preço pode ser digitado ou vir da pesquisa de mercado (Edge Function material-price-lookup), com a loja/URL de origem e a data da última atualização. |
 | [`od.specialty`](#odspecialty) | Especialidade | Especialidade da filial (Clínica Geral, Implante, Ortodontia, HOF, Endodontia, Prótese...): agrupa os procedimentos na aba Especialidades da tela Precificação e define o lucro desejado deles. Lucro usado no preço: procedimento > especialidade > filial. nr_specialty é sequencial por filial. |
+| [`od.procedure_template`](#odproceduretemplate) | Catálogo de procedimentos (referência) | Catálogo GLOBAL de procedimentos por especialidade, com os dados da planilha de precificação da clínica (código, nome, tempo, material informado, laboratório e valor de referência). Alimenta o auto complete do cadastro de procedimento (procedure_suggest), que sugere o que a filial ainda não cadastrou. A especialidade é casada pelo nome com od.specialty. Mantido só por migration. |
 | [`od.procedure`](#odprocedure) | Procedimento | Procedimento precificado, ligado a uma especialidade: tempo de cadeira, laboratório/terceiros, outros materiais (valor informado), valor cobrado hoje (comparado ao custo, ao preço mínimo e ao sugerido para gerar o alerta) e, opcionalmente, comissão e lucro próprios. O preço não é gravado: procedure_list calcula sempre com os parâmetros atuais (od.fn_pricing_calc). |
 | [`od.procedure_material`](#odprocedurematerial) | Material do procedimento | Materiais usados em cada procedimento com a quantidade em unidades de uso. Custo da linha = quantidade × custo unitário do material. A lista é substituída a cada procedure_save com materials. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
@@ -265,6 +266,18 @@ erDiagram
     bigint nr_specialty PK
     varchar vc_name UK
     numeric pc_profit
+    smallint it_status
+  }
+  procedure_template {
+    bigint nr_template PK
+    varchar vc_specialty UK
+    varchar vc_code
+    varchar vc_name UK
+    numeric qt_minutes
+    numeric vl_material_other
+    numeric vl_lab_cost
+    numeric vl_reference_price
+    integer nr_order
     smallint it_status
   }
   procedure {
@@ -712,6 +725,30 @@ Especialidade da filial (Clínica Geral, Implante, Ortodontia, HOF, Endodontia, 
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.procedure_template
+
+**Catálogo de procedimentos (referência)**
+
+Catálogo GLOBAL de procedimentos por especialidade, com os dados da planilha de precificação da clínica (código, nome, tempo, material informado, laboratório e valor de referência). Alimenta o auto complete do cadastro de procedimento (procedure_suggest), que sugere o que a filial ainda não cadastrou. A especialidade é casada pelo nome com od.specialty. Mantido só por migration.
+
+**RLS:** Ligada e sem policy: leitura só pela RPC procedure_suggest (SECURITY DEFINER); escrita só por migration.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_template` | `bigint` | PK1 | NOT NULL | `identity` | Identificador do item do catálogo. |
+| `vc_specialty` | `varchar(40)` | UK | NOT NULL |  | Nome da especialidade (Clínica Geral, Endodontia, Implante, Ortodontia, HOF...), casado sem diferenciar maiúsculas com od.specialty.vc_name. |
+| `vc_code` | `varchar(10)` |  | NULL |  | Código da tabela da planilha (ex.: 3.1). Vai nulo na sugestão quando a filial já usa o código. |
+| `vc_name` | `varchar(80)` | UK | NOT NULL |  | Nome do procedimento (único por especialidade). |
+| `qt_minutes` | `numeric(7,2)` |  | NOT NULL | `0` | Tempo de cadeira sugerido, em minutos. |
+| `vl_material_other` | `numeric(12,2)` |  | NOT NULL | `0` | Custo de material informado na planilha (R$), sugerido como "outros materiais". |
+| `vl_lab_cost` | `numeric(12,2)` |  | NOT NULL | `0` | Laboratório / terceiros sugerido (R$). |
+| `vl_reference_price` | `numeric(12,2)` |  | NULL |  | Valor cobrado na planilha (R$), sugerido como valor cobrado hoje. |
+| `nr_order` | `integer` |  | NOT NULL | `0` | Ordem de exibição (a da planilha). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do item do catálogo. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.procedure
 
 **Procedimento**
@@ -871,6 +908,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.material_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um material: embalagem, preço, rendimento, unidade, perda, origem do preço (manual / pesquisa de mercado), situação. Grava event_log. |
 | `ad.procedure_list(p_json jsonb)` | authenticated | Procedimentos da filial com especialidade, materiais, preço calculado (fn_pricing_calc; lucro do procedimento > especialidade > filial), preço mínimo, decomposição (cartão, comissão, taxas, IR, lucro), situação do valor cobrado hoje (it_price_status, lucro atual) e alertas (NO_TIME, NO_MATERIAL, MATERIAL_NO_PRICE, PERCENT_TOO_HIGH, PRICE_BELOW_COST, PRICE_BELOW_MIN, PRICE_BELOW_SUGGESTED). Filtros: nr_specialty, vc_search, id_include_inactive; it_tax_regime simula PF x PJ. Devolve também parâmetros e resumo. Exige leitura na tela PRICING. |
 | `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
+| `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 50 de cada. Exige leitura na tela PRICING. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
 | `ad.specialty_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) uma especialidade: nome, lucro desejado (null = padrão da filial) e situação. Grava event_log. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
@@ -1012,7 +1050,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_STATUS_INVALID` | `patient_save` |  |
 | `PATIENT_VALUE_INVALID` | `patient_save` |  |
 | `PATIENT_ZIP_INVALID` | `patient_save` |  |
-| `PRICING_BRANCH_REQUIRED` | `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `specialty_list`, `specialty_save` |  |
+| `PRICING_BRANCH_REQUIRED` | `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `specialty_list`, `specialty_save` |  |
 | `PRICING_EXPENSE_AMOUNT_INVALID` | `pricing_param_save` | Expense |
 | `PRICING_EXPENSE_NAME_REQUIRED` | `pricing_param_save` |  |
 | `PRICING_EXPENSE_TYPE_INVALID` | `pricing_param_save` | Expense |
@@ -1020,7 +1058,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PRICING_FEE_NAME_REQUIRED` | `pricing_param_save` |  |
 | `PRICING_FEE_RATE_INVALID` | `pricing_param_save` | Fee |
 | `PRICING_FEES_INVALID` | `pricing_param_save` |  |
-| `PRICING_FORBIDDEN` | `pricing_param_get`, `pricing_param_save`, `material_list`, `procedure_list`, `specialty_list` |  |
+| `PRICING_FORBIDDEN` | `pricing_param_get`, `pricing_param_save`, `material_list`, `procedure_list`, `procedure_suggest`, `specialty_list` |  |
 | `PRICING_PARAM_INVALID` | `pricing_param_save` | Field |
 | `PRICING_PERCENT_TOO_HIGH` | `pricing_param_save` | Total |
 | `PROCEDURE_ACTION_INVALID` | `procedure_save` |  |
@@ -1064,5 +1102,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `specialty_list`, `specialty_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 
