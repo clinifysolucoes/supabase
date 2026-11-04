@@ -66,8 +66,9 @@ begin
 
   _r := ad.professional_list(jsonb_build_object('nr_version', 1, 'nr_company', _ca, 'nr_branch', 1));
   assert jsonb_array_length(_r -> 'professionals') = 2, '2 profissionais';
-  _pr := _r -> 'professionals' -> 1;
-  assert _pr ->> 'vc_name' = 'Dra. Ana', 'ordem por nome';
+  -- busca pelo nome: a ordem por nome depende da collation do banco
+  _pr := (select x from jsonb_array_elements(_r -> 'professionals') x where x ->> 'vc_name' = 'Dra. Ana');
+  assert _pr is not null, 'Dra. Ana na lista';
   assert _pr ->> 'vc_user_name' = 'Hana Agenda', 'usuario vinculado';
   assert jsonb_array_length(_pr -> 'schedules') = 3, '3 faixas';
   assert (_pr -> 'schedules' -> 0 ->> 'qt_minute_start')::int = 480, 'faixas em ordem de dia e hora';
