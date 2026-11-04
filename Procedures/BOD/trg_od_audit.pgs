@@ -81,3 +81,11 @@ create or replace trigger fin_supplier_audit
 create or replace trigger fin_entry_audit
   before insert or update on od.fin_entry
   for each row execute function ad.trg_audit();
+
+create or replace trigger fin_cash_session_audit
+  before insert or update on od.fin_cash_session
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_transfer_audit
+  before insert or update on od.fin_transfer
+  for each row execute function ad.trg_audit();

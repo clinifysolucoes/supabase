@@ -6,14 +6,15 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - sessao de caixa (fase 2)                        ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
       PAY     em aberto -> pago: conta (obrigatoria, ou a do lancamento), data
               (default hoje no fuso da filial), valor pago (default o valor) e
               forma de pagamento
-      UNDO    pago -> em aberto (limpa data e valor pagos)
+      UNDO    pago -> em aberto (limpa data e valor pagos); nao vale se o
+            pagamento entrou numa sessao de caixa ja fechada
       CANCEL  em aberto -> cancelado; com id_following, cancela tambem as
               proximas parcelas/repeticoes em aberto do mesmo grupo
       REOPEN  cancelado -> em aberto
@@ -35,7 +36,7 @@
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, FIN_ENTRY_REQUIRED,
     FIN_ENTRY_NOT_FOUND, FIN_SETTLE_ACTION_INVALID, FIN_SETTLE_STATUS_INVALID, FIN_ENTRY_VALUE_INVALID,
-    FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID
+    FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_CASH_SESSION_CLOSED
 */
 create or replace function ad.fin_entry_settle(p_json jsonb)
 returns jsonb
@@ -116,11 +117,17 @@ begin
       _dt_paid := (now() at time zone _tz)::date;
     end if;
     update od.fin_entry e set
-      it_status = 2, nr_account = _account, dt_paid = _dt_paid, vl_paid = _vl_paid, it_payment_method = _method
+      it_status = 2, nr_account = _account, dt_paid = _dt_paid, vl_paid = _vl_paid, it_payment_method = _method,
+      nr_cash_session = od.fn_fin_open_session(_nr_company, _nr_branch, _account)
     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
     _status := 2;
   elsif _action = 'UNDO' then
-    update od.fin_entry e set it_status = 1, dt_paid = null, vl_paid = null
+    if exists (select 1 from od.fin_cash_session s
+                where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                  and s.nr_session = _cur.nr_cash_session and s.it_status = 2) then
+      raise exception '%', ad.fn_message('FIN_CASH_SESSION_CLOSED');
+    end if;
+    update od.fin_entry e set it_status = 1, dt_paid = null, vl_paid = null, nr_cash_session = null
     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _nr_entry;
     _status := 1;
   elsif _action = 'CANCEL' then

@@ -1,0 +1,255 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.appointment_checkout(jsonb)                                ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('appointment_checkout')  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Fechamento financeiro da consulta (permissao CRIAR na tela FINANCE):
+      - gera a conta a receber do paciente ligada ao atendimento, em 1 a 24
+        parcelas mensais (centavos na ultima), competencia = dia da consulta;
+      - id_paid: a 1a parcela ja entra recebida na conta informada (e no caixa
+        aberto dessa conta, se houver);
+      - comissao do profissional (percentual informado, ou o do procedimento,
+        ou o padrao da filial): conta a pagar na categoria "Comissões"
+        (criada se faltar), vencendo no dia 10 do mes seguinte;
+      - marca a consulta como atendida (5) se ainda nao estiver.
+    Um atendimento so tem um fechamento ativo: para refazer, cancele as
+    parcelas em aberto no financeiro. Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    nr_company         bigint   obrigatorio
+    nr_branch          bigint   obrigatorio
+    nr_appointment     bigint   obrigatorio
+    vl_amount          numeric  obrigatorio (> 0, total a receber)
+    nr_category        bigint   opcional (receita ativa; padrao Tratamentos/1a receita)
+    qt_installments    integer  opcional 1..24 (padrao 1)
+    dt_first_due       date     opcional (padrao hoje no fuso da filial)
+    it_payment_method  integer  opcional 1..9
+    id_paid            boolean  opcional: 1a parcela recebida agora
+    nr_account         bigint   obrigatorio com id_paid
+    id_commission      boolean  opcional (padrao true)
+    pc_commission      numeric  opcional 0..100 (padrao o do procedimento/filial)
+    vc_notes           text     opcional
+
+  Output jsonb: {"nr_appointment", "nr_entry", "qt_installments", "nr_commission_entry", "vl_commission"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, CHECKOUT_APPOINTMENT_REQUIRED,
+    CHECKOUT_APPOINTMENT_NOT_FOUND, CHECKOUT_APPOINTMENT_INVALID, CHECKOUT_ALREADY_DONE,
+    CHECKOUT_NOT_CONFIGURED, FIN_ENTRY_VALUE_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_CATEGORY_INVALID,
+    FIN_ENTRY_INSTALLMENTS_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_ENTRY_PAID_ACCOUNT_REQUIRED,
+    CHECKOUT_COMMISSION_INVALID
+*/
+create or replace function ad.appointment_checkout(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user     bigint;
+  _nr_company  bigint;
+  _nr_branch   bigint;
+  _nr_appt     bigint;
+  _appt        od.appointment%rowtype;
+  _tz          text;
+  _today       date;
+  _competence  date;
+  _amount      numeric;
+  _category    bigint;
+  _n           integer;
+  _first_due   date;
+  _method      smallint;
+  _paid        boolean;
+  _account     bigint;
+  _commission  boolean;
+  _pc          numeric;
+  _notes       text;
+  _proc_name   text;
+  _prof_name   text;
+  _desc        text;
+  _group       uuid;
+  _nr_entry    bigint;
+  _i           integer;
+  _part        numeric;
+  _session     bigint;
+  _vl_comm     numeric := 0;
+  _nr_comm     bigint;
+  _cat_comm    bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_checkout');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean then
+    raise exception '%', ad.fn_message('FIN_ENTRY_FORBIDDEN');
+  end if;
+  _nr_appt := (p_json ->> 'nr_appointment')::bigint;
+  if _nr_appt is null then
+    raise exception '%', ad.fn_message('CHECKOUT_APPOINTMENT_REQUIRED');
+  end if;
+
+  /* trava o atendimento: dois fechamentos ao mesmo tempo nao passam         */
+  select * into _appt from od.appointment a
+   where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_appointment = _nr_appt
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('CHECKOUT_APPOINTMENT_NOT_FOUND');
+  end if;
+  if _appt.it_type <> 1 or _appt.it_status in (7, 90) then
+    raise exception '%', ad.fn_message('CHECKOUT_APPOINTMENT_INVALID');
+  end if;
+  if exists (select 1 from od.fin_entry e
+              where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                and e.nr_appointment = _nr_appt and e.it_kind = 1 and e.it_status <> 90) then
+    raise exception '%', ad.fn_message('CHECKOUT_ALREADY_DONE');
+  end if;
+  if not exists (select 1 from od.fin_account a
+                  where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_status = 1) then
+    raise exception '%', ad.fn_message('CHECKOUT_NOT_CONFIGURED');
+  end if;
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _today      := (now() at time zone _tz)::date;
+  _competence := (_appt.dh_start at time zone _tz)::date;
+
+  begin
+    _amount     := round((p_json ->> 'vl_amount')::numeric, 2);
+    _category   := (p_json ->> 'nr_category')::bigint;
+    _n          := coalesce((p_json ->> 'qt_installments')::integer, 1);
+    _first_due  := coalesce((p_json ->> 'dt_first_due')::date, _today);
+    _method     := (p_json ->> 'it_payment_method')::smallint;
+    _paid       := coalesce((p_json ->> 'id_paid')::boolean, false);
+    _account    := (p_json ->> 'nr_account')::bigint;
+    _commission := coalesce((p_json ->> 'id_commission')::boolean, true);
+    _pc         := (p_json ->> 'pc_commission')::numeric;
+    _notes      := left(nullif(trim(p_json ->> 'vc_notes'), ''), 500);
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
+  end;
+
+  if _amount is null or _amount <= 0 then
+    raise exception '%', ad.fn_message('FIN_ENTRY_AMOUNT_INVALID');
+  end if;
+  if _n not between 1 and 24 then
+    raise exception '%', ad.fn_message('FIN_ENTRY_INSTALLMENTS_INVALID');
+  end if;
+  if _method is not null and _method not in (1, 2, 3, 4, 5, 6, 7, 9) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_INVALID');
+  end if;
+  if _category is null then
+    select c.nr_category into _category from od.fin_category c
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.it_kind = 1 and c.it_status = 1
+     order by (lower(c.vc_name) = 'tratamentos') desc, c.nr_category
+     limit 1;
+    if _category is null then
+      _category := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Tratamentos', 1::smallint, null, _nr_user);
+    end if;
+  elsif not exists (select 1 from od.fin_category c
+                     where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                       and c.nr_category = _category and c.it_kind = 1 and c.it_status = 1) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_CATEGORY_INVALID');
+  end if;
+  if _paid and (_account is null or not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+          and a.nr_account = _account and a.it_status = 1)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_PAID_ACCOUNT_REQUIRED');
+  end if;
+
+  select pc.vc_name, coalesce(_pc, pc.pc_commission, pp.pc_commission, 0)
+    into _proc_name, _pc
+    from (select 1) x
+    left join od.procedure pc on pc.nr_company = _nr_company and pc.nr_branch = _nr_branch
+                             and pc.nr_procedure = _appt.nr_procedure
+    left join od.pricing_param pp on pp.nr_company = _nr_company and pp.nr_branch = _nr_branch;
+  if _pc is null or _pc < 0 or _pc > 100 then
+    raise exception '%', ad.fn_message('CHECKOUT_COMMISSION_INVALID');
+  end if;
+  select p.vc_name into _prof_name from od.professional p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _appt.nr_professional;
+
+  _desc  := left(coalesce(_proc_name, 'Consulta'), 120);
+  _group := case when _n > 1 then gen_random_uuid() end;
+  if _paid then
+    _session := od.fn_fin_open_session(_nr_company, _nr_branch, _account);
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select coalesce(max(e.nr_entry), 0) into _nr_entry
+    from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+
+  for _i in 1 .. _n loop
+    _part := case when _n = 1 then _amount
+                  when _i < _n then trunc(_amount / _n, 2)
+                  else _amount - trunc(_amount / _n, 2) * (_n - 1) end;
+    insert into od.fin_entry (
+      nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, nr_patient, nr_professional,
+      nr_appointment, vc_description, vl_amount, dt_due, dt_competence, it_payment_method,
+      dt_paid, vl_paid, it_status, nr_cash_session, uu_group, nr_installment, qt_installments,
+      vc_notes, nr_user_created, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr_entry + _i, 1, _category,
+      case when _paid and _i = 1 then _account end,
+      _appt.nr_patient, _appt.nr_professional, _nr_appt,
+      case when _n > 1 then _desc || format(' (%s/%s)', _i, _n) else _desc end,
+      _part,
+      (_first_due + make_interval(months => _i - 1))::date,
+      _competence,
+      _method,
+      case when _paid and _i = 1 then _today end,
+      case when _paid and _i = 1 then _part end,
+      case when _paid and _i = 1 then 2 else 1 end,
+      case when _paid and _i = 1 then _session end,
+      _group, _i, _n, _notes, _nr_user, _nr_user);
+  end loop;
+
+  /* comissao do profissional: conta a pagar, dia 10 do mes seguinte         */
+  _vl_comm := round(_amount * _pc / 100, 2);
+  if _commission and _vl_comm > 0 and _appt.nr_professional is not null then
+    _cat_comm := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Comissões', 2::smallint, 2::smallint, _nr_user);
+    _nr_comm  := _nr_entry + _n + 1;
+    insert into od.fin_entry (
+      nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_professional, nr_appointment,
+      vc_description, vl_amount, dt_due, dt_competence, it_status, nr_installment, qt_installments,
+      nr_user_created, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr_comm, 2, _cat_comm, _appt.nr_professional, _nr_appt,
+      left(format('Comissão %s: %s', coalesce(_prof_name, ''), _desc), 140),
+      _vl_comm,
+      (date_trunc('month', _today) + interval '1 month' + interval '9 days')::date,
+      _competence, 1, 1, 1, _nr_user, _nr_user);
+  else
+    _vl_comm := 0;
+  end if;
+
+  if _appt.it_status <> 5 then
+    update od.appointment a set it_status = 5
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_appointment = _nr_appt;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'CREATE',
+    'appointment_checkout', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_appt::text,
+    format('Atendimento fechado: %s em %s parcela(s)%s', left(_desc, 60), _n,
+           case when _vl_comm > 0 then ', com comissão' else '' end),
+    jsonb_build_object('nr_appointment', _nr_appt, 'vl_amount', _amount, 'qt_installments', _n,
+                       'id_paid', _paid, 'vl_commission', _vl_comm));
+
+  return jsonb_build_object('nr_appointment', _nr_appt, 'nr_entry', _nr_entry + 1, 'qt_installments', _n,
+                            'nr_commission_entry', _nr_comm, 'vl_commission', _vl_comm);
+end;
+$$;
+
+revoke all on function ad.appointment_checkout(jsonb) from public, anon;
+grant execute on function ad.appointment_checkout(jsonb) to authenticated;

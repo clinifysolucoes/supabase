@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - selo financeiro it_fin_status (fase 2)          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda da filial num periodo (dia, semana ou mes): consultas e compromissos
@@ -30,7 +30,10 @@
                        "vc_patient_mobile", "nr_professional", "vc_professional_name",
                        "vc_professional_color", "nr_procedure", "vc_procedure_name",
                        "vc_title", "vc_notes", "dh_start", "dh_end", "id_all_day",
-                       "id_fit_in", "it_status", "vc_created_by", "dh_created"}],
+                       "id_fit_in", "it_status", "vc_created_by", "dh_created",
+                       "it_fin_status" (selo do financeiro, so com LER em FINANCE: null sem
+                       fechamento esperado, 1 atendido sem recebimento, 2 recebimento em
+                       aberto, 3 tudo recebido)}],
      "return_alerts": [{"nr_patient", "vc_name", "vc_mobile", "dt_return_alert", "vc_return_alert"}],
      "vc_timezone": "America/Sao_Paulo"}
 
@@ -47,6 +50,7 @@ declare
   _nr_company    bigint;
   _nr_branch     bigint;
   _tz            text;
+  _fin           boolean;
   _dt_start      date;
   _dt_end        date;
   _from          timestamptz;
@@ -82,6 +86,9 @@ begin
   _from := _dt_start::timestamp at time zone _tz;
   _to   := (_dt_end + 1)::timestamp at time zone _tz;
 
+  /* selo financeiro so para quem le o financeiro                          */
+  _fin := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false);
+
   if jsonb_typeof(p_json -> 'nr_professionals') = 'array' then
     select array_agg(x::bigint) into _profs from jsonb_array_elements_text(p_json -> 'nr_professionals') x;
   end if;
@@ -106,7 +113,12 @@ begin
              'id_fit_in',             a.id_fit_in,
              'it_status',             a.it_status,
              'vc_created_by',         u.vc_name,
-             'dh_created',            a.dh_created)
+             'dh_created',            a.dh_created,
+             'it_fin_status',         case when not _fin then null
+                                           when a.it_type <> 1 then null
+                                           when fe.qt_open is null then case when a.it_status = 5 then 1 end
+                                           when fe.qt_open > 0 then 2
+                                           else 3 end)
            order by a.dh_start, a.nr_appointment), '[]'::jsonb)
     into _appointments
     from od.appointment a
@@ -117,6 +129,11 @@ begin
     left join od.procedure pc    on pc.nr_company = a.nr_company and pc.nr_branch = a.nr_branch
                                 and pc.nr_procedure = a.nr_procedure
     left join ad.app_user u      on u.nr_user = a.nr_user_created
+    left join lateral (select count(*) filter (where e.it_status = 1) as qt_open
+                         from od.fin_entry e
+                        where e.nr_company = a.nr_company and e.nr_branch = a.nr_branch
+                          and e.nr_appointment = a.nr_appointment and e.it_kind = 1 and e.it_status <> 90
+                       having count(*) > 0) fe on true
    where a.nr_company = _nr_company
      and a.nr_branch  = _nr_branch
      and a.dh_start  >= _from

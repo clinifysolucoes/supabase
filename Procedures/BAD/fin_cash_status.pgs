@@ -1,0 +1,138 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_cash_status(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_cash_status')       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Caixa do dia (permissao LER na tela FINANCE): o caixa aberto do usuario
+    (se houver), as contas do tipo caixa com quem esta com cada uma, e as
+    ultimas sessoes. Cada sessao traz o resumo: abertura, entradas por forma
+    de pagamento, saidas, sangrias e suprimentos, esperado (saldo atual da
+    conta, se aberta; o gravado no fechamento, se fechada), contado e
+    diferenca.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    qt_last     integer  opcional 1..60 (padrao 20 sessoes)
+
+  Output jsonb:
+    {"mine": <sessao>|null,
+     "accounts": [{"nr_account", "vc_name", "vl_balance", "nr_session", "vc_user"}],
+     "sessions": [<sessao>],
+     "permission": {...}}
+    <sessao> = {"nr_session", "nr_account", "vc_account", "nr_user", "vc_user", "dh_open", "dh_close",
+                "it_status", "vl_open", "vl_in", "vl_out", "vl_transfer_in", "vl_transfer_out",
+                "by_method": {"<it_payment_method|0>": valor}, "vl_expected", "vl_counted",
+                "vl_difference", "vc_notes"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
+*/
+create or replace function ad.fin_cash_status(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _last       integer;
+  _sessions   jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_cash_status');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null or not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  _last := least(greatest(coalesce((p_json ->> 'qt_last')::integer, 20), 1), 60);
+
+  with s as (
+    select s.*
+      from od.fin_cash_session s
+     where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+       and (s.it_status = 1 or s.nr_session in (
+              select x.nr_session from od.fin_cash_session x
+               where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+               order by x.dh_open desc limit _last))
+  ), mv as (
+    select s.nr_session,
+           coalesce(sum(e.vl_paid) filter (where e.it_kind = 1), 0) as vl_in,
+           coalesce(sum(e.vl_paid) filter (where e.it_kind = 2), 0) as vl_out,
+           (select coalesce(jsonb_object_agg(m.k, m.v), '{}'::jsonb)
+              from (select coalesce(e2.it_payment_method, 0)::text as k, sum(e2.vl_paid) as v
+                      from od.fin_entry e2
+                     where e2.nr_company = _nr_company and e2.nr_branch = _nr_branch
+                       and e2.nr_cash_session = s.nr_session and e2.it_status = 2 and e2.it_kind = 1
+                     group by 1) m) as by_method
+      from s
+      left join od.fin_entry e on e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                              and e.nr_cash_session = s.nr_session and e.it_status = 2
+     group by s.nr_session
+  ), tr as (
+    select s.nr_session,
+           coalesce(sum(t.vl_amount) filter (where t.nr_account_to = s.nr_account), 0) as vl_tin,
+           coalesce(sum(t.vl_amount) filter (where t.nr_account_from = s.nr_account), 0) as vl_tout
+      from s
+      left join od.fin_transfer t on t.nr_company = _nr_company and t.nr_branch = _nr_branch
+                                 and t.nr_cash_session = s.nr_session and t.it_status = 1
+     group by s.nr_session
+  ), j as (
+    select s.nr_session, s.nr_user, s.it_status, s.dh_open,
+           jsonb_build_object(
+             'nr_session', s.nr_session, 'nr_account', s.nr_account, 'vc_account', a.vc_name,
+             'nr_user', s.nr_user, 'vc_user', u.vc_name, 'dh_open', s.dh_open, 'dh_close', s.dh_close,
+             'it_status', s.it_status, 'vl_open', s.vl_open,
+             'vl_in', mv.vl_in, 'vl_out', mv.vl_out, 'by_method', mv.by_method,
+             'vl_transfer_in', tr.vl_tin, 'vl_transfer_out', tr.vl_tout,
+             'vl_expected', case when s.it_status = 1
+                                 then od.fn_fin_balance(_nr_company, _nr_branch, s.nr_account, null)
+                                 else s.vl_expected end,
+             'vl_counted', s.vl_counted,
+             'vl_difference', s.vl_counted - s.vl_expected,
+             'vc_notes', s.vc_notes) as js
+      from s
+      join mv using (nr_session)
+      join tr using (nr_session)
+      join od.fin_account a on a.nr_company = s.nr_company and a.nr_branch = s.nr_branch and a.nr_account = s.nr_account
+      join ad.app_user u on u.nr_user = s.nr_user
+  )
+  select jsonb_build_object(
+           'mine', (select j.js from j where j.nr_user = _nr_user and j.it_status = 1),
+           'sessions', coalesce((select jsonb_agg(j.js order by j.dh_open desc) from j), '[]'::jsonb))
+    into _sessions;
+
+  return _sessions || jsonb_build_object(
+    'accounts', (select coalesce(jsonb_agg(jsonb_build_object(
+                          'nr_account', a.nr_account, 'vc_name', a.vc_name,
+                          'vl_balance', od.fn_fin_balance(_nr_company, _nr_branch, a.nr_account, null),
+                          'nr_session', s.nr_session, 'vc_user', u.vc_name)
+                          order by a.vc_name), '[]'::jsonb)
+                   from od.fin_account a
+                   left join od.fin_cash_session s on s.nr_company = a.nr_company and s.nr_branch = a.nr_branch
+                                                  and s.nr_account = a.nr_account and s.it_status = 1
+                   left join ad.app_user u on u.nr_user = s.nr_user
+                  where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+                    and a.it_status = 1 and a.it_type = 1),
+    'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.fin_cash_status(jsonb) from public, anon;
+grant execute on function ad.fin_cash_status(jsonb) to authenticated;

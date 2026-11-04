@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - categoria Comissoes (fase 2)                    ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Primeiro uso do financeiro da filial: cria as contas e o plano de contas
@@ -107,6 +107,13 @@ begin
       from (values (1, 'Materiais', 2), (2, 'Laboratório', 2), (3, 'Equipamentos', 3), (4, 'Outras despesas', 4))
            x(ord, name, cost_type);
     _qt_cat := _qt_cat + 4;
+  end if;
+
+  if not exists (select 1 from od.fin_category c
+                  where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                    and c.it_kind = 2 and lower(c.vc_name) = 'comissões') then
+    perform od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Comissões', 2::smallint, 2::smallint, _nr_user);
+    _qt_cat := _qt_cat + 1;
   end if;
 
   if _qt_acc + _qt_cat > 0 then

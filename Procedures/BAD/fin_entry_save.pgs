@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - profissional e sessao de caixa (fase 2)         ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Conta a receber (it_kind 1) ou a pagar (it_kind 2).
@@ -51,7 +51,7 @@
 
   Errors: VERSION_MISMATCH, FIN_ENTRY_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN,
     FIN_ENTRY_VALUE_INVALID, FIN_ENTRY_KIND_INVALID, FIN_ENTRY_CATEGORY_INVALID, FIN_ENTRY_ACCOUNT_INVALID,
-    FIN_ENTRY_SUPPLIER_INVALID, FIN_ENTRY_PATIENT_INVALID, FIN_ENTRY_DESCRIPTION_REQUIRED,
+    FIN_ENTRY_SUPPLIER_INVALID, FIN_ENTRY_PATIENT_INVALID, FIN_ENTRY_PROFESSIONAL_INVALID, FIN_ENTRY_DESCRIPTION_REQUIRED,
     FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_DUE_REQUIRED, FIN_ENTRY_METHOD_INVALID, FIN_ENTRY_INSTALLMENTS_INVALID,
     FIN_ENTRY_PAID_ACCOUNT_REQUIRED, FIN_ENTRY_REQUIRED, FIN_ENTRY_NOT_FOUND, FIN_ENTRY_PAID_LOCKED,
     FIN_ENTRY_CANCELLED_LOCKED
@@ -136,6 +136,7 @@ begin
     _new.nr_account        := case when p_json ? 'nr_account'        then (p_json ->> 'nr_account')::bigint         else _cur.nr_account end;
     _new.nr_supplier       := case when p_json ? 'nr_supplier'       then (p_json ->> 'nr_supplier')::bigint        else _cur.nr_supplier end;
     _new.nr_patient        := case when p_json ? 'nr_patient'        then (p_json ->> 'nr_patient')::bigint         else _cur.nr_patient end;
+    _new.nr_professional   := case when p_json ? 'nr_professional'   then (p_json ->> 'nr_professional')::bigint    else _cur.nr_professional end;
     _new.vc_description    := case when p_json ? 'vc_description'    then left(nullif(trim(p_json ->> 'vc_description'), ''), 140) else _cur.vc_description end;
     _new.vl_amount         := case when p_json ? 'vl_amount'         then round((p_json ->> 'vl_amount')::numeric, 2) else _cur.vl_amount end;
     _new.dt_due            := case when p_json ? 'dt_due'            then (p_json ->> 'dt_due')::date               else _cur.dt_due end;
@@ -178,6 +179,12 @@ begin
         where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient) then
     raise exception '%', ad.fn_message('FIN_ENTRY_PATIENT_INVALID');
   end if;
+  if _new.nr_professional is not null and not exists (
+       select 1 from od.professional p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _new.nr_professional
+          and (p.it_status = 1 or _new.nr_professional is not distinct from _cur.nr_professional)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_PROFESSIONAL_INVALID');
+  end if;
   if _new.vc_description is null then
     raise exception '%', ad.fn_message('FIN_ENTRY_DESCRIPTION_REQUIRED');
   end if;
@@ -198,6 +205,7 @@ begin
       nr_account        = _new.nr_account,
       nr_supplier       = _new.nr_supplier,
       nr_patient        = _new.nr_patient,
+      nr_professional   = _new.nr_professional,
       vc_description    = _new.vc_description,
       vl_amount         = _new.vl_amount,
       dt_due            = _new.dt_due,
@@ -229,11 +237,12 @@ begin
                     else _new.vl_amount - trunc(_new.vl_amount / _n, 2) * (_n - 1) end;
       insert into od.fin_entry (
         nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, nr_supplier, nr_patient,
-        vc_description, vl_amount, dt_due, dt_competence, it_payment_method, dt_paid, vl_paid, it_status,
-        uu_group, nr_installment, qt_installments, id_recurring, vc_notes, nr_user_created, nr_operator)
+        nr_professional, vc_description, vl_amount, dt_due, dt_competence, it_payment_method, dt_paid,
+        vl_paid, it_status, nr_cash_session, uu_group, nr_installment, qt_installments, id_recurring,
+        vc_notes, nr_user_created, nr_operator)
       values (
         _nr_company, _nr_branch, _nr_entry + _i, _new.it_kind, _new.nr_category, _new.nr_account,
-        _new.nr_supplier, _new.nr_patient,
+        _new.nr_supplier, _new.nr_patient, _new.nr_professional,
         case when _n > 1 and not _recurring
              then left(_new.vc_description, 130) || format(' (%s/%s)', _i, _n)
              else _new.vc_description end,
@@ -244,6 +253,7 @@ begin
         case when _paid then coalesce(_dt_paid, _new.dt_due) end,
         case when _paid then _part end,
         case when _paid then 2 else 1 end,
+        case when _paid then od.fn_fin_open_session(_nr_company, _nr_branch, _new.nr_account) end,
         _group, _i, _n, _recurring, _new.vc_notes, _nr_user, _nr_user);
     end loop;
   end if;

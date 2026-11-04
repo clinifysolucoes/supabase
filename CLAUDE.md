@@ -55,6 +55,8 @@ Objetos principais:
 | `od.appointment` / `ad.appointment_list` / `ad.appointment_save` | agenda: consultas e compromissos (clínica toda ou profissional), situação do atendimento, conflito de horário (encaixe libera), alertas de retorno no período |
 | `od.fin_account` / `od.fin_category` / `od.fin_supplier` / `od.fin_entry` | financeiro (fase 1): contas com saldo, plano de contas (tipo de custo da precificação), fornecedores, contas a receber/pagar com parcelas e recorrência |
 | `ad.fin_setup` / `ad.fin_catalog` / `ad.fin_*_save` / `ad.fin_entry_settle` / `ad.fin_entry_list` / `ad.fin_overview` / `ad.fin_cashflow` / `ad.fin_statement` | tela Financeiro (`FINANCE`, uuid `...000000000008`); saldo em `od.fn_fin_balance` |
+| `od.fin_cash_session` / `od.fin_transfer` / `ad.fin_cash_open` / `ad.fin_cash_close` / `ad.fin_cash_status` / `ad.fin_transfer_save` | financeiro (fase 2): caixa do dia por pessoa (abre/fecha com contado × esperado) e transferências, sangria e suprimento; o pagamento numa conta com caixa aberto entra na sessão (`fin_entry.nr_cash_session`) |
+| `ad.appointment_checkout_get` / `ad.appointment_checkout` | fechamento da consulta: conta a receber ligada ao atendimento (`fin_entry.nr_appointment`), comissão do profissional (`nr_professional`, dia 10 do mês seguinte) e selo `it_fin_status` em `appointment_list` |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |

@@ -7,12 +7,13 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - transferencias entre contas (fase 2)            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Saldo realizado de uma conta (ou de todas as contas ativas, com
     p_nr_account nulo) no fim do dia anterior a p_dt_before:
       saldo inicial + receitas pagas - despesas pagas (vl_paid, dt_paid < p_dt_before)
+      + transferencias recebidas - transferencias enviadas (dt_transfer < p_dt_before)
     Sem p_dt_before = saldo de hoje em diante (tudo que ja foi pago).
     Helper interno (sem grant): a RPC que chama ja checou a permissao.
   Input:
@@ -40,7 +41,15 @@ as $$
                     where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch
                       and e.it_status = 2
                       and (p_nr_account is null and a.it_status = 1 or e.nr_account = p_nr_account)
-                      and (p_dt_before is null or e.dt_paid < p_dt_before)), 0);
+                      and (p_dt_before is null or e.dt_paid < p_dt_before)), 0)
+       + coalesce((select sum(case when t.nr_account_to = a.nr_account then t.vl_amount else -t.vl_amount end)
+                     from od.fin_transfer t
+                     join od.fin_account a on a.nr_company = t.nr_company and a.nr_branch = t.nr_branch
+                                          and a.nr_account in (t.nr_account_from, t.nr_account_to)
+                    where t.nr_company = p_nr_company and t.nr_branch = p_nr_branch
+                      and t.it_status = 1
+                      and (p_nr_account is null and a.it_status = 1 or a.nr_account = p_nr_account)
+                      and (p_dt_before is null or t.dt_transfer < p_dt_before)), 0);
 $$;
 
 revoke all on function od.fn_fin_balance(bigint, bigint, bigint, date) from public, anon, authenticated;
