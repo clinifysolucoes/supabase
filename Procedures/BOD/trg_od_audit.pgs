@@ -49,3 +49,7 @@ create or replace trigger patient_note_audit
 create or replace trigger specialty_audit
   before insert or update on od.specialty
   for each row execute function ad.trg_audit();
+
+create or replace trigger procedure_template_audit
+  before insert or update on od.procedure_template
+  for each row execute function ad.trg_audit();

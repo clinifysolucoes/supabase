@@ -1,0 +1,152 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.procedure_suggest(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('procedure_suggest')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Sugestoes para o auto complete do nome no cadastro de procedimento:
+      templates   procedimentos do catalogo de referencia (od.procedure_template)
+                  da especialidade (casada pelo nome) que a filial AINDA NAO
+                  cadastrou (pelo nome). vc_code vem nulo quando o codigo ja
+                  esta em uso na filial.
+      procedures  procedimentos ativos ja cadastrados na filial (na especialidade,
+                  quando informada), com os materiais ativos, para copiar os
+                  valores de um parecido.
+    Sem nr_specialty: catalogo inteiro e todos os procedimentos da filial.
+    vc_search filtra por nome ou codigo (contem). No maximo 200 de cada.
+    Exige permissao de LEITURA na tela PRICING.
+
+  Input p_json:
+    nr_version    integer  obrigatorio = 1
+    nr_company    bigint   obrigatorio
+    nr_branch     bigint   obrigatorio
+    nr_specialty  bigint   opcional
+    vc_search     text     opcional
+
+  Output jsonb:
+    {"templates":  [{"nr_template", "vc_specialty", "vc_code", "vc_name", "qt_minutes",
+                     "vl_material_other", "vl_lab_cost", "vl_reference_price"}],
+     "procedures": [{"nr_procedure", "vc_code", "vc_name", "vc_specialty", "qt_minutes",
+                     "vl_lab_cost", "vl_material_other", "vl_current_price", "pc_commission",
+                     "pc_profit", "materials": [{"nr_material", "vc_name", "vc_unit",
+                     "qt_used", "vl_unit_cost"}]}]}
+
+  Errors: VERSION_MISMATCH, PRICING_BRANCH_REQUIRED, PRICING_FORBIDDEN
+*/
+create or replace function ad.procedure_suggest(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company   bigint;
+  _nr_branch    bigint;
+  _nr_specialty bigint := (p_json ->> 'nr_specialty')::bigint;
+  _search       text   := nullif(trim(p_json ->> 'vc_search'), '');
+  _vc_specialty text;
+  _templates    jsonb;
+  _procedures   jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'procedure_suggest');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('PRICING_FORBIDDEN');
+  end if;
+
+  if _nr_specialty is not null then
+    select s.vc_name into _vc_specialty
+      from od.specialty s
+     where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_specialty = _nr_specialty;
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_template',        t.nr_template,
+             'vc_specialty',       t.vc_specialty,
+             'vc_code',            case when exists (select 1 from od.procedure p
+                                                      where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                                        and lower(p.vc_code) = lower(t.vc_code))
+                                        then null else t.vc_code end,
+             'vc_name',            t.vc_name,
+             'qt_minutes',         t.qt_minutes,
+             'vl_material_other',  t.vl_material_other,
+             'vl_lab_cost',        t.vl_lab_cost,
+             'vl_reference_price', t.vl_reference_price)
+           order by t.nr_order, t.vc_name), '[]'::jsonb)
+    into _templates
+    from (select t.*
+            from od.procedure_template t
+           where t.it_status = 1
+             and (_nr_specialty is null or lower(t.vc_specialty) = lower(_vc_specialty))
+             and (_search is null
+                  or t.vc_name ilike '%' || _search || '%'
+                  or coalesce(t.vc_code, '') ilike '%' || _search || '%')
+             and not exists (select 1 from od.procedure p
+                              where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                and lower(p.vc_name) = lower(t.vc_name))
+           order by t.nr_order, t.vc_name
+           limit 200) t;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_procedure',      p.nr_procedure,
+             'vc_code',           p.vc_code,
+             'vc_name',           p.vc_name,
+             'vc_specialty',      s.vc_name,
+             'qt_minutes',        p.qt_minutes,
+             'vl_lab_cost',       p.vl_lab_cost,
+             'vl_material_other', p.vl_material_other,
+             'vl_current_price',  p.vl_current_price,
+             'pc_commission',     p.pc_commission,
+             'pc_profit',         p.pc_profit,
+             'materials',         (select coalesce(jsonb_agg(
+                                            jsonb_build_object(
+                                              'nr_material',  m.nr_material,
+                                              'vc_name',      m.vc_name,
+                                              'vc_unit',      m.vc_unit,
+                                              'qt_used',      pm.qt_used,
+                                              'vl_unit_cost', round(m.vl_package_price / (m.qt_yield * (1 - m.pc_waste / 100)), 4))
+                                            order by m.vc_name), '[]'::jsonb)
+                                     from od.procedure_material pm
+                                     join od.material m on m.nr_company  = pm.nr_company
+                                                       and m.nr_branch   = pm.nr_branch
+                                                       and m.nr_material = pm.nr_material
+                                    where pm.nr_company   = p.nr_company
+                                      and pm.nr_branch    = p.nr_branch
+                                      and pm.nr_procedure = p.nr_procedure
+                                      and m.it_status     = 1))
+           order by p.vc_code nulls last, p.vc_name), '[]'::jsonb)
+    into _procedures
+    from (select p.*
+            from od.procedure p
+           where p.nr_company = _nr_company
+             and p.nr_branch  = _nr_branch
+             and p.it_status  = 1
+             and (_nr_specialty is null or p.nr_specialty = _nr_specialty)
+             and (_search is null
+                  or p.vc_name ilike '%' || _search || '%'
+                  or coalesce(p.vc_code, '') ilike '%' || _search || '%')
+           order by p.vc_code nulls last, p.vc_name
+           limit 200) p
+    left join od.specialty s on s.nr_company   = p.nr_company
+                            and s.nr_branch    = p.nr_branch
+                            and s.nr_specialty = p.nr_specialty;
+
+  return jsonb_build_object('templates', _templates, 'procedures', _procedures);
+end;
+$$;
+
+revoke all on function ad.procedure_suggest(jsonb) from public, anon;
+grant execute on function ad.procedure_suggest(jsonb) to authenticated;

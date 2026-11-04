@@ -64,6 +64,8 @@ create policy patient_note_select on od.patient_note
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
 
+-- od.procedure_template: catalogo global sem policy (so ad.procedure_suggest le)
+
 -- od.specialty
 drop policy if exists specialty_select on od.specialty;
 create policy specialty_select on od.specialty
