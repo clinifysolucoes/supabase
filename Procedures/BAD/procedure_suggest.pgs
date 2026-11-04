@@ -18,7 +18,7 @@
                   quando informada), com os materiais ativos, para copiar os
                   valores de um parecido.
     Sem nr_specialty: catalogo inteiro e todos os procedimentos da filial.
-    vc_search filtra por nome ou codigo (contem). No maximo 50 de cada.
+    vc_search filtra por nome ou codigo (contem). No maximo 200 de cada.
     Exige permissao de LEITURA na tela PRICING.
 
   Input p_json:
@@ -97,7 +97,7 @@ begin
                               where p.nr_company = _nr_company and p.nr_branch = _nr_branch
                                 and lower(p.vc_name) = lower(t.vc_name))
            order by t.nr_order, t.vc_name
-           limit 50) t;
+           limit 200) t;
 
   select coalesce(jsonb_agg(
            jsonb_build_object(
@@ -139,7 +139,7 @@ begin
                   or p.vc_name ilike '%' || _search || '%'
                   or coalesce(p.vc_code, '') ilike '%' || _search || '%')
            order by p.vc_code nulls last, p.vc_name
-           limit 50) p
+           limit 200) p
     left join od.specialty s on s.nr_company   = p.nr_company
                             and s.nr_branch    = p.nr_branch
                             and s.nr_specialty = p.nr_specialty;

@@ -101,8 +101,8 @@ begin
 
   -- sem especialidade: catalogo inteiro menos o cadastrado
   _r := ad.procedure_suggest(jsonb_build_object('nr_version', 1, 'nr_company', _ca, 'nr_branch', 1));
-  assert jsonb_array_length(_r -> 'templates') = 50,
-    'sem especialidade: catalogo inteiro (limite 50)';
+  assert jsonb_array_length(_r -> 'templates') = 66,
+    'sem especialidade: catalogo inteiro menos o cadastrado';
 end $$;
 
 -- ----------------------------------------------------------------------------

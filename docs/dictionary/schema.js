@@ -2957,7 +2957,7 @@ window.DICTIONARY = {
       "signature": "ad.procedure_suggest(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 50 de cada. Exige leitura na tela PRICING.",
+      "description": "Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING.",
       "errors": [
         "VERSION_MISMATCH",
         "PRICING_BRANCH_REQUIRED",
