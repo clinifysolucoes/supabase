@@ -1,0 +1,147 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.appointment_list(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('appointment_list')      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Agenda da filial num periodo (dia, semana ou mes): consultas e compromissos
+    que comecam entre dt_start e dt_end (inclusive), no fuso da filial. Com
+    nr_professionals, so os desses profissionais e os compromissos da clinica
+    toda. Cancelados ficam de fora, salvo id_include_cancelled. Devolve tambem
+    os alertas de retorno de pacientes ativos que caem no periodo.
+    Exige permissao de LEITURA na tela AGENDA.
+
+  Input p_json:
+    nr_version            integer  obrigatorio = 1
+    nr_company            bigint   obrigatorio
+    nr_branch             bigint   obrigatorio
+    dt_start              date     obrigatorio (YYYY-MM-DD)
+    dt_end                date     opcional (default dt_start; periodo de ate 62 dias)
+    nr_professionals      array    opcional [1, 2]
+    id_include_cancelled  boolean  opcional (default false)
+
+  Output jsonb:
+    {"appointments": [{"nr_appointment", "it_type", "nr_patient", "vc_patient_name",
+                       "vc_patient_mobile", "nr_professional", "vc_professional_name",
+                       "vc_professional_color", "nr_procedure", "vc_procedure_name",
+                       "vc_title", "vc_notes", "dh_start", "dh_end", "id_all_day",
+                       "id_fit_in", "it_status", "vc_created_by", "dh_created"}],
+     "return_alerts": [{"nr_patient", "vc_name", "vc_mobile", "dt_return_alert", "vc_return_alert"}],
+     "vc_timezone": "America/Sao_Paulo"}
+
+  Errors: VERSION_MISMATCH, AGENDA_BRANCH_REQUIRED, AGENDA_FORBIDDEN, APPOINTMENT_LIST_PERIOD_INVALID
+*/
+create or replace function ad.appointment_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company    bigint;
+  _nr_branch     bigint;
+  _tz            text;
+  _dt_start      date;
+  _dt_end        date;
+  _from          timestamptz;
+  _to            timestamptz;
+  _cancelled     boolean := coalesce((p_json ->> 'id_include_cancelled')::boolean, false);
+  _profs         bigint[];
+  _appointments  jsonb;
+  _alerts        jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('AGENDA_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('AGENDA_FORBIDDEN');
+  end if;
+
+  begin
+    _dt_start := (p_json ->> 'dt_start')::date;
+    _dt_end   := coalesce((p_json ->> 'dt_end')::date, _dt_start);
+  exception when others then
+    raise exception '%', ad.fn_message('APPOINTMENT_LIST_PERIOD_INVALID');
+  end;
+  if _dt_start is null or _dt_end < _dt_start or _dt_end - _dt_start > 62 then
+    raise exception '%', ad.fn_message('APPOINTMENT_LIST_PERIOD_INVALID');
+  end if;
+
+  select b.vc_timezone into _tz
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _from := _dt_start::timestamp at time zone _tz;
+  _to   := (_dt_end + 1)::timestamp at time zone _tz;
+
+  if jsonb_typeof(p_json -> 'nr_professionals') = 'array' then
+    select array_agg(x::bigint) into _profs from jsonb_array_elements_text(p_json -> 'nr_professionals') x;
+  end if;
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_appointment',        a.nr_appointment,
+             'it_type',               a.it_type,
+             'nr_patient',            a.nr_patient,
+             'vc_patient_name',       pa.vc_name,
+             'vc_patient_mobile',     pa.vc_mobile,
+             'nr_professional',       a.nr_professional,
+             'vc_professional_name',  pr.vc_name,
+             'vc_professional_color', pr.vc_color,
+             'nr_procedure',          a.nr_procedure,
+             'vc_procedure_name',     pc.vc_name,
+             'vc_title',              a.vc_title,
+             'vc_notes',              a.vc_notes,
+             'dh_start',              a.dh_start,
+             'dh_end',                a.dh_end,
+             'id_all_day',            a.id_all_day,
+             'id_fit_in',             a.id_fit_in,
+             'it_status',             a.it_status,
+             'vc_created_by',         u.vc_name,
+             'dh_created',            a.dh_created)
+           order by a.dh_start, a.nr_appointment), '[]'::jsonb)
+    into _appointments
+    from od.appointment a
+    left join od.patient pa      on pa.nr_company = a.nr_company and pa.nr_branch = a.nr_branch
+                                and pa.nr_patient = a.nr_patient
+    left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                and pr.nr_professional = a.nr_professional
+    left join od.procedure pc    on pc.nr_company = a.nr_company and pc.nr_branch = a.nr_branch
+                                and pc.nr_procedure = a.nr_procedure
+    left join ad.app_user u      on u.nr_user = a.nr_user_created
+   where a.nr_company = _nr_company
+     and a.nr_branch  = _nr_branch
+     and a.dh_start  >= _from
+     and a.dh_start  <  _to
+     and (_cancelled or a.it_status <> 90)
+     and (_profs is null or a.nr_professional is null or a.nr_professional = any (_profs));
+
+  select coalesce(jsonb_agg(
+           jsonb_build_object(
+             'nr_patient',      p.nr_patient,
+             'vc_name',         p.vc_name,
+             'vc_mobile',       p.vc_mobile,
+             'dt_return_alert', p.dt_return_alert,
+             'vc_return_alert', p.vc_return_alert)
+           order by p.dt_return_alert, p.vc_name), '[]'::jsonb)
+    into _alerts
+    from od.patient p
+   where p.nr_company = _nr_company
+     and p.nr_branch  = _nr_branch
+     and p.it_status  = 1
+     and p.dt_return_alert between _dt_start and _dt_end;
+
+  return jsonb_build_object('appointments', _appointments, 'return_alerts', _alerts, 'vc_timezone', _tz);
+end;
+$$;
+
+revoke all on function ad.appointment_list(jsonb) from public, anon;
+grant execute on function ad.appointment_list(jsonb) to authenticated;
