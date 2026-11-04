@@ -113,3 +113,15 @@ drop policy if exists fin_entry_select on od.fin_entry;
 create policy fin_entry_select on od.fin_entry
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_cash_session
+drop policy if exists fin_cash_session_select on od.fin_cash_session;
+create policy fin_cash_session_select on od.fin_cash_session
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_transfer
+drop policy if exists fin_transfer_select on od.fin_transfer;
+create policy fin_transfer_select on od.fin_transfer
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

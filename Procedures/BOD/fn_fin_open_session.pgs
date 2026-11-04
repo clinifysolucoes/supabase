@@ -1,0 +1,35 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_open_session(bigint, bigint, bigint)                ::
+  ::  UsedBy      : ad.fin_entry_save, ad.fin_entry_settle,                       ::
+  ::                ad.appointment_checkout, ad.fin_transfer_save                 ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Sessao de caixa aberta na conta (ou null). O pagamento feito numa conta com
+    caixa aberto entra no fechamento daquela sessao.
+    Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_account
+  Output: bigint (nr_session) ou null
+*/
+create or replace function od.fn_fin_open_session(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_account bigint)
+returns bigint
+language sql
+stable
+set search_path = ''
+as $$
+  select s.nr_session
+    from od.fin_cash_session s
+   where s.nr_company = p_nr_company and s.nr_branch = p_nr_branch
+     and s.nr_account = p_nr_account and s.it_status = 1;
+$$;
+
+revoke all on function od.fn_fin_open_session(bigint, bigint, bigint) from public, anon, authenticated;

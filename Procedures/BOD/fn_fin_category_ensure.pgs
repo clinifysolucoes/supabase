@@ -1,0 +1,60 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_category_ensure(bigint, bigint, text, smallint,     ::
+  ::                smallint, bigint)                                             ::
+  ::  UsedBy      : ad.appointment_checkout, ad.fin_setup                         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Categoria do plano de contas pelo nome (sem caixa) e tipo; cria quando nao
+    existe (ativa) e reativa quando estava inativa. Usada para "Comissões" e
+    para a receita padrao do fechamento do atendimento.
+    Helper interno (sem grant): a RPC que chama ja checou a permissao.
+  Input:
+    p_nr_company, p_nr_branch, p_vc_name, p_it_kind (1 receita | 2 despesa),
+    p_it_cost_type (despesa; null em receita), p_nr_user (operador)
+  Output: bigint (nr_category)
+*/
+create or replace function od.fn_fin_category_ensure(
+  p_nr_company   bigint,
+  p_nr_branch    bigint,
+  p_vc_name      text,
+  p_it_kind      smallint,
+  p_it_cost_type smallint,
+  p_nr_user      bigint)
+returns bigint
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _nr  bigint;
+  _st  smallint;
+begin
+  select c.nr_category, c.it_status into _nr, _st
+    from od.fin_category c
+   where c.nr_company = p_nr_company and c.nr_branch = p_nr_branch
+     and c.it_kind = p_it_kind and lower(c.vc_name) = lower(p_vc_name);
+  if _nr is not null then
+    if _st <> 1 then
+      update od.fin_category c set it_status = 1
+       where c.nr_company = p_nr_company and c.nr_branch = p_nr_branch and c.nr_category = _nr;
+    end if;
+    return _nr;
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch for update;
+  select coalesce(max(c.nr_category), 0) + 1 into _nr
+    from od.fin_category c where c.nr_company = p_nr_company and c.nr_branch = p_nr_branch;
+  insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, it_cost_type, nr_operator)
+  values (p_nr_company, p_nr_branch, _nr, p_vc_name, p_it_kind,
+          case when p_it_kind = 2 then p_it_cost_type end, p_nr_user);
+  return _nr;
+end;
+$$;
+
+revoke all on function od.fn_fin_category_ensure(bigint, bigint, text, smallint, smallint, bigint)
+  from public, anon, authenticated;

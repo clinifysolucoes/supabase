@@ -77,7 +77,7 @@ begin
   assert not (_r ->> 'id_configured')::boolean, 'filial nova ainda nao configurada';
 
   _r := ad.fin_setup(_base);
-  assert (_r ->> 'qt_accounts')::int = 2 and (_r ->> 'qt_categories')::int = 7,
+  assert (_r ->> 'qt_accounts')::int = 2 and (_r ->> 'qt_categories')::int = 8,
     'setup: 2 contas, 3 receitas e 4 despesas da precificacao, veio ' || _r::text;
   _r := ad.fin_setup(_base);
   assert (_r ->> 'qt_accounts')::int = 0 and (_r ->> 'qt_categories')::int = 0, 'setup de novo nao duplica';

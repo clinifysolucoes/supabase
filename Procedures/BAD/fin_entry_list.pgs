@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - profissional e atendimento (fase 2)             ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Contas a receber (it_kind 1) ou a pagar (it_kind 2) da filial num periodo:
@@ -28,12 +28,12 @@
     dt_from      date     obrigatorio
     dt_to        date     obrigatorio (periodo de ate 400 dias)
     vc_status    text     opcional (default all)
-    nr_account, nr_category, nr_supplier, nr_patient  bigint  opcionais
+    nr_account, nr_category, nr_supplier, nr_patient, nr_professional  bigint  opcionais
     vc_search    text     opcional
 
   Output jsonb:
     {"entries": [{"nr_entry", "it_kind", "nr_category", "vc_category", "it_cost_type",
-                  "nr_account", "vc_account", "nr_supplier", "vc_supplier", "nr_patient", "vc_patient",
+                  "nr_account", "vc_account", "nr_supplier", "vc_supplier", "nr_patient", "vc_patient", "nr_professional", "vc_professional", "nr_appointment",
                   "vc_description", "vl_amount", "dt_due", "dt_competence", "it_payment_method",
                   "dt_paid", "vl_paid", "it_status", "id_overdue", "uu_group", "nr_installment",
                   "qt_installments", "id_recurring", "vc_notes"}],
@@ -61,6 +61,7 @@ declare
   _category   bigint;
   _supplier   bigint;
   _patient    bigint;
+  _prof       bigint;
   _search     text := nullif(trim(p_json ->> 'vc_search'), '');
   _today      date;
   _rows       jsonb;
@@ -84,6 +85,7 @@ begin
     _category := (p_json ->> 'nr_category')::bigint;
     _supplier := (p_json ->> 'nr_supplier')::bigint;
     _patient  := (p_json ->> 'nr_patient')::bigint;
+    _prof     := (p_json ->> 'nr_professional')::bigint;
   exception when others then
     raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
   end;
@@ -111,6 +113,7 @@ begin
        and (_category is null or e.nr_category = _category)
        and (_supplier is null or e.nr_supplier = _supplier)
        and (_patient is null or e.nr_patient = _patient)
+       and (_prof is null or e.nr_professional = _prof)
        and (_search is null or e.vc_description ilike '%' || _search || '%')
      order by e.dt_due, e.nr_entry
      limit 1000
@@ -129,6 +132,9 @@ begin
                           'vc_supplier',       s.vc_name,
                           'nr_patient',        b.nr_patient,
                           'vc_patient',        p.vc_name,
+                          'nr_professional',   b.nr_professional,
+                          'vc_professional',   pr.vc_name,
+                          'nr_appointment',    b.nr_appointment,
                           'vc_description',    b.vc_description,
                           'vl_amount',         b.vl_amount,
                           'dt_due',            b.dt_due,
@@ -161,7 +167,9 @@ begin
     join od.fin_category c on c.nr_company = b.nr_company and c.nr_branch = b.nr_branch and c.nr_category = b.nr_category
     left join od.fin_account a on a.nr_company = b.nr_company and a.nr_branch = b.nr_branch and a.nr_account = b.nr_account
     left join od.fin_supplier s on s.nr_company = b.nr_company and s.nr_branch = b.nr_branch and s.nr_supplier = b.nr_supplier
-    left join od.patient p on p.nr_company = b.nr_company and p.nr_branch = b.nr_branch and p.nr_patient = b.nr_patient;
+    left join od.patient p on p.nr_company = b.nr_company and p.nr_branch = b.nr_branch and p.nr_patient = b.nr_patient
+    left join od.professional pr on pr.nr_company = b.nr_company and pr.nr_branch = b.nr_branch
+                                and pr.nr_professional = b.nr_professional;
 
   return _rows;
 end;

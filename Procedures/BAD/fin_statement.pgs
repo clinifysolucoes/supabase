@@ -6,12 +6,14 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 04/11/2026 - transferencias entre contas (fase 2)            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Extrato de uma conta (ou de todas as ativas, sem nr_account) num periodo:
     saldo no inicio, movimentos pagos (pela data do pagamento, entrada +,
-    saida -) com o saldo apos cada um, e o saldo no fim. No maximo 2000
+    saida -) e as transferencias entre contas (it_kind 3, nr_entry = -nr_transfer,
+    uma linha por conta envolvida), com o saldo apos cada um, e o saldo no
+    fim. No maximo 2000
     movimentos. Exige permissao de LEITURA na tela FINANCE.
 
   Input p_json:
@@ -78,7 +80,18 @@ begin
      where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_status = 2
        and e.dt_paid between _from and _to
        and (_account is null and a.it_status = 1 or e.nr_account = _account)
-     order by e.dt_paid, e.nr_entry
+    union all
+    /* transferencias: uma linha por conta envolvida (it_kind 3, nr_entry negativo) */
+    select -t.nr_transfer, t.dt_transfer, 3, t.vc_description,
+           case t.it_type when 2 then 'Sangria' when 3 then 'Suprimento' else 'Transferência' end,
+           a.vc_name, null::smallint,
+           case when a.nr_account = t.nr_account_to then t.vl_amount else -t.vl_amount end
+      from od.fin_transfer t
+      join od.fin_account a on a.nr_company = t.nr_company and a.nr_branch = t.nr_branch
+                           and a.nr_account in (t.nr_account_from, t.nr_account_to)
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.it_status = 1
+       and t.dt_transfer between _from and _to
+       and (_account is null and a.it_status = 1 or a.nr_account = _account)
      limit 2000
   ), run as (
     select mv.*, _start + sum(mv.vl_value) over (order by mv.dt_paid, mv.nr_entry) as vl_balance from mv

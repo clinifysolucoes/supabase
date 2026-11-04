@@ -1,0 +1,135 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.appointment_checkout_get(jsonb)                            ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('appointment_checkout_get')
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Dados para o fechamento financeiro de uma consulta (permissao LER na tela
+    FINANCE): paciente, profissional, procedimento com o valor cobrado hoje
+    (precificacao) e a comissao efetiva (do procedimento ou o padrao da filial),
+    os lancamentos ja gerados por este atendimento, a categoria de receita
+    padrao, as contas ativas e a conta do caixa aberto do usuario.
+
+  Input p_json:
+    nr_version      integer  obrigatorio = 1
+    nr_company      bigint   obrigatorio
+    nr_branch       bigint   obrigatorio
+    nr_appointment  bigint   obrigatorio
+
+  Output jsonb:
+    {"appointment": {"nr_appointment", "it_type", "it_status", "dh_start", "nr_patient", "vc_patient",
+                     "nr_professional", "vc_professional", "nr_procedure", "vc_procedure",
+                     "vl_price", "pc_commission"},
+     "id_done": bool, "id_configured": bool,
+     "entries": [{"nr_entry", "it_kind", "vc_description", "vl_amount", "dt_due", "it_status",
+                  "dt_paid", "vl_paid", "nr_installment", "qt_installments"}],
+     "nr_category": bigint|null, "categories": [{"nr_category", "vc_name"}],
+     "accounts": [{"nr_account", "vc_name", "it_type"}], "nr_session_account": bigint|null,
+     "permission": {"id_read", "id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, CHECKOUT_APPOINTMENT_REQUIRED,
+    CHECKOUT_APPOINTMENT_NOT_FOUND
+*/
+create or replace function ad.appointment_checkout_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_appt    bigint;
+  _perm       jsonb;
+  _appt       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_checkout_get');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null or not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  _nr_appt := (p_json ->> 'nr_appointment')::bigint;
+  if _nr_appt is null then
+    raise exception '%', ad.fn_message('CHECKOUT_APPOINTMENT_REQUIRED');
+  end if;
+
+  select jsonb_build_object(
+           'nr_appointment',  a.nr_appointment,
+           'it_type',         a.it_type,
+           'it_status',       a.it_status,
+           'dh_start',        a.dh_start,
+           'nr_patient',      a.nr_patient,
+           'vc_patient',      pa.vc_name,
+           'nr_professional', a.nr_professional,
+           'vc_professional', pr.vc_name,
+           'nr_procedure',    a.nr_procedure,
+           'vc_procedure',    pc.vc_name,
+           'vl_price',        pc.vl_current_price,
+           'pc_commission',   coalesce(pc.pc_commission, pp.pc_commission, 0))
+    into _appt
+    from od.appointment a
+    left join od.patient pa on pa.nr_company = a.nr_company and pa.nr_branch = a.nr_branch
+                           and pa.nr_patient = a.nr_patient
+    left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                and pr.nr_professional = a.nr_professional
+    left join od.procedure pc on pc.nr_company = a.nr_company and pc.nr_branch = a.nr_branch
+                             and pc.nr_procedure = a.nr_procedure
+    left join od.pricing_param pp on pp.nr_company = a.nr_company and pp.nr_branch = a.nr_branch
+   where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_appointment = _nr_appt;
+  if _appt is null then
+    raise exception '%', ad.fn_message('CHECKOUT_APPOINTMENT_NOT_FOUND');
+  end if;
+
+  return jsonb_build_object(
+    'appointment', _appt,
+    'id_done', exists (select 1 from od.fin_entry e
+                        where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                          and e.nr_appointment = _nr_appt and e.it_kind = 1 and e.it_status <> 90),
+    'id_configured', exists (select 1 from od.fin_account a
+                              where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_status = 1),
+    'entries', (select coalesce(jsonb_agg(jsonb_build_object(
+                         'nr_entry', e.nr_entry, 'it_kind', e.it_kind, 'vc_description', e.vc_description,
+                         'vl_amount', e.vl_amount, 'dt_due', e.dt_due, 'it_status', e.it_status,
+                         'dt_paid', e.dt_paid, 'vl_paid', e.vl_paid,
+                         'nr_installment', e.nr_installment, 'qt_installments', e.qt_installments)
+                         order by e.it_kind, e.dt_due, e.nr_entry), '[]'::jsonb)
+                  from od.fin_entry e
+                 where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_appointment = _nr_appt),
+    'nr_category', (select c.nr_category from od.fin_category c
+                     where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                       and c.it_kind = 1 and c.it_status = 1
+                     order by (lower(c.vc_name) = 'tratamentos') desc, c.nr_category
+                     limit 1),
+    'categories', (select coalesce(jsonb_agg(jsonb_build_object('nr_category', c.nr_category, 'vc_name', c.vc_name)
+                                             order by c.vc_name), '[]'::jsonb)
+                     from od.fin_category c
+                    where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                      and c.it_kind = 1 and c.it_status = 1),
+    'accounts', (select coalesce(jsonb_agg(jsonb_build_object('nr_account', a.nr_account, 'vc_name', a.vc_name,
+                                                              'it_type', a.it_type)
+                                           order by a.it_type, a.vc_name), '[]'::jsonb)
+                   from od.fin_account a
+                  where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_status = 1),
+    'nr_session_account', (select s.nr_account from od.fin_cash_session s
+                            where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                              and s.nr_user = _nr_user and s.it_status = 1),
+    'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.appointment_checkout_get(jsonb) from public, anon;
+grant execute on function ad.appointment_checkout_get(jsonb) to authenticated;

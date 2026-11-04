@@ -1,0 +1,105 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_cash_open(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_cash_open')         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Abre o caixa do dia do usuario numa conta do tipo caixa (permissao CRIAR na
+    tela FINANCE). Uma sessao aberta por conta e por usuario. O valor de
+    abertura e o que foi contado na gaveta (padrao: o saldo atual da conta).
+    Recebimentos e pagamentos feitos nessa conta enquanto o caixa estiver
+    aberto entram no fechamento. Grava ad.event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_account  bigint   obrigatorio (conta ativa do tipo caixa)
+    vl_open     numeric  opcional (>= 0)
+    vc_notes    text     opcional
+
+  Output jsonb: {"nr_session", "nr_account", "vl_open"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_CASH_FORBIDDEN, FIN_CASH_VALUE_INVALID,
+    FIN_CASH_ACCOUNT_INVALID, FIN_CASH_ACCOUNT_IN_USE, FIN_CASH_USER_HAS_OPEN
+*/
+create or replace function ad.fin_cash_open(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _account    bigint;
+  _vl_open    numeric;
+  _notes      text;
+  _nr         bigint;
+  _name       text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_cash_open');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean then
+    raise exception '%', ad.fn_message('FIN_CASH_FORBIDDEN');
+  end if;
+  begin
+    _account := (p_json ->> 'nr_account')::bigint;
+    _vl_open := round((p_json ->> 'vl_open')::numeric, 2);
+    _notes   := left(nullif(trim(p_json ->> 'vc_notes'), ''), 500);
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_CASH_VALUE_INVALID');
+  end;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select a.vc_name into _name from od.fin_account a
+   where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _account
+     and a.it_status = 1 and a.it_type = 1;
+  if _name is null then
+    raise exception '%', ad.fn_message('FIN_CASH_ACCOUNT_INVALID');
+  end if;
+  if exists (select 1 from od.fin_cash_session s
+              where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                and s.nr_user = _nr_user and s.it_status = 1) then
+    raise exception '%', ad.fn_message('FIN_CASH_USER_HAS_OPEN');
+  end if;
+  if exists (select 1 from od.fin_cash_session s
+              where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                and s.nr_account = _account and s.it_status = 1) then
+    raise exception '%', ad.fn_message('FIN_CASH_ACCOUNT_IN_USE', jsonb_build_object('Account', _name));
+  end if;
+  _vl_open := coalesce(_vl_open, od.fn_fin_balance(_nr_company, _nr_branch, _account, null));
+  if _vl_open < 0 then
+    raise exception '%', ad.fn_message('FIN_CASH_VALUE_INVALID');
+  end if;
+
+  select coalesce(max(s.nr_session), 0) + 1 into _nr
+    from od.fin_cash_session s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+  insert into od.fin_cash_session (nr_company, nr_branch, nr_session, nr_account, nr_user, vl_open, vc_notes, nr_operator)
+  values (_nr_company, _nr_branch, _nr, _account, _nr_user, _vl_open, _notes, _nr_user);
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'CREATE',
+    'fin_cash_session', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Caixa aberto: %s', _name),
+    jsonb_build_object('nr_account', _account, 'vl_open', _vl_open));
+
+  return jsonb_build_object('nr_session', _nr, 'nr_account', _account, 'vl_open', _vl_open);
+end;
+$$;
+
+revoke all on function ad.fin_cash_open(jsonb) from public, anon;
+grant execute on function ad.fin_cash_open(jsonb) to authenticated;
