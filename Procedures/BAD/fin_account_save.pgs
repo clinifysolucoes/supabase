@@ -21,7 +21,7 @@
     nr_branch    bigint   obrigatorio
     nr_account   bigint   obrigatorio em 'U'
     vc_name      text     obrigatorio em 'I' (ate 60, unico na filial)
-    it_type      integer  1 caixa | 2 banco | 3 cofre (default 1)
+    it_type      integer  1 caixa | 2 banco | 3 cofre (default 1); 4 recebiveis e so do sistema
     vl_opening   numeric  saldo inicial (pode ser negativo)
     it_status    integer  1 ativa | 90 inativa (so em 'U')
 

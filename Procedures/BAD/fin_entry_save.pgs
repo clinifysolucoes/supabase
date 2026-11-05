@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - profissional e sessao de caixa (fase 2)         ::
+  ::  Change      : 04/11/2026 - recebiveis na conta ja paga (fase 3a)           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Conta a receber (it_kind 1) ou a pagar (it_kind 2).
@@ -82,6 +82,7 @@ declare
   _part        numeric;
   _group       uuid;
   _key         text;
+  _qt_card     integer;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_entry_save');
 
@@ -148,6 +149,7 @@ begin
     _qt_repeat := coalesce((p_json ->> 'qt_repeat')::integer, 12);
     _paid      := coalesce((p_json ->> 'id_paid')::boolean, false);
     _dt_paid   := (p_json ->> 'dt_paid')::date;
+    _qt_card   := coalesce((p_json ->> 'qt_card_installments')::integer, 1);
   exception when others then
     raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
   end;
@@ -256,6 +258,9 @@ begin
         case when _paid then od.fn_fin_open_session(_nr_company, _nr_branch, _new.nr_account) end,
         _group, _i, _n, _recurring, _new.vc_notes, _nr_user, _nr_user);
     end loop;
+    if _paid then
+      perform od.fn_fin_receivable_make(_nr_company, _nr_branch, _first, _qt_card, p_json ->> 'vc_reference', _nr_user);
+    end if;
   end if;
 
   perform ad.fn_event_log(

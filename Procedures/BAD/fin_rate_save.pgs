@@ -1,0 +1,176 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_rate_save(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_rate_save')         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I, permissao CRIAR) ou altera parcialmente (U, permissao ALTERAR) uma
+    taxa de recebimento da filial: nome (ex.: "Crédito 2 a 6x"), forma de
+    pagamento (3 credito | 4 debito | 6 boleto | 7 cheque), faixa de parcelas
+    (so credito parcela), percentual, tarifa fixa, prazo em dias para o
+    dinheiro cair e a conta destino (ativa, nao pode ser a de passagem).
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    vc_action            text     obrigatorio I | U
+    nr_rate              bigint   obrigatorio em U
+    vc_name              text     obrigatorio em I
+    it_payment_method    integer  obrigatorio em I
+    qt_installments_min  integer  opcional 1..24 (padrao 1)
+    qt_installments_max  integer  opcional >= min (padrao = min)
+    pc_fee               numeric  opcional 0..100
+    vl_fee_fixed         numeric  opcional >= 0
+    qt_days              integer  opcional 0..365 (padrao 30)
+    nr_account           bigint   obrigatorio em I
+    it_status            integer  opcional 1 | 90 (so em U)
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_rate"}
+
+  Errors: VERSION_MISMATCH, FIN_RATE_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_RATE_FORBIDDEN,
+    FIN_RATE_REQUIRED, FIN_RATE_NOT_FOUND, FIN_RATE_VALUE_INVALID, FIN_RATE_NAME_REQUIRED,
+    FIN_RATE_NAME_IN_USE, FIN_RATE_METHOD_INVALID, FIN_RATE_INSTALLMENTS_INVALID, FIN_RATE_FEE_INVALID,
+    FIN_RATE_DAYS_INVALID, FIN_RATE_ACCOUNT_INVALID, FIN_RATE_STATUS_INVALID
+*/
+create or replace function ad.fin_rate_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr         bigint;
+  _cur        od.fin_card_rate%rowtype;
+  _new        od.fin_card_rate%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_rate_save');
+
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('FIN_RATE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FIN_RATE_FORBIDDEN');
+  end if;
+
+  if _action = 'U' then
+    _nr := (p_json ->> 'nr_rate')::bigint;
+    if _nr is null then
+      raise exception '%', ad.fn_message('FIN_RATE_REQUIRED');
+    end if;
+    select * into _cur from od.fin_card_rate r
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_rate = _nr
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('FIN_RATE_NOT_FOUND');
+    end if;
+  else
+    _cur.it_status := 1;
+    _cur.qt_installments_min := 1;
+    _cur.pc_fee := 0;
+    _cur.vl_fee_fixed := 0;
+    _cur.qt_days := 30;
+  end if;
+
+  begin
+    _new := _cur;
+    _new.vc_name             := case when p_json ? 'vc_name' then left(nullif(trim(p_json ->> 'vc_name'), ''), 60) else _cur.vc_name end;
+    _new.it_payment_method   := case when p_json ? 'it_payment_method' then (p_json ->> 'it_payment_method')::smallint else _cur.it_payment_method end;
+    _new.qt_installments_min := case when p_json ? 'qt_installments_min' then (p_json ->> 'qt_installments_min')::smallint else _cur.qt_installments_min end;
+    _new.qt_installments_max := case when p_json ? 'qt_installments_max' then (p_json ->> 'qt_installments_max')::smallint
+                                     else coalesce(_cur.qt_installments_max, _new.qt_installments_min) end;
+    _new.pc_fee              := case when p_json ? 'pc_fee' then round((p_json ->> 'pc_fee')::numeric, 2) else _cur.pc_fee end;
+    _new.vl_fee_fixed        := case when p_json ? 'vl_fee_fixed' then round((p_json ->> 'vl_fee_fixed')::numeric, 2) else _cur.vl_fee_fixed end;
+    _new.qt_days             := case when p_json ? 'qt_days' then (p_json ->> 'qt_days')::smallint else _cur.qt_days end;
+    _new.nr_account          := case when p_json ? 'nr_account' then (p_json ->> 'nr_account')::bigint else _cur.nr_account end;
+    _new.it_status           := case when _action = 'U' and p_json ? 'it_status' then (p_json ->> 'it_status')::smallint else _cur.it_status end;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_RATE_VALUE_INVALID');
+  end;
+
+  if _new.vc_name is null then
+    raise exception '%', ad.fn_message('FIN_RATE_NAME_REQUIRED');
+  end if;
+  if exists (select 1 from od.fin_card_rate r
+              where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                and lower(r.vc_name) = lower(_new.vc_name) and r.nr_rate is distinct from _nr) then
+    raise exception '%', ad.fn_message('FIN_RATE_NAME_IN_USE', jsonb_build_object('Name', _new.vc_name));
+  end if;
+  if _new.it_payment_method is null or _new.it_payment_method not in (3, 4, 6, 7) then
+    raise exception '%', ad.fn_message('FIN_RATE_METHOD_INVALID');
+  end if;
+  if _new.it_payment_method <> 3 then
+    _new.qt_installments_min := 1;
+    _new.qt_installments_max := 1;
+  end if;
+  if _new.qt_installments_min is null or _new.qt_installments_max is null
+     or _new.qt_installments_min not between 1 and 24
+     or _new.qt_installments_max not between _new.qt_installments_min and 24 then
+    raise exception '%', ad.fn_message('FIN_RATE_INSTALLMENTS_INVALID');
+  end if;
+  if _new.pc_fee is null or _new.pc_fee not between 0 and 100 or _new.vl_fee_fixed is null or _new.vl_fee_fixed < 0 then
+    raise exception '%', ad.fn_message('FIN_RATE_FEE_INVALID');
+  end if;
+  if _new.qt_days is null or _new.qt_days not between 0 and 365 then
+    raise exception '%', ad.fn_message('FIN_RATE_DAYS_INVALID');
+  end if;
+  if _new.nr_account is null or not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _new.nr_account
+          and a.it_type <> 4 and (a.it_status = 1 or _new.nr_account is not distinct from _cur.nr_account)) then
+    raise exception '%', ad.fn_message('FIN_RATE_ACCOUNT_INVALID');
+  end if;
+  if _new.it_status not in (1, 90) then
+    raise exception '%', ad.fn_message('FIN_RATE_STATUS_INVALID');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(r.nr_rate), 0) + 1 into _nr
+      from od.fin_card_rate r where r.nr_company = _nr_company and r.nr_branch = _nr_branch;
+    insert into od.fin_card_rate (nr_company, nr_branch, nr_rate, vc_name, it_payment_method, qt_installments_min,
+                                  qt_installments_max, pc_fee, vl_fee_fixed, qt_days, nr_account, it_status, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _new.vc_name, _new.it_payment_method, _new.qt_installments_min,
+            _new.qt_installments_max, _new.pc_fee, _new.vl_fee_fixed, _new.qt_days, _new.nr_account, 1, _nr_user);
+  else
+    update od.fin_card_rate r set
+      vc_name = _new.vc_name, it_payment_method = _new.it_payment_method,
+      qt_installments_min = _new.qt_installments_min, qt_installments_max = _new.qt_installments_max,
+      pc_fee = _new.pc_fee, vl_fee_fixed = _new.vl_fee_fixed, qt_days = _new.qt_days,
+      nr_account = _new.nr_account, it_status = _new.it_status
+    where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_rate = _nr;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'fin_card_rate', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Taxa %s %s', _new.vc_name, case when _action = 'I' then 'cadastrada' else 'alterada' end),
+    jsonb_build_object('it_payment_method', _new.it_payment_method, 'pc_fee', _new.pc_fee,
+                       'vl_fee_fixed', _new.vl_fee_fixed, 'qt_days', _new.qt_days, 'it_status', _new.it_status));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_rate', _nr);
+end;
+$$;
+
+revoke all on function ad.fin_rate_save(jsonb) from public, anon;
+grant execute on function ad.fin_rate_save(jsonb) to authenticated;

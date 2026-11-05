@@ -89,3 +89,11 @@ create or replace trigger fin_cash_session_audit
 create or replace trigger fin_transfer_audit
   before insert or update on od.fin_transfer
   for each row execute function ad.trg_audit();
+
+create or replace trigger fin_card_rate_audit
+  before insert or update on od.fin_card_rate
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_receivable_audit
+  before insert or update on od.fin_receivable
+  for each row execute function ad.trg_audit();

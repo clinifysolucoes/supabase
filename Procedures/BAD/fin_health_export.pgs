@@ -1,0 +1,99 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_health_export(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_health_export')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 04/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Recebimentos de pacientes no periodo (pela data do pagamento, ate 366
+    dias) para declarar na Receita Saude: uma linha por pagamento com CPF e
+    nome do paciente (ou do responsavel legal, quando houver), data, valor e o
+    profissional que atendeu; e quantos pagamentos ficaram sem CPF. O app
+    gera o arquivo CSV. So leitura; grava ad.event_log da exportacao (sem
+    dados pessoais). Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    dt_from     date     obrigatorio
+    dt_to       date     obrigatorio (ate 366 dias)
+
+  Output jsonb:
+    {"rows": [{"nr_entry", "dt_paid", "vl_paid", "nr_patient", "vc_patient", "vc_cpf",
+               "vc_payer", "vc_payer_cpf", "vc_professional", "vc_description"}],
+     "vl_total", "qt_rows", "qt_missing_cpf", "vc_company_document"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.fin_health_export(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _from       date;
+  _to         date;
+  _result     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_health_export');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _from := (p_json ->> 'dt_from')::date;
+    _to   := (p_json ->> 'dt_to')::date;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _from is null or _to is null or _to < _from or _to - _from > 366 then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+
+  with r as (
+    select e.nr_entry, e.dt_paid, e.vl_paid, e.nr_patient, p.vc_name as vc_patient, p.vc_cpf,
+           nullif(trim(p.vc_guardian_name), '') as vc_payer, p.vc_guardian_cpf as vc_payer_cpf,
+           pr.vc_name as vc_professional, e.vc_description
+      from od.fin_entry e
+      join od.patient p on p.nr_company = e.nr_company and p.nr_branch = e.nr_branch and p.nr_patient = e.nr_patient
+      left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
+                                  and pr.nr_professional = e.nr_professional
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+       and e.it_kind = 1 and e.it_status = 2 and e.dt_paid between _from and _to
+  )
+  select jsonb_build_object(
+           'rows', coalesce(jsonb_agg(to_jsonb(r) order by r.dt_paid, r.nr_entry), '[]'::jsonb),
+           'vl_total', coalesce(sum(r.vl_paid), 0),
+           'qt_rows', count(*),
+           'qt_missing_cpf', count(*) filter (where coalesce(r.vc_payer_cpf, r.vc_cpf) is null),
+           'vc_company_document', (select c.vc_cnpj from ad.company c where c.nr_company = _nr_company))
+    into _result
+    from r;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'OTHER', 'fin_health_export',
+    _nr_company::text || '/' || _nr_branch::text,
+    format('Exportação Receita Saúde de %s a %s', to_char(_from, 'DD/MM/YYYY'), to_char(_to, 'DD/MM/YYYY')),
+    jsonb_build_object('qt_rows', _result -> 'qt_rows', 'vl_total', _result -> 'vl_total'));
+
+  return _result;
+end;
+$$;
+
+revoke all on function ad.fin_health_export(jsonb) from public, anon;
+grant execute on function ad.fin_health_export(jsonb) to authenticated;
