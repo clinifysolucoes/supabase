@@ -6226,6 +6226,21 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "user_password_reset_check",
+      "signature": "ad.user_password_reset_check(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha).",
+      "errors": [
+        "VERSION_MISMATCH",
+        "USER_PASSWORD_COMPANY_REQUIRED",
+        "USER_PASSWORD_FORBIDDEN",
+        "COMPANY_USER_USER_REQUIRED",
+        "COMPANY_USER_NOT_FOUND",
+        "USER_PASSWORD_SHARED"
+      ]
+    },
+    {
       "name": "fn_pricing_calc",
       "signature": "od.fn_pricing_calc(p_json jsonb)",
       "kind": "helper",
