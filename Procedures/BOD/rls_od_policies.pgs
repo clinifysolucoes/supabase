@@ -167,3 +167,15 @@ drop policy if exists fin_bank_line_select on od.fin_bank_line;
 create policy fin_bank_line_select on od.fin_bank_line
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_recurrence
+drop policy if exists fin_recurrence_select on od.fin_recurrence;
+create policy fin_recurrence_select on od.fin_recurrence
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_attachment
+drop policy if exists fin_attachment_select on od.fin_attachment;
+create policy fin_attachment_select on od.fin_attachment
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

@@ -1,0 +1,160 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_attachment_save(jsonb)                                 ::
+  ::  UsedBy      : Edge Function fin-attachment (com o JWT do usuario)           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Registro dos anexos de uma conta (documento: nota/boleto; comprovante de
+    pagamento). O arquivo fica no Storage (bucket privado "finance"); quem
+    sobe e baixa e a Edge Function fin-attachment, que chama esta RPC com o
+    JWT do usuario ANTES de gerar a URL assinada.
+      vc_action = 'I'       registra e devolve o caminho reservado
+                            (company/branch/entry/uuid.ext) -> permissao
+                            ALTERAR (anexar nao muda valores, mas altera a conta)
+      vc_action = 'DELETE'  marca como excluido e devolve o caminho para a
+                            Edge Function apagar o arquivo -> permissao ALTERAR
+    Ate 10 MB; PDF ou imagem (JPEG, PNG, WEBP, HEIC). Conta cancelada nao
+    recebe anexo. Grava ad.event_log (so o nome do arquivo).
+
+  Input p_json:
+    nr_version     integer  obrigatorio = 1
+    vc_action      text     obrigatorio I | DELETE
+    nr_company     bigint   obrigatorio
+    nr_branch      bigint   obrigatorio
+    nr_entry       bigint   obrigatorio em I
+    it_type        integer  opcional 1 documento (padrao) | 2 comprovante
+    vc_name        text     obrigatorio em I (nome original do arquivo)
+    vc_mime        text     obrigatorio em I
+    qt_bytes       bigint   obrigatorio em I
+    nr_attachment  bigint   obrigatorio em DELETE
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_attachment", "nr_entry", "vc_path"}
+
+  Errors: VERSION_MISMATCH, FIN_ATTACHMENT_ACTION_INVALID, FINANCE_BRANCH_REQUIRED,
+    FIN_ATTACHMENT_FORBIDDEN, FIN_ENTRY_REQUIRED, FIN_ENTRY_NOT_FOUND, FIN_ENTRY_CANCELLED_LOCKED,
+    FIN_ATTACHMENT_VALUE_INVALID, FIN_ATTACHMENT_TYPE_INVALID, FIN_ATTACHMENT_TOO_LARGE,
+    FIN_ATTACHMENT_REQUIRED, FIN_ATTACHMENT_NOT_FOUND
+*/
+create or replace function ad.fin_attachment_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _entry      od.fin_entry%rowtype;
+  _att        od.fin_attachment%rowtype;
+  _nr         bigint;
+  _type       smallint;
+  _name       text;
+  _mime       text := lower(nullif(trim(p_json ->> 'vc_mime'), ''));
+  _bytes      bigint;
+  _ext        text;
+  _path       text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_attachment_save');
+
+  if _action not in ('I', 'DELETE') then
+    raise exception '%', ad.fn_message('FIN_ATTACHMENT_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_update')::boolean then
+    raise exception '%', ad.fn_message('FIN_ATTACHMENT_FORBIDDEN');
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _action = 'DELETE' then
+    _nr := (p_json ->> 'nr_attachment')::bigint;
+    if _nr is null then
+      raise exception '%', ad.fn_message('FIN_ATTACHMENT_REQUIRED');
+    end if;
+    update od.fin_attachment t set it_status = 90
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_attachment = _nr
+       and t.it_status = 1
+    returning t.* into _att;
+    if not found then
+      raise exception '%', ad.fn_message('FIN_ATTACHMENT_NOT_FOUND');
+    end if;
+    perform ad.fn_event_log(
+      _nr_user, _nr_company, _nr_branch, 'FINANCE', 'DELETE',
+      'fin_attachment', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+      format('Anexo %s excluído', left(_att.vc_name, 60)),
+      jsonb_build_object('nr_entry', _att.nr_entry, 'it_type', _att.it_type));
+    return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_attachment', _nr,
+                              'nr_entry', _att.nr_entry, 'vc_path', _att.vc_path);
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if (p_json ->> 'nr_entry') is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_REQUIRED');
+  end if;
+  begin
+    _type  := coalesce((p_json ->> 'it_type')::smallint, 1);
+    _bytes := (p_json ->> 'qt_bytes')::bigint;
+    _name  := left(nullif(trim(p_json ->> 'vc_name'), ''), 200);
+    select * into _entry from od.fin_entry e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+       and e.nr_entry = (p_json ->> 'nr_entry')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_ATTACHMENT_VALUE_INVALID');
+  end;
+  if _entry.nr_entry is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_NOT_FOUND');
+  end if;
+  if _entry.it_status = 90 then
+    raise exception '%', ad.fn_message('FIN_ENTRY_CANCELLED_LOCKED');
+  end if;
+  if _type not in (1, 2) or _name is null or _bytes is null or _bytes < 0 then
+    raise exception '%', ad.fn_message('FIN_ATTACHMENT_VALUE_INVALID');
+  end if;
+  _ext := case _mime
+            when 'application/pdf' then 'pdf'
+            when 'image/jpeg' then 'jpg'
+            when 'image/png' then 'png'
+            when 'image/webp' then 'webp'
+            when 'image/heic' then 'heic'
+          end;
+  if _ext is null then
+    raise exception '%', ad.fn_message('FIN_ATTACHMENT_TYPE_INVALID');
+  end if;
+  if _bytes > 10485760 then
+    raise exception '%', ad.fn_message('FIN_ATTACHMENT_TOO_LARGE');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select coalesce(max(t.nr_attachment), 0) + 1 into _nr
+    from od.fin_attachment t where t.nr_company = _nr_company and t.nr_branch = _nr_branch;
+  _path := format('%s/%s/%s/%s.%s', _nr_company, _nr_branch, _entry.nr_entry, gen_random_uuid(), _ext);
+
+  insert into od.fin_attachment (nr_company, nr_branch, nr_attachment, nr_entry, it_type, vc_path, vc_name,
+                                 vc_mime, qt_bytes, nr_user_created, nr_operator)
+  values (_nr_company, _nr_branch, _nr, _entry.nr_entry, _type, _path, _name, _mime, _bytes, _nr_user, _nr_user);
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'CREATE',
+    'fin_attachment', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Anexo %s na conta %s', left(_name, 60), left(_entry.vc_description, 60)),
+    jsonb_build_object('nr_entry', _entry.nr_entry, 'it_type', _type, 'qt_bytes', _bytes));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_attachment', _nr,
+                            'nr_entry', _entry.nr_entry, 'vc_path', _path);
+end;
+$$;
+
+revoke all on function ad.fin_attachment_save(jsonb) from public, anon;
+grant execute on function ad.fin_attachment_save(jsonb) to authenticated;

@@ -1,0 +1,264 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_recurrence_save(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_recurrence_save')   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Conta recorrente como regra: todo mes no dia it_day, a partir de dt_start,
+    sem data final (dt_end nulo) ou ate dt_end.
+      vc_action = 'I'       cria -> permissao CRIAR; ja gera os lancamentos
+                            dos proximos 12 meses (od.fn_fin_recurrence_fill)
+      vc_action = 'U'       altera parcialmente -> permissao ALTERAR; os
+                            lancamentos JA GERADOS, em aberto e com vencimento
+                            de hoje em diante passam a ter os dados novos
+                            (descricao, valor, categoria, conta, fornecedor,
+                            paciente, forma, dia); pagos e vencidos nao mudam.
+                            dt_end menor cancela os futuros depois dela.
+      vc_action = 'CANCEL'  encerra a regra -> permissao ALTERAR; cancela os
+                            lancamentos futuros em aberto (pagos ficam).
+    Categoria do mesmo tipo e ativa; conta, fornecedor e paciente da filial.
+    Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    vc_action          text     obrigatorio I | U | CANCEL
+    nr_company         bigint   obrigatorio
+    nr_branch          bigint   obrigatorio
+    nr_recurrence      bigint   obrigatorio em U / CANCEL
+    it_kind            integer  obrigatorio em I (1 receber | 2 pagar)
+    nr_category        bigint   obrigatorio em I
+    nr_account, nr_supplier, nr_patient  bigint  opcionais
+    vc_description     text     obrigatorio em I (ate 140)
+    vl_amount          numeric  obrigatorio em I (> 0)
+    it_day             integer  opcional 1..31 (padrao: dia de dt_start)
+    it_payment_method  integer  opcional (1,2,3,4,5,6,7,9)
+    dt_start           date     obrigatorio em I (primeiro vencimento possivel)
+    dt_end             date     opcional (nulo = sem data final)
+    vc_notes           text     opcional (ate 500)
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_recurrence", "qt_created", "qt_changed"}
+
+  Errors: VERSION_MISMATCH, FIN_RECURRENCE_ACTION_INVALID, FINANCE_BRANCH_REQUIRED,
+    FIN_RECURRENCE_FORBIDDEN, FIN_RECURRENCE_REQUIRED, FIN_RECURRENCE_NOT_FOUND,
+    FIN_RECURRENCE_CANCELLED, FIN_RECURRENCE_VALUE_INVALID, FIN_ENTRY_KIND_INVALID,
+    FIN_ENTRY_CATEGORY_INVALID, FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_SUPPLIER_INVALID,
+    FIN_ENTRY_PATIENT_INVALID, FIN_ENTRY_DESCRIPTION_REQUIRED, FIN_ENTRY_AMOUNT_INVALID,
+    FIN_ENTRY_METHOD_INVALID, FIN_RECURRENCE_DAY_INVALID, FIN_RECURRENCE_PERIOD_INVALID
+*/
+create or replace function ad.fin_recurrence_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr         bigint;
+  _cur        od.fin_recurrence%rowtype;
+  _new        od.fin_recurrence%rowtype;
+  _today      date;
+  _created    integer := 0;
+  _changed    integer := 0;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_recurrence_save');
+
+  if _action not in ('I', 'U', 'CANCEL') then
+    raise exception '%', ad.fn_message('FIN_RECURRENCE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_action <> 'I' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FIN_RECURRENCE_FORBIDDEN');
+  end if;
+
+  select (now() at time zone b.vc_timezone)::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  if _action <> 'I' then
+    _nr := (p_json ->> 'nr_recurrence')::bigint;
+    if _nr is null then
+      raise exception '%', ad.fn_message('FIN_RECURRENCE_REQUIRED');
+    end if;
+    select * into _cur from od.fin_recurrence r
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_recurrence = _nr
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('FIN_RECURRENCE_NOT_FOUND');
+    end if;
+    if _cur.it_status = 90 then
+      raise exception '%', ad.fn_message('FIN_RECURRENCE_CANCELLED');
+    end if;
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  if _action = 'CANCEL' then
+    update od.fin_recurrence r set it_status = 90, dt_end = least(coalesce(r.dt_end, _today), _today)
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_recurrence = _nr;
+    update od.fin_entry e set it_status = 90
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_recurrence = _nr
+       and e.it_status = 1 and e.dt_due >= _today;
+    get diagnostics _changed = row_count;
+
+    perform ad.fn_event_log(
+      _nr_user, _nr_company, _nr_branch, 'FINANCE', 'DELETE',
+      'fin_recurrence', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+      format('Conta recorrente %s encerrada', left(_cur.vc_description, 60)),
+      jsonb_build_object('qt_cancelled', _changed));
+    return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch,
+                              'nr_recurrence', _nr, 'qt_created', 0, 'qt_changed', _changed);
+  end if;
+
+  /*------------------------------------------------------------------------*/
+  begin
+    _new.it_kind           := case when _action = 'I' then (p_json ->> 'it_kind')::smallint else _cur.it_kind end;
+    _new.nr_category       := case when p_json ? 'nr_category'       then (p_json ->> 'nr_category')::bigint       else _cur.nr_category end;
+    _new.nr_account        := case when p_json ? 'nr_account'        then (p_json ->> 'nr_account')::bigint        else _cur.nr_account end;
+    _new.nr_supplier       := case when p_json ? 'nr_supplier'       then (p_json ->> 'nr_supplier')::bigint       else _cur.nr_supplier end;
+    _new.nr_patient        := case when p_json ? 'nr_patient'        then (p_json ->> 'nr_patient')::bigint        else _cur.nr_patient end;
+    _new.vc_description    := case when p_json ? 'vc_description'    then left(nullif(trim(p_json ->> 'vc_description'), ''), 140) else _cur.vc_description end;
+    _new.vl_amount         := case when p_json ? 'vl_amount'         then round((p_json ->> 'vl_amount')::numeric, 2) else _cur.vl_amount end;
+    _new.it_payment_method := case when p_json ? 'it_payment_method' then (p_json ->> 'it_payment_method')::smallint else _cur.it_payment_method end;
+    _new.dt_start          := case when _action = 'I' then (p_json ->> 'dt_start')::date else _cur.dt_start end;
+    _new.dt_end            := case when p_json ? 'dt_end'            then (p_json ->> 'dt_end')::date              else _cur.dt_end end;
+    _new.it_day            := case when p_json ? 'it_day'            then (p_json ->> 'it_day')::smallint
+                                   when _action = 'I' then extract(day from (p_json ->> 'dt_start')::date)::smallint
+                                   else _cur.it_day end;
+    _new.vc_notes          := case when p_json ? 'vc_notes'          then left(nullif(trim(p_json ->> 'vc_notes'), ''), 500) else _cur.vc_notes end;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_RECURRENCE_VALUE_INVALID');
+  end;
+
+  if _new.it_kind is null or _new.it_kind not in (1, 2) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_KIND_INVALID');
+  end if;
+  if _new.nr_category is null or not exists (
+       select 1 from od.fin_category c
+        where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_category = _new.nr_category
+          and c.it_kind = _new.it_kind
+          and (c.it_status = 1 or _new.nr_category is not distinct from _cur.nr_category)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_CATEGORY_INVALID');
+  end if;
+  if _new.nr_account is not null and not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _new.nr_account
+          and a.it_type <> 4
+          and (a.it_status = 1 or _new.nr_account is not distinct from _cur.nr_account)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_ACCOUNT_INVALID');
+  end if;
+  if _new.nr_supplier is not null and not exists (
+       select 1 from od.fin_supplier s
+        where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_supplier = _new.nr_supplier
+          and (s.it_status = 1 or _new.nr_supplier is not distinct from _cur.nr_supplier)) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_SUPPLIER_INVALID');
+  end if;
+  if _new.nr_patient is not null and not exists (
+       select 1 from od.patient p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_PATIENT_INVALID');
+  end if;
+  if _new.vc_description is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_DESCRIPTION_REQUIRED');
+  end if;
+  if _new.vl_amount is null or _new.vl_amount <= 0 then
+    raise exception '%', ad.fn_message('FIN_ENTRY_AMOUNT_INVALID');
+  end if;
+  if _new.it_payment_method is not null and _new.it_payment_method not in (1, 2, 3, 4, 5, 6, 7, 9) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_INVALID');
+  end if;
+  if _new.it_day is null or _new.it_day not between 1 and 31 then
+    raise exception '%', ad.fn_message('FIN_RECURRENCE_DAY_INVALID');
+  end if;
+  if _new.dt_start is null or (_new.dt_end is not null and _new.dt_end < _new.dt_start) then
+    raise exception '%', ad.fn_message('FIN_RECURRENCE_PERIOD_INVALID');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(r.nr_recurrence), 0) + 1 into _nr
+      from od.fin_recurrence r where r.nr_company = _nr_company and r.nr_branch = _nr_branch;
+    insert into od.fin_recurrence (
+      nr_company, nr_branch, nr_recurrence, it_kind, nr_category, nr_account, nr_supplier, nr_patient,
+      vc_description, vl_amount, it_day, it_payment_method, dt_start, dt_end, vc_notes,
+      nr_user_created, nr_operator)
+    values (
+      _nr_company, _nr_branch, _nr, _new.it_kind, _new.nr_category, _new.nr_account, _new.nr_supplier,
+      _new.nr_patient, _new.vc_description, _new.vl_amount, _new.it_day, _new.it_payment_method,
+      _new.dt_start, _new.dt_end, _new.vc_notes, _nr_user, _nr_user);
+  else
+    update od.fin_recurrence r set
+      nr_category       = _new.nr_category,
+      nr_account        = _new.nr_account,
+      nr_supplier       = _new.nr_supplier,
+      nr_patient        = _new.nr_patient,
+      vc_description    = _new.vc_description,
+      vl_amount         = _new.vl_amount,
+      it_day            = _new.it_day,
+      it_payment_method = _new.it_payment_method,
+      dt_end            = _new.dt_end,
+      vc_notes          = _new.vc_notes
+    where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_recurrence = _nr;
+
+    -- futuros em aberto acompanham a regra
+    update od.fin_entry e set
+      nr_category       = _new.nr_category,
+      nr_account        = _new.nr_account,
+      nr_supplier       = _new.nr_supplier,
+      nr_patient        = _new.nr_patient,
+      vc_description    = _new.vc_description,
+      vl_amount         = _new.vl_amount,
+      it_payment_method = _new.it_payment_method,
+      vc_notes          = _new.vc_notes,
+      dt_due            = make_date(extract(year from e.dt_due)::integer, extract(month from e.dt_due)::integer,
+                                    least(_new.it_day::integer,
+                                          extract(day from (date_trunc('month', e.dt_due) + interval '1 month - 1 day'))::integer)),
+      dt_competence     = make_date(extract(year from e.dt_due)::integer, extract(month from e.dt_due)::integer,
+                                    least(_new.it_day::integer,
+                                          extract(day from (date_trunc('month', e.dt_due) + interval '1 month - 1 day'))::integer))
+    where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_recurrence = _nr
+      and e.it_status = 1 and e.dt_due >= _today
+      and (_new.dt_end is null or e.dt_due <= _new.dt_end);
+    get diagnostics _changed = row_count;
+
+    -- data final menor: cancela o que passou dela
+    if _new.dt_end is not null then
+      update od.fin_entry e set it_status = 90
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_recurrence = _nr
+         and e.it_status = 1 and e.dt_due > _new.dt_end;
+    end if;
+  end if;
+
+  _created := od.fn_fin_recurrence_fill(_nr_company, _nr_branch, (_today + interval '12 months')::date);
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE',
+    case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'fin_recurrence', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Conta recorrente %s %s', left(_new.vc_description, 60),
+           case when _action = 'I' then 'criada' else 'alterada' end),
+    jsonb_build_object('it_kind', _new.it_kind, 'vl_amount', _new.vl_amount, 'it_day', _new.it_day,
+                       'dt_start', _new.dt_start, 'dt_end', _new.dt_end,
+                       'qt_created', _created, 'qt_changed', _changed));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_recurrence', _nr,
+                            'qt_created', _created, 'qt_changed', _changed);
+end;
+$$;
+
+revoke all on function ad.fin_recurrence_save(jsonb) from public, anon;
+grant execute on function ad.fin_recurrence_save(jsonb) to authenticated;

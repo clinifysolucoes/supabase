@@ -186,7 +186,9 @@ begin
     'fechamento no credito 2x gera 2 recebiveis';
 
   -- Receita Saude
-  _r := ad.fin_health_export(_base || jsonb_build_object('dt_from', '2026-11-01', 'dt_to', '2026-11-30'));
+  -- id_mark: exporta de verdade (marca as linhas e grava o log)
+  _r := ad.fin_health_export(_base || jsonb_build_object('dt_from', '2026-11-01', 'dt_to', '2026-11-30',
+          'id_mark', true));
   -- o fechamento recebe a 1a parcela hoje: entra so se hoje cair em novembro/2026
   assert (_r ->> 'qt_rows')::int = 3 + (select count(*)::int from ad.branch b where b.nr_company = _ca and b.nr_branch = 1
            and (now() at time zone b.vc_timezone)::date between '2026-11-01' and '2026-11-30')

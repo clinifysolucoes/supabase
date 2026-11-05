@@ -1,0 +1,86 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_recurrence_fill(bigint, bigint, date)               ::
+  ::  UsedBy      : ad.fin_recurrence_save, ad.fin_entry_list, ad.fin_overview    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Gera os lancamentos das contas recorrentes ativas da filial ate o mes de
+    p_until (inclusive): um por mes, no dia it_day (dia 31 vira o ultimo dia
+    de meses curtos), a partir de dt_start e no maximo ate dt_end. Cada regra
+    guarda ate onde ja gerou (dt_generated), entao chamar de novo nao duplica.
+    Os lancamentos nascem em aberto, com id_recurring e nr_recurrence, e
+    depois sao contas normais (podem ser pagos, alterados ou cancelados).
+    Helper interno: sem grant; quem chama ja validou a permissao.
+
+  Input : p_company, p_branch, p_until (gera ate o mes desta data)
+  Output: quantidade de lancamentos criados
+  Errors: nenhum
+*/
+create or replace function od.fn_fin_recurrence_fill(p_company bigint, p_branch bigint, p_until date)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _r      od.fin_recurrence;
+  _month  date;
+  _last   date;
+  _due    date;
+  _next   bigint;
+  _count  integer := 0;
+begin
+  if p_until is null then
+    return 0;
+  end if;
+  -- trava a filial: numeracao dos lancamentos e geracao em paralelo
+  if not exists (
+       select 1 from od.fin_recurrence r
+        where r.nr_company = p_company and r.nr_branch = p_branch and r.it_status = 1
+          and (r.dt_generated is null
+               or (date_trunc('month', r.dt_generated) < date_trunc('month', p_until)
+                   and (r.dt_end is null or date_trunc('month', r.dt_generated) < date_trunc('month', r.dt_end))))) then
+    return 0;
+  end if;
+  perform 1 from ad.branch b where b.nr_company = p_company and b.nr_branch = p_branch for update;
+
+  for _r in
+    select * from od.fin_recurrence r
+     where r.nr_company = p_company and r.nr_branch = p_branch and r.it_status = 1
+     order by r.nr_recurrence
+       for update
+  loop
+    _month := date_trunc('month', coalesce(_r.dt_generated + interval '1 month', _r.dt_start))::date;
+    _last  := date_trunc('month', least(p_until, coalesce(_r.dt_end, p_until)))::date;
+    while _month <= _last loop
+      _due := make_date(extract(year from _month)::integer, extract(month from _month)::integer,
+                        least(_r.it_day::integer,
+                              extract(day from (_month + interval '1 month - 1 day'))::integer));
+      if _due >= _r.dt_start and (_r.dt_end is null or _due <= _r.dt_end) then
+        select coalesce(max(e.nr_entry), 0) + 1 into _next
+          from od.fin_entry e where e.nr_company = p_company and e.nr_branch = p_branch;
+        insert into od.fin_entry (
+          nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, nr_supplier, nr_patient,
+          vc_description, vl_amount, dt_due, dt_competence, it_payment_method, it_status,
+          id_recurring, nr_recurrence, vc_notes, nr_user_created, nr_operator)
+        values (
+          p_company, p_branch, _next, _r.it_kind, _r.nr_category, _r.nr_account, _r.nr_supplier,
+          _r.nr_patient, _r.vc_description, _r.vl_amount, _due, _due, _r.it_payment_method, 1,
+          true, _r.nr_recurrence, _r.vc_notes, _r.nr_user_created, _r.nr_user_created);
+        _count := _count + 1;
+      end if;
+      update od.fin_recurrence r set dt_generated = _due
+       where r.nr_company = p_company and r.nr_branch = p_branch and r.nr_recurrence = _r.nr_recurrence;
+      _month := (_month + interval '1 month')::date;
+    end loop;
+  end loop;
+
+  return _count;
+end;
+$$;
+
+revoke all on function od.fn_fin_recurrence_fill(bigint, bigint, date) from public, anon, authenticated;

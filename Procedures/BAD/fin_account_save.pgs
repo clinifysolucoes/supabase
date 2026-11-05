@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - banco, agencia e conta                          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastro de contas do financeiro (caixa, banco, cofre).
@@ -24,12 +24,14 @@
     it_type      integer  1 caixa | 2 banco | 3 cofre (default 1); 4 recebiveis e so do sistema
     vl_opening   numeric  saldo inicial (pode ser negativo)
     it_status    integer  1 ativa | 90 inativa (so em 'U')
+    vc_bank_code text     opcional (3 digitos, codigo do banco)
+    vc_bank_name, vc_agency, vc_account_number  text  opcionais (dados da conta no banco)
 
   Output jsonb: {"nr_company", "nr_branch", "nr_account"}
 
   Errors: VERSION_MISMATCH, FIN_ACCOUNT_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_ACCOUNT_FORBIDDEN,
     FIN_ACCOUNT_NAME_REQUIRED, FIN_ACCOUNT_NAME_IN_USE {Name}, FIN_ACCOUNT_TYPE_INVALID,
-    FIN_ACCOUNT_VALUE_INVALID, FIN_ACCOUNT_STATUS_INVALID, FIN_ACCOUNT_REQUIRED, FIN_ACCOUNT_NOT_FOUND
+    FIN_ACCOUNT_VALUE_INVALID, FIN_ACCOUNT_STATUS_INVALID, FIN_ACCOUNT_BANK_INVALID, FIN_ACCOUNT_REQUIRED, FIN_ACCOUNT_NOT_FOUND
 */
 create or replace function ad.fin_account_save(p_json jsonb)
 returns jsonb
@@ -47,6 +49,7 @@ declare
   _vc_name    varchar(60);
   _opening    numeric;
   _row        od.fin_account%rowtype;
+  _bank_code  text := nullif(regexp_replace(coalesce(p_json ->> 'vc_bank_code', ''), '[^0-9]', '', 'g'), '');
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_account_save');
 
@@ -81,6 +84,10 @@ begin
   exception when others then
     raise exception '%', ad.fn_message('FIN_ACCOUNT_VALUE_INVALID');
   end;
+  -- so digitos (limpo acima): o codigo do banco tem 3
+  if _bank_code is not null and length(_bank_code) <> 3 then
+    raise exception '%', ad.fn_message('FIN_ACCOUNT_BANK_INVALID');
+  end if;
   if p_json ? 'it_status' and coalesce((p_json ->> 'it_status')::smallint, 0) not in (1, 90) then
     raise exception '%', ad.fn_message('FIN_ACCOUNT_STATUS_INVALID');
   end if;
@@ -106,16 +113,24 @@ begin
     perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
     select coalesce(max(a.nr_account), 0) + 1 into _nr_account
       from od.fin_account a where a.nr_company = _nr_company and a.nr_branch = _nr_branch;
-    insert into od.fin_account (nr_company, nr_branch, nr_account, vc_name, it_type, vl_opening, nr_operator)
+    insert into od.fin_account (nr_company, nr_branch, nr_account, vc_name, it_type, vl_opening,
+                                vc_bank_code, vc_bank_name, vc_agency, vc_account_number, nr_operator)
     values (_nr_company, _nr_branch, _nr_account, _vc_name,
-            coalesce((p_json ->> 'it_type')::smallint, 1), coalesce(_opening, 0), _nr_user)
+            coalesce((p_json ->> 'it_type')::smallint, 1), coalesce(_opening, 0),
+            _bank_code, left(nullif(trim(p_json ->> 'vc_bank_name'), ''), 60),
+            left(nullif(trim(p_json ->> 'vc_agency'), ''), 10),
+            left(nullif(trim(p_json ->> 'vc_account_number'), ''), 20), _nr_user)
     returning * into _row;
   else
     update od.fin_account a set
       vc_name    = case when p_json ? 'vc_name'    then _vc_name                              else a.vc_name end,
       it_type    = case when p_json ? 'it_type'    then (p_json ->> 'it_type')::smallint      else a.it_type end,
       vl_opening = case when p_json ? 'vl_opening' then coalesce(_opening, 0)                 else a.vl_opening end,
-      it_status  = case when p_json ? 'it_status'  then (p_json ->> 'it_status')::smallint    else a.it_status end
+      it_status  = case when p_json ? 'it_status'  then (p_json ->> 'it_status')::smallint    else a.it_status end,
+      vc_bank_code      = case when p_json ? 'vc_bank_code'      then _bank_code else a.vc_bank_code end,
+      vc_bank_name      = case when p_json ? 'vc_bank_name'      then left(nullif(trim(p_json ->> 'vc_bank_name'), ''), 60) else a.vc_bank_name end,
+      vc_agency         = case when p_json ? 'vc_agency'         then left(nullif(trim(p_json ->> 'vc_agency'), ''), 10) else a.vc_agency end,
+      vc_account_number = case when p_json ? 'vc_account_number' then left(nullif(trim(p_json ->> 'vc_account_number'), ''), 20) else a.vc_account_number end
     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _nr_account
     returning a.* into _row;
   end if;

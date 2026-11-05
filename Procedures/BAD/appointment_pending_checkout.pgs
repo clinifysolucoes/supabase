@@ -1,0 +1,100 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.appointment_pending_checkout(jsonb)                        ::
+  ::  UsedBy      : Flutter -> rpc('appointment_pending_checkout') (A receber)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Consultas do periodo que ja aconteceram (inicio ate agora) e ainda nao
+    foram fechadas no financeiro: sem conta a receber ligada (fin_entry com
+    nr_appointment, fora as canceladas) e sem guia de convenio. Ficam de fora
+    compromissos, faltas e canceladas. Para a aba A receber mostrar o que
+    falta cobrar. Permissao LER da tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    dt_from     date     obrigatorio
+    dt_to       date     obrigatorio (ate 400 dias)
+
+  Output jsonb:
+    {"appointments": [{"nr_appointment", "dh_start", "dh_end", "it_status", "nr_patient", "vc_patient",
+                       "nr_professional", "vc_professional", "nr_procedure", "vc_procedure"}],
+     "qt_total"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.appointment_pending_checkout(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _from       date;
+  _to         date;
+  _result     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_pending_checkout');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _from := (p_json ->> 'dt_from')::date;
+    _to   := (p_json ->> 'dt_to')::date;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _from is null or _to is null or _to < _from or _to - _from > 400 then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+
+  with a as (
+    select ap.nr_appointment, ap.dh_start, ap.dh_end, ap.it_status, ap.nr_patient, p.vc_name as vc_patient,
+           ap.nr_professional, pr.vc_name as vc_professional, ap.nr_procedure, pc.vc_name as vc_procedure
+      from od.appointment ap
+      join ad.branch b on b.nr_company = ap.nr_company and b.nr_branch = ap.nr_branch
+      join od.patient p on p.nr_company = ap.nr_company and p.nr_branch = ap.nr_branch
+                       and p.nr_patient = ap.nr_patient
+      left join od.professional pr on pr.nr_company = ap.nr_company and pr.nr_branch = ap.nr_branch
+                                  and pr.nr_professional = ap.nr_professional
+      left join od.procedure pc on pc.nr_company = ap.nr_company and pc.nr_branch = ap.nr_branch
+                               and pc.nr_procedure = ap.nr_procedure
+     where ap.nr_company = _nr_company and ap.nr_branch = _nr_branch
+       and ap.it_type = 1 and ap.it_status not in (7, 90)
+       and (ap.dh_start at time zone b.vc_timezone)::date between _from and _to
+       and ap.dh_start <= now()
+       and not exists (select 1 from od.fin_entry e
+                        where e.nr_company = ap.nr_company and e.nr_branch = ap.nr_branch
+                          and e.nr_appointment = ap.nr_appointment and e.it_status <> 90)
+       and not exists (select 1 from od.health_guide g
+                        where g.nr_company = ap.nr_company and g.nr_branch = ap.nr_branch
+                          and g.nr_appointment = ap.nr_appointment and g.it_status <> 90)
+     order by ap.dh_start
+     limit 500
+  )
+  select jsonb_build_object('appointments', coalesce(jsonb_agg(to_jsonb(a) order by a.dh_start), '[]'::jsonb),
+                            'qt_total', count(*))
+    into _result
+    from a;
+
+  return _result;
+end;
+$$;
+
+revoke all on function ad.appointment_pending_checkout(jsonb) from public, anon;
+grant execute on function ad.appointment_pending_checkout(jsonb) to authenticated;

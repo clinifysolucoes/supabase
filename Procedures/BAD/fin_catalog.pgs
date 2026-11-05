@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - taxas de recebimento (fase 3a)                  ::
+  ::  Change      : 05/11/2026 - banco, agencia e conta                          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastros do financeiro da filial: contas (com o saldo de hoje), plano de
@@ -20,7 +20,8 @@
     id_include_inactive  boolean  opcional (default false)
 
   Output jsonb:
-    {"accounts":   [{"nr_account", "vc_name", "it_type", "vl_opening", "vl_balance", "it_status"}],
+    {"accounts":   [{"nr_account", "vc_name", "it_type", "vl_opening", "vl_balance", "it_status",
+                     "vc_bank_code", "vc_bank_name", "vc_agency", "vc_account_number"}],
      "categories": [{"nr_category", "vc_name", "it_kind", "it_cost_type", "it_status", "qt_entries"}],
      "suppliers":  [{"nr_supplier", "vc_name", "vc_document", "vc_phone", "vc_email", "vc_notes", "it_status"}],
      "rates":      [{"nr_rate", "vc_name", "it_payment_method", "qt_installments_min", "qt_installments_max",
@@ -61,6 +62,10 @@ begin
                             'vc_name',    a.vc_name,
                             'it_type',    a.it_type,
                             'vl_opening', a.vl_opening,
+                            'vc_bank_code', a.vc_bank_code,
+                            'vc_bank_name', a.vc_bank_name,
+                            'vc_agency', a.vc_agency,
+                            'vc_account_number', a.vc_account_number,
                             'vl_balance', od.fn_fin_balance(_nr_company, _nr_branch, a.nr_account, null),
                             'it_status',  a.it_status)
                           order by a.it_type, a.vc_name), '[]'::jsonb)
