@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - profissional e atendimento (fase 2)             ::
+  ::  Change      : 05/11/2026 - recorrentes, competencia e parceladas            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Contas a receber (it_kind 1) ou a pagar (it_kind 2) da filial num periodo:
@@ -30,13 +30,15 @@
     vc_status    text     opcional (default all)
     nr_account, nr_category, nr_supplier, nr_patient, nr_professional  bigint  opcionais
     vc_search    text     opcional
+    vc_date      text     opcional 'due' (vencimento, padrao) | 'competence' (mes de competencia)
+    id_installments boolean opcional (so contas parceladas)
 
   Output jsonb:
     {"entries": [{"nr_entry", "it_kind", "nr_category", "vc_category", "it_cost_type",
                   "nr_account", "vc_account", "nr_supplier", "vc_supplier", "nr_patient", "vc_patient", "nr_professional", "vc_professional", "nr_appointment",
                   "vc_description", "vl_amount", "dt_due", "dt_competence", "it_payment_method",
                   "dt_paid", "vl_paid", "it_status", "id_overdue", "uu_group", "nr_installment",
-                  "qt_installments", "id_recurring", "vc_notes"}],
+                  "qt_installments", "id_recurring", "nr_recurrence", "qt_attachments", "vc_notes"}],
      "totals": {"vl_open", "vl_overdue", "vl_paid", "vl_cancelled", "qt_total",
                 "by_cost_type": {"1": n, "2": n, "3": n, "4": n}},
      "dt_today": "YYYY-MM-DD"}
@@ -46,7 +48,6 @@
 create or replace function ad.fin_entry_list(p_json jsonb)
 returns jsonb
 language plpgsql
-stable
 security definer
 set search_path = ''
 as $$
@@ -63,6 +64,8 @@ declare
   _patient    bigint;
   _prof       bigint;
   _search     text := nullif(trim(p_json ->> 'vc_search'), '');
+  _by_comp    boolean := lower(coalesce(p_json ->> 'vc_date', 'due')) = 'competence';
+  _only_inst  boolean;
   _today      date;
   _rows       jsonb;
 begin
@@ -86,29 +89,46 @@ begin
     _supplier := (p_json ->> 'nr_supplier')::bigint;
     _patient  := (p_json ->> 'nr_patient')::bigint;
     _prof     := (p_json ->> 'nr_professional')::bigint;
+    _only_inst := coalesce((p_json ->> 'id_installments')::boolean, false);
   exception when others then
     raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
   end;
   if _kind is null or _kind not in (1, 2) or _from is null or _to is null or _to < _from
-     or _to - _from > 400 or _status not in ('open', 'overdue', 'paid', 'cancelled', 'all') then
+     or _to - _from > 400 or _status not in ('open', 'overdue', 'paid', 'cancelled', 'all')
+     or lower(coalesce(p_json ->> 'vc_date', 'due')) not in ('due', 'competence') then
     raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
   end if;
 
   select (now() at time zone b.vc_timezone)::date into _today
     from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
 
+  -- contas recorrentes: gera ate o fim do periodo (no minimo 12 meses a frente, no maximo 5 anos)
+  perform od.fn_fin_recurrence_fill(_nr_company, _nr_branch,
+            least(greatest(_to, (_today + interval '12 months')::date), (_today + interval '60 months')::date));
+
   with base as (
     select e.*,
            (e.it_status = 1 and e.dt_due < _today) as id_overdue
       from od.fin_entry e
      where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_kind = _kind
-       and case _status
-             when 'paid' then e.it_status = 2 and e.dt_paid between _from and _to
-             when 'open' then e.it_status = 1 and e.dt_due between _from and _to
-             when 'overdue' then e.it_status = 1 and e.dt_due < _today and e.dt_due between _from and _to
-             when 'cancelled' then e.it_status = 90 and e.dt_due between _from and _to
-             else e.dt_due between _from and _to
+       and case
+             when _by_comp then coalesce(e.dt_competence, e.dt_due) between _from and _to
+                                and case _status
+                                      when 'paid' then e.it_status = 2
+                                      when 'open' then e.it_status = 1
+                                      when 'overdue' then e.it_status = 1 and e.dt_due < _today
+                                      when 'cancelled' then e.it_status = 90
+                                      else true
+                                    end
+             else case _status
+                    when 'paid' then e.it_status = 2 and e.dt_paid between _from and _to
+                    when 'open' then e.it_status = 1 and e.dt_due between _from and _to
+                    when 'overdue' then e.it_status = 1 and e.dt_due < _today and e.dt_due between _from and _to
+                    when 'cancelled' then e.it_status = 90 and e.dt_due between _from and _to
+                    else e.dt_due between _from and _to
+                  end
            end
+       and (not _only_inst or (e.qt_installments > 1 and not e.id_recurring))
        and (_account is null or e.nr_account = _account)
        and (_category is null or e.nr_category = _category)
        and (_supplier is null or e.nr_supplier = _supplier)
@@ -148,6 +168,10 @@ begin
                           'nr_installment',    b.nr_installment,
                           'qt_installments',   b.qt_installments,
                           'id_recurring',      b.id_recurring,
+                          'nr_recurrence',     b.nr_recurrence,
+                          'qt_attachments',    (select count(*) from od.fin_attachment t
+                                                 where t.nr_company = b.nr_company and t.nr_branch = b.nr_branch
+                                                   and t.nr_entry = b.nr_entry and t.it_status = 1),
                           'vc_notes',          b.vc_notes)
                         order by b.dt_due, b.nr_entry), '[]'::jsonb),
            'totals', jsonb_build_object(

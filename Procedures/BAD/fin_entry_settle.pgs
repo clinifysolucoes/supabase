@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 05/11/2026 - trava com extrato conciliado (fase 3b)          ::
+  ::  Change      : 05/11/2026 - dados do cartao e do cheque                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
@@ -33,6 +33,8 @@
     id_following       boolean  CANCEL (opcional)
     qt_card_installments integer PAY (opcional, parcelas do cartao de credito, 1..24)
     vc_reference       text     PAY (opcional: NSU, numero do cheque / boleto)
+    vc_card_brand, vc_card_last4, vc_authorization, vc_holder_name, vc_holder_document,
+    vc_bank_name, vc_check_number  text  PAY opcionais (cartao/cheque: vao para os recebiveis)
 
     PAY de conta a receber em cartao, boleto ou cheque com taxa cadastrada
     (od.fin_card_rate) leva o valor para a conta de passagem "Recebíveis" e
@@ -133,6 +135,7 @@ begin
     begin
       _qt_rec := od.fn_fin_receivable_make(_nr_company, _nr_branch, _nr_entry,
                    coalesce((p_json ->> 'qt_card_installments')::integer, 1), p_json ->> 'vc_reference', _nr_user);
+      perform od.fn_fin_receivable_details(_nr_company, _nr_branch, _nr_entry, p_json);
     exception when invalid_text_representation then
       raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
     end;

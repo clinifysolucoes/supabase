@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - gera as contas recorrentes                       ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Visao geral do financeiro da filial em dt_ref (default hoje, fuso da filial):
@@ -37,7 +37,6 @@
 create or replace function ad.fin_overview(p_json jsonb)
 returns jsonb
 language plpgsql
-stable
 security definer
 set search_path = ''
 as $$
@@ -71,6 +70,8 @@ begin
   end if;
   _m0 := date_trunc('month', _ref)::date;
   _m1 := (_m0 + interval '1 month')::date;
+  -- contas recorrentes geradas ate 12 meses a frente (proximos vencimentos)
+  perform od.fn_fin_recurrence_fill(_nr_company, _nr_branch, (_ref + interval '12 months')::date);
 
   return jsonb_build_object(
     'dt_ref', _ref,

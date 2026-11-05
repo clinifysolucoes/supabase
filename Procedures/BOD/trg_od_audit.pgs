@@ -117,3 +117,11 @@ create or replace trigger health_guide_item_audit
 create or replace trigger fin_bank_line_audit
   before insert or update on od.fin_bank_line
   for each row execute function ad.trg_audit();
+
+create or replace trigger fin_recurrence_audit
+  before insert or update on od.fin_recurrence
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_attachment_audit
+  before insert or update on od.fin_attachment
+  for each row execute function ad.trg_audit();

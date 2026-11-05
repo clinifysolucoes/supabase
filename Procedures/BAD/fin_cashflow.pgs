@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - gera as contas recorrentes                       ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Fluxo de caixa de um mes, dia a dia (contas ativas):
@@ -35,7 +35,6 @@
 create or replace function ad.fin_cashflow(p_json jsonb)
 returns jsonb
 language plpgsql
-stable
 security definer
 set search_path = ''
 as $$
@@ -69,6 +68,9 @@ begin
     raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
   end if;
   _m1 := (_m0 + interval '1 month')::date;
+  -- contas recorrentes do mes consultado (no maximo 5 anos a frente)
+  perform od.fn_fin_recurrence_fill(_nr_company, _nr_branch,
+            least((_m1 - 1), (now()::date + interval '60 months')::date));
 
   _opening := od.fn_fin_balance(_nr_company, _nr_branch, null, _m0);
   select coalesce(sum(e.vl_amount) filter (where e.it_kind = 1), 0),

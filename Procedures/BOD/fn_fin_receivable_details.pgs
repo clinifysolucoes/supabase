@@ -1,0 +1,64 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_receivable_details(bigint, bigint, bigint, jsonb)   ::
+  ::  UsedBy      : ad.fin_entry_settle, ad.fin_entry_save e checkout             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Depois de od.fn_fin_receivable_make: grava nos recebiveis em aberto do
+    lancamento os dados do pagamento que vieram no JSON da RPC. Cartao:
+    bandeira, 4 ultimos digitos, codigo de autorizacao, titular e CPF/CNPJ do
+    titular; cheque: banco e numero (o emitente vai no titular). Digitos e
+    documentos sao normalizados (so numeros); chave ausente nao mexe.
+    Helper interno (sem grant).
+
+  Input : p_nr_company, p_nr_branch, p_nr_entry, p_json (vc_card_brand,
+          vc_card_last4, vc_authorization, vc_holder_name, vc_holder_document,
+          vc_bank_name, vc_check_number)
+  Output: integer (recebiveis atualizados)
+  Errors: FIN_RECEIVABLE_DETAILS_INVALID (4 digitos ou documento invalidos)
+*/
+create or replace function od.fn_fin_receivable_details(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_entry   bigint,
+  p_json       jsonb)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _last4 text := nullif(regexp_replace(coalesce(p_json ->> 'vc_card_last4', ''), '[^0-9]', '', 'g'), '');
+  _doc   text := nullif(upper(regexp_replace(coalesce(p_json ->> 'vc_holder_document', ''), '[^0-9A-Za-z]', '', 'g')), '');
+  _n     integer;
+begin
+  if not (p_json ?| array['vc_card_brand', 'vc_card_last4', 'vc_authorization', 'vc_holder_name',
+                          'vc_holder_document', 'vc_bank_name', 'vc_check_number']) then
+    return 0;
+  end if;
+  if (_last4 is not null and _last4 !~ '^[0-9]{4}$')
+     or (_doc is not null and _doc !~ '^([0-9]{11}|[0-9A-Z]{14})$') then
+    raise exception '%', ad.fn_message('FIN_RECEIVABLE_DETAILS_INVALID');
+  end if;
+
+  update od.fin_receivable r set
+    vc_card_brand      = case when p_json ? 'vc_card_brand'      then left(nullif(trim(p_json ->> 'vc_card_brand'), ''), 20)    else r.vc_card_brand end,
+    vc_card_last4      = case when p_json ? 'vc_card_last4'      then _last4                                                   else r.vc_card_last4 end,
+    vc_authorization   = case when p_json ? 'vc_authorization'   then left(nullif(trim(p_json ->> 'vc_authorization'), ''), 30) else r.vc_authorization end,
+    vc_holder_name     = case when p_json ? 'vc_holder_name'     then left(nullif(trim(p_json ->> 'vc_holder_name'), ''), 120)  else r.vc_holder_name end,
+    vc_holder_document = case when p_json ? 'vc_holder_document' then _doc                                                     else r.vc_holder_document end,
+    vc_bank_name       = case when p_json ? 'vc_bank_name'       then left(nullif(trim(p_json ->> 'vc_bank_name'), ''), 60)     else r.vc_bank_name end,
+    vc_check_number    = case when p_json ? 'vc_check_number'    then left(nullif(trim(p_json ->> 'vc_check_number'), ''), 20)  else r.vc_check_number end
+  where r.nr_company = p_nr_company and r.nr_branch = p_nr_branch and r.nr_entry = p_nr_entry
+    and r.it_status = 1;
+  get diagnostics _n = row_count;
+  return _n;
+end;
+$$;
+
+revoke all on function od.fn_fin_receivable_details(bigint, bigint, bigint, jsonb)
+  from public, anon, authenticated;

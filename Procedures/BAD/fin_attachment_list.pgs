@@ -1,0 +1,84 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_attachment_list(jsonb)                                 ::
+  ::  UsedBy      : Flutter e Edge Function fin-attachment (download)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Anexos ativos de uma conta (ou um anexo so, por nr_attachment), com o
+    caminho no Storage. A Edge Function fin-attachment chama esta RPC com o
+    JWT do usuario antes de gerar a URL assinada de download. Permissao LER
+    da tela FINANCE.
+
+  Input p_json:
+    nr_version     integer  obrigatorio = 1
+    nr_company     bigint   obrigatorio
+    nr_branch      bigint   obrigatorio
+    nr_entry       bigint   obrigatorio (ou nr_attachment)
+    nr_attachment  bigint   opcional (so este anexo)
+
+  Output jsonb:
+    {"attachments": [{"nr_attachment", "nr_entry", "it_type", "vc_name", "vc_mime", "qt_bytes",
+                      "vc_path", "dh_created", "vc_user"}]}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.fin_attachment_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _entry      bigint;
+  _att        bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_attachment_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _entry := (p_json ->> 'nr_entry')::bigint;
+    _att   := (p_json ->> 'nr_attachment')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _entry is null and _att is null then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+
+  return jsonb_build_object('attachments', coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'nr_attachment', t.nr_attachment,
+             'nr_entry',      t.nr_entry,
+             'it_type',       t.it_type,
+             'vc_name',       t.vc_name,
+             'vc_mime',       t.vc_mime,
+             'qt_bytes',      t.qt_bytes,
+             'vc_path',       t.vc_path,
+             'dh_created',    t.dh_created,
+             'vc_user',       u.vc_name)
+           order by t.it_type, t.dh_created)
+      from od.fin_attachment t
+      left join ad.app_user u on u.nr_user = t.nr_user_created
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.it_status = 1
+       and (_entry is null or t.nr_entry = _entry)
+       and (_att is null or t.nr_attachment = _att)), '[]'::jsonb));
+end;
+$$;
+
+revoke all on function ad.fin_attachment_list(jsonb) from public, anon;
+grant execute on function ad.fin_attachment_list(jsonb) to authenticated;

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - dados do cartao e do cheque                     ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Recebiveis (cartao, boleto, cheque) com previsao no periodo (ate 400 dias),
@@ -28,7 +28,9 @@
     {"receivables": [{"nr_receivable", "nr_entry", "vc_description", "vc_patient", "it_payment_method",
                       "vc_rate", "nr_installment", "qt_installments", "vl_gross", "vl_fee", "vl_net",
                       "dt_expected", "nr_account", "vc_account", "it_status", "id_overdue",
-                      "dt_received", "vl_received", "vc_reference"}],
+                      "dt_received", "vl_received", "vc_reference", "vc_card_brand", "vc_card_last4",
+                      "vc_authorization", "vc_holder_name", "vc_holder_document", "vc_bank_name",
+                      "vc_check_number"}],
      "totals": {"vl_gross", "vl_fee", "vl_net", "vl_pending", "vl_received", "qt_total"},
      "dt_today"}
 
@@ -101,7 +103,11 @@ begin
                             'dt_expected', b.dt_expected, 'nr_account', b.nr_account, 'vc_account', a.vc_name,
                             'it_status', b.it_status, 'id_overdue', b.id_overdue,
                             'dt_received', b.dt_received, 'vl_received', b.vl_received,
-                            'vc_reference', b.vc_reference)
+                            'vc_reference', b.vc_reference,
+                            'vc_card_brand', b.vc_card_brand, 'vc_card_last4', b.vc_card_last4,
+                            'vc_authorization', b.vc_authorization, 'vc_holder_name', b.vc_holder_name,
+                            'vc_holder_document', b.vc_holder_document, 'vc_bank_name', b.vc_bank_name,
+                            'vc_check_number', b.vc_check_number)
                             order by b.dt_expected, b.nr_receivable), '[]'::jsonb),
            'totals', jsonb_build_object(
                        'vl_gross', coalesce(sum(b.vl_gross) filter (where b.it_status <> 90), 0),

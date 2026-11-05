@@ -1,0 +1,107 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_recurrence_list(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_recurrence_list')   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Contas recorrentes da filial (a receber ou a pagar), com o proximo
+    vencimento em aberto e quantos lancamentos ja foram pagos. Antes de
+    listar, completa os lancamentos ate 12 meses a frente
+    (od.fn_fin_recurrence_fill). Permissao LER da tela FINANCE.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company   bigint   obrigatorio
+    nr_branch    bigint   obrigatorio
+    it_kind      integer  opcional 1 | 2 (nulo = os dois)
+    id_inactive  boolean  opcional (inclui as encerradas; padrao false)
+
+  Output jsonb:
+    {"recurrences": [{"nr_recurrence", "it_kind", "nr_category", "vc_category", "it_cost_type",
+                      "nr_account", "vc_account", "nr_supplier", "vc_supplier", "nr_patient",
+                      "vc_patient", "vc_description", "vl_amount", "it_day", "it_payment_method",
+                      "dt_start", "dt_end", "it_status", "vc_notes", "dt_next", "qt_open", "qt_paid"}]}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
+*/
+create or replace function ad.fin_recurrence_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       smallint := (p_json ->> 'it_kind')::smallint;
+  _inactive   boolean := coalesce((p_json ->> 'id_inactive')::boolean, false);
+  _today      date;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_recurrence_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+
+  select (now() at time zone b.vc_timezone)::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  perform od.fn_fin_recurrence_fill(_nr_company, _nr_branch, (_today + interval '12 months')::date);
+
+  return jsonb_build_object('recurrences', coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'nr_recurrence',     r.nr_recurrence,
+             'it_kind',           r.it_kind,
+             'nr_category',       r.nr_category,
+             'vc_category',       c.vc_name,
+             'it_cost_type',      c.it_cost_type,
+             'nr_account',        r.nr_account,
+             'vc_account',        a.vc_name,
+             'nr_supplier',       r.nr_supplier,
+             'vc_supplier',       s.vc_name,
+             'nr_patient',        r.nr_patient,
+             'vc_patient',        p.vc_name,
+             'vc_description',    r.vc_description,
+             'vl_amount',         r.vl_amount,
+             'it_day',            r.it_day,
+             'it_payment_method', r.it_payment_method,
+             'dt_start',          r.dt_start,
+             'dt_end',            r.dt_end,
+             'it_status',         r.it_status,
+             'vc_notes',          r.vc_notes,
+             'dt_next',           (select min(e.dt_due) from od.fin_entry e
+                                    where e.nr_company = r.nr_company and e.nr_branch = r.nr_branch
+                                      and e.nr_recurrence = r.nr_recurrence and e.it_status = 1),
+             'qt_open',           (select count(*) from od.fin_entry e
+                                    where e.nr_company = r.nr_company and e.nr_branch = r.nr_branch
+                                      and e.nr_recurrence = r.nr_recurrence and e.it_status = 1),
+             'qt_paid',           (select count(*) from od.fin_entry e
+                                    where e.nr_company = r.nr_company and e.nr_branch = r.nr_branch
+                                      and e.nr_recurrence = r.nr_recurrence and e.it_status = 2))
+           order by r.it_status, r.it_kind, r.it_day, lower(r.vc_description))
+      from od.fin_recurrence r
+      join od.fin_category c on c.nr_company = r.nr_company and c.nr_branch = r.nr_branch
+                            and c.nr_category = r.nr_category
+      left join od.fin_account a on a.nr_company = r.nr_company and a.nr_branch = r.nr_branch
+                                and a.nr_account = r.nr_account
+      left join od.fin_supplier s on s.nr_company = r.nr_company and s.nr_branch = r.nr_branch
+                                 and s.nr_supplier = r.nr_supplier
+      left join od.patient p on p.nr_company = r.nr_company and p.nr_branch = r.nr_branch
+                            and p.nr_patient = r.nr_patient
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+       and (_kind is null or r.it_kind = _kind)
+       and (_inactive or r.it_status = 1)), '[]'::jsonb));
+end;
+$$;
+
+revoke all on function ad.fin_recurrence_list(jsonb) from public, anon;
+grant execute on function ad.fin_recurrence_list(jsonb) to authenticated;

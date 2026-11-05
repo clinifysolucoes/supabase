@@ -6,15 +6,18 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - marca o que ja foi exportado                    ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Recebimentos de pacientes no periodo (pela data do pagamento, ate 366
     dias) para declarar na Receita Saude: uma linha por pagamento com CPF e
     nome do paciente (ou do responsavel legal, quando houver), data, valor e o
     profissional que atendeu; e quantos pagamentos ficaram sem CPF. O app
-    gera o arquivo CSV. So leitura; grava ad.event_log da exportacao (sem
-    dados pessoais). Exige permissao de LEITURA na tela FINANCE.
+    gera o arquivo CSV. Cada pagamento guarda quando foi exportado
+    (dh_health_exported): filtro vc_export e, com id_mark, a chamada marca as
+    linhas devolvidas como exportadas agora (so essas, se vier nr_entries) e
+    grava ad.event_log da exportacao (sem dados pessoais). Listar exige
+    permissao LER; marcar exige ALTERAR (tela FINANCE).
 
   Input p_json:
     nr_version  integer  obrigatorio = 1
@@ -22,10 +25,14 @@
     nr_branch   bigint   obrigatorio
     dt_from     date     obrigatorio
     dt_to       date     obrigatorio (ate 366 dias)
+    vc_export   text     opcional 'all' (padrao) | 'pending' (nao exportados) | 'exported'
+    nr_entries  array    opcional (so estes pagamentos)
+    id_mark     boolean  opcional (marca as linhas devolvidas como exportadas)
 
   Output jsonb:
     {"rows": [{"nr_entry", "dt_paid", "vl_paid", "nr_patient", "vc_patient", "vc_cpf",
-               "vc_payer", "vc_payer_cpf", "vc_professional", "vc_description"}],
+               "vc_payer", "vc_payer_cpf", "vc_professional", "vc_description",
+               "dh_exported"}],
      "vl_total", "qt_rows", "qt_missing_cpf", "vc_company_document"}
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
@@ -43,6 +50,10 @@ declare
   _from       date;
   _to         date;
   _result     jsonb;
+  _export     text := lower(coalesce(nullif(trim(p_json ->> 'vc_export'), ''), 'all'));
+  _mark       boolean;
+  _only       bigint[];
+  _perm       jsonb;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_health_export');
 
@@ -52,29 +63,41 @@ begin
     raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
   end if;
   _nr_user := private.fn_current_user_nr();
-  if _nr_user is null or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
-    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
-  end if;
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
   begin
     _from := (p_json ->> 'dt_from')::date;
     _to   := (p_json ->> 'dt_to')::date;
+    _mark := coalesce((p_json ->> 'id_mark')::boolean, false);
+    _only := case when jsonb_typeof(p_json -> 'nr_entries') = 'array'
+                  then array(select jsonb_array_elements_text(p_json -> 'nr_entries')::bigint) end;
   exception when others then
     raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
   end;
-  if _from is null or _to is null or _to < _from or _to - _from > 366 then
+  if _nr_user is null or not (_perm ->> 'id_read')::boolean
+     or (_mark and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  if _from is null or _to is null or _to < _from or _to - _from > 366
+     or _export not in ('all', 'pending', 'exported') then
     raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
   end if;
 
   with r as (
     select e.nr_entry, e.dt_paid, e.vl_paid, e.nr_patient, p.vc_name as vc_patient, p.vc_cpf,
            nullif(trim(p.vc_guardian_name), '') as vc_payer, p.vc_guardian_cpf as vc_payer_cpf,
-           pr.vc_name as vc_professional, e.vc_description
+           pr.vc_name as vc_professional, e.vc_description, e.dh_health_exported as dh_exported
       from od.fin_entry e
       join od.patient p on p.nr_company = e.nr_company and p.nr_branch = e.nr_branch and p.nr_patient = e.nr_patient
       left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
                                   and pr.nr_professional = e.nr_professional
      where e.nr_company = _nr_company and e.nr_branch = _nr_branch
        and e.it_kind = 1 and e.it_status = 2 and e.dt_paid between _from and _to
+       and (_only is null or e.nr_entry = any (_only))
+       and case _export
+             when 'pending' then e.dh_health_exported is null
+             when 'exported' then e.dh_health_exported is not null
+             else true
+           end
   )
   select jsonb_build_object(
            'rows', coalesce(jsonb_agg(to_jsonb(r) order by r.dt_paid, r.nr_entry), '[]'::jsonb),
@@ -84,6 +107,17 @@ begin
            'vc_company_document', (select c.vc_cnpj from ad.company c where c.nr_company = _nr_company))
     into _result
     from r;
+
+  if not _mark then
+    return _result;
+  end if;
+
+  update od.fin_entry e set dh_health_exported = now()
+   where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+     and e.nr_entry in (select (x ->> 'nr_entry')::bigint from jsonb_array_elements(_result -> 'rows') x);
+  _result := jsonb_set(_result, '{rows}', coalesce((
+               select jsonb_agg(x || jsonb_build_object('dh_exported', now()))
+                 from jsonb_array_elements(_result -> 'rows') x), '[]'::jsonb));
 
   perform ad.fn_event_log(
     _nr_user, _nr_company, _nr_branch, 'FINANCE', 'OTHER', 'fin_health_export',

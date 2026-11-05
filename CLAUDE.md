@@ -60,6 +60,9 @@ Objetos principais:
 | `od.fin_card_rate` / `od.fin_receivable` / `ad.fin_rate_save` / `ad.fin_receivable_list` / `ad.fin_receivable_settle` / `ad.fin_health_export` | financeiro (fase 3a): taxas de cartão/boleto/cheque; a baixa nessas formas leva o valor para a conta de passagem Recebíveis (`it_type` 4) e gera recebíveis (`od.fn_fin_receivable_make`), confirmados para a conta destino com a taxa real como despesa; exportação para a Receita Saúde |
 | `od.health_plan` / `od.health_plan_price` / `od.health_guide` / `od.health_guide_item` / `ad.health_plan_save` / `ad.health_plan_list` / `ad.health_guide_save` / `ad.health_guide_settle` / `ad.health_guide_list` | financeiro (fase 3b): convênios com tabela de preço; guias aberta → faturada (uma conta a receber por faturamento, categoria Convênios) → paga com glosa por item |
 | `od.fin_bank_line` / `ad.fin_bank_import` / `ad.fin_bank_list` / `ad.fin_bank_reconcile` / `od.fn_fin_bank_candidates` | conciliação bancária: linhas do OFX (FITID único por conta), sugestões por valor e data (±5 dias), conciliar, lançar a partir do extrato ou ignorar; lançamento/transferência conciliado não se desfaz |
+| `od.fin_recurrence` / `ad.fin_recurrence_save` / `ad.fin_recurrence_list` / `od.fn_fin_recurrence_fill` | financeiro (fase 4): conta recorrente como regra (todo mês no dia X, sem data final ou até uma data); os lançamentos (`fin_entry.nr_recurrence`) são gerados até 12 meses à frente por `fin_entry_list`/`fin_overview`/`fin_cashflow`; alterar muda os futuros em aberto, encerrar cancela os futuros |
+| `od.fin_attachment` / `ad.fin_attachment_save` / `ad.fin_attachment_list` + Edge Function `fin-attachment` | anexos das contas (documento e comprovante) no bucket privado `finance`; upload/download só por URL assinada da Edge Function, que valida pela RPC antes |
+| `ad.appointment_pending_checkout` / `od.fn_fin_receivable_details` | consultas passadas sem fechamento (aba A receber); dados do cartão e do cheque nos recebíveis; `fin_entry.dh_health_exported` marca o exportado para a Receita Saúde; `fin_account` com banco, agência e conta |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |
@@ -418,6 +421,7 @@ sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 |---|---|---|
 | `user-create` | cria a conta no Auth (service_role) e vincula à empresa | nenhum extra |
 | `material-price-lookup` | pesquisa preço de mercado de um material (Claude + web search); valida acesso com `ad.pricing_param_get`; não grava nada | `ANTHROPIC_API_KEY` (obrigatório), `PRICE_LOOKUP_MODEL` (opcional) |
+| `fin-attachment` | anexos do financeiro: valida com `ad.fin_attachment_save`/`ad.fin_attachment_list` (JWT do usuário) e gera URL assinada de upload/download no bucket privado `finance` (criado na primeira chamada) | nenhum extra |
 
 ### Setup do projeto Supabase (uma vez por ambiente)
 

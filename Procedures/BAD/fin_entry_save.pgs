@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - recebiveis na conta ja paga (fase 3a)           ::
+  ::  Change      : 05/11/2026 - dados do cartao e do cheque                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Conta a receber (it_kind 1) ou a pagar (it_kind 2).
@@ -260,6 +260,7 @@ begin
     end loop;
     if _paid then
       perform od.fn_fin_receivable_make(_nr_company, _nr_branch, _first, _qt_card, p_json ->> 'vc_reference', _nr_user);
+      perform od.fn_fin_receivable_details(_nr_company, _nr_branch, _first, p_json);
     end if;
   end if;
 

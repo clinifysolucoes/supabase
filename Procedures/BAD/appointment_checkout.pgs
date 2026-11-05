@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - recebiveis da 1a parcela (fase 3a)              ::
+  ::  Change      : 05/11/2026 - dados do cartao e do cheque                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Fechamento financeiro da consulta (permissao CRIAR na tela FINANCE):
@@ -38,6 +38,8 @@
     vc_notes           text     opcional
     qt_card_installments integer opcional (1a parcela no cartao de credito em N vezes)
     vc_reference       text     opcional (NSU, numero do cheque / boleto)
+    vc_card_brand, vc_card_last4, vc_authorization, vc_holder_name, vc_holder_document,
+    vc_bank_name, vc_check_number  text  opcionais (cartao/cheque: vao para os recebiveis)
 
   Output jsonb: {"nr_appointment", "nr_entry", "qt_installments", "nr_commission_entry", "vl_commission"}
 
@@ -220,6 +222,7 @@ begin
 
   if _paid then
     perform od.fn_fin_receivable_make(_nr_company, _nr_branch, _nr_entry + 1, _qt_card, p_json ->> 'vc_reference', _nr_user);
+    perform od.fn_fin_receivable_details(_nr_company, _nr_branch, _nr_entry + 1, p_json);
   end if;
 
   /* comissao do profissional: conta a pagar, dia 10 do mes seguinte         */
