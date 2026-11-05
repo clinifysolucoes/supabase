@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - recebiveis de cartao/boleto/cheque (fase 3a)    ::
+  ::  Change      : 05/11/2026 - trava com extrato conciliado (fase 3b)          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
@@ -44,7 +44,7 @@
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, FIN_ENTRY_REQUIRED,
     FIN_ENTRY_NOT_FOUND, FIN_SETTLE_ACTION_INVALID, FIN_SETTLE_STATUS_INVALID, FIN_ENTRY_VALUE_INVALID,
     FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_CASH_SESSION_CLOSED,
-    FIN_RECEIVABLE_CONFIRMED
+    FIN_RECEIVABLE_CONFIRMED, FIN_BANK_RECONCILED
 */
 create or replace function ad.fin_entry_settle(p_json jsonb)
 returns jsonb
@@ -147,6 +147,10 @@ begin
                 where r.nr_company = _nr_company and r.nr_branch = _nr_branch
                   and r.nr_entry = _nr_entry and r.it_status = 2) then
       raise exception '%', ad.fn_message('FIN_RECEIVABLE_CONFIRMED');
+    end if;
+    if exists (select 1 from od.fin_bank_line l
+                where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_entry = _nr_entry) then
+      raise exception '%', ad.fn_message('FIN_BANK_RECONCILED');
     end if;
     update od.fin_receivable r set it_status = 90
      where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_entry = _nr_entry and r.it_status = 1;

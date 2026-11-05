@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - trava com extrato conciliado (fase 3b)          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Movimento de dinheiro entre contas da filial (nao e receita nem despesa):
@@ -37,7 +37,7 @@
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_TRANSFER_ACTION_INVALID, FIN_TRANSFER_FORBIDDEN,
     FIN_TRANSFER_VALUE_INVALID, FIN_TRANSFER_TYPE_INVALID, FIN_TRANSFER_ACCOUNT_INVALID,
     FIN_TRANSFER_SAME_ACCOUNT, FIN_TRANSFER_AMOUNT_INVALID, FIN_TRANSFER_REQUIRED, FIN_TRANSFER_NOT_FOUND,
-    FIN_TRANSFER_STATUS_INVALID, FIN_CASH_SESSION_CLOSED
+    FIN_TRANSFER_STATUS_INVALID, FIN_CASH_SESSION_CLOSED, FIN_BANK_RECONCILED
 */
 create or replace function ad.fin_transfer_save(p_json jsonb)
 returns jsonb
@@ -100,6 +100,10 @@ begin
                 where s.nr_company = _nr_company and s.nr_branch = _nr_branch
                   and s.nr_session = _cur.nr_cash_session and s.it_status = 2) then
       raise exception '%', ad.fn_message('FIN_CASH_SESSION_CLOSED');
+    end if;
+    if exists (select 1 from od.fin_bank_line l
+                where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_transfer = _nr) then
+      raise exception '%', ad.fn_message('FIN_BANK_RECONCILED');
     end if;
     update od.fin_transfer t set it_status = 90
      where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_transfer = _nr;

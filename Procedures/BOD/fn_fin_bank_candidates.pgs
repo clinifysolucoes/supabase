@@ -1,0 +1,64 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_fin_bank_candidates(bigint, bigint, bigint)             ::
+  ::  UsedBy      : ad.fin_bank_list, ad.fin_bank_reconcile                       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Sugestoes de conciliacao de uma linha do extrato do banco ainda pendente:
+    lancamentos pagos na mesma conta e transferencias que entram ou saem dela,
+    com o mesmo valor (com sinal) e data ate 5 dias de diferenca, que ainda
+    nao estao conciliados. Ordenadas pela distancia de datas.
+    Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_line
+  Output: table (it_source 1 lancamento | 2 transferencia, nr_ref, dt_ref, vl_value, vc_description,
+                 qt_days)
+*/
+create or replace function od.fn_fin_bank_candidates(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_line    bigint)
+returns table (it_source smallint, nr_ref bigint, dt_ref date, vl_value numeric, vc_description text, qt_days integer)
+language sql
+stable
+set search_path = ''
+as $$
+  with l as (
+    select * from od.fin_bank_line x
+     where x.nr_company = p_nr_company and x.nr_branch = p_nr_branch and x.nr_line = p_nr_line and x.it_status = 1
+  )
+  select * from (
+    select 1::smallint, e.nr_entry, e.dt_paid,
+           case when e.it_kind = 1 then e.vl_paid else -e.vl_paid end,
+           e.vc_description::text, abs(e.dt_paid - l.dt_posted)
+      from l
+      join od.fin_entry e on e.nr_company = l.nr_company and e.nr_branch = l.nr_branch
+                         and e.nr_account = l.nr_account and e.it_status = 2
+                         and (case when e.it_kind = 1 then e.vl_paid else -e.vl_paid end) = l.vl_amount
+                         and abs(e.dt_paid - l.dt_posted) <= 5
+     where not exists (select 1 from od.fin_bank_line b
+                        where b.nr_company = e.nr_company and b.nr_branch = e.nr_branch and b.nr_entry = e.nr_entry)
+    union all
+    select 2::smallint, t.nr_transfer, t.dt_transfer,
+           case when t.nr_account_to = l.nr_account then t.vl_amount else -t.vl_amount end,
+           coalesce(t.vc_description, 'Transferência')::text, abs(t.dt_transfer - l.dt_posted)
+      from l
+      join od.fin_transfer t on t.nr_company = l.nr_company and t.nr_branch = l.nr_branch and t.it_status = 1
+                            and l.nr_account in (t.nr_account_from, t.nr_account_to)
+                            and (case when t.nr_account_to = l.nr_account then t.vl_amount else -t.vl_amount end)
+                                = l.vl_amount
+                            and abs(t.dt_transfer - l.dt_posted) <= 5
+     where not exists (select 1 from od.fin_bank_line b
+                        where b.nr_company = t.nr_company and b.nr_branch = t.nr_branch
+                          and b.nr_transfer = t.nr_transfer and b.nr_account = l.nr_account)
+  ) c (it_source, nr_ref, dt_ref, vl_value, vc_description, qt_days)
+  order by c.qt_days, c.it_source, c.nr_ref
+  limit 5;
+$$;
+
+revoke all on function od.fn_fin_bank_candidates(bigint, bigint, bigint) from public, anon, authenticated;

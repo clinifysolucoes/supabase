@@ -1,0 +1,212 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.health_guide_save(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('health_guide_save')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I, permissao CRIAR) ou altera parcialmente (U, permissao ALTERAR) uma
+    guia de convenio ainda aberta: convenio (ativo), paciente, profissional,
+    atendimento da agenda, numero da guia, carteirinha, data do atendimento,
+    observacoes e os procedimentos. Com "items" presente, os procedimentos sao
+    substituidos ([{nr_procedure, qt_quantity, vl_unit, vc_tooth}]); sem vl_unit
+    vale o preco da tabela do convenio (procedimento fora da tabela exige o
+    valor). O total da guia e a soma dos itens. Guia faturada, paga ou
+    cancelada nao muda. Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    nr_company       bigint   obrigatorio
+    nr_branch        bigint   obrigatorio
+    vc_action        text     obrigatorio I | U
+    nr_guide         bigint   obrigatorio em U
+    nr_plan          bigint   obrigatorio em I
+    nr_patient       bigint   obrigatorio em I
+    nr_professional  bigint   opcional
+    nr_appointment   bigint   opcional
+    vc_guide_number  text     opcional
+    vc_card_number   text     opcional
+    dt_service       date     obrigatorio em I
+    vc_notes         text     opcional
+    items            array    obrigatorio em I (1 a 50 itens)
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_guide", "vl_total"}
+
+  Errors: VERSION_MISMATCH, HEALTH_GUIDE_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, HEALTH_GUIDE_FORBIDDEN,
+    HEALTH_GUIDE_REQUIRED, HEALTH_GUIDE_NOT_FOUND, HEALTH_GUIDE_LOCKED, HEALTH_GUIDE_VALUE_INVALID,
+    HEALTH_GUIDE_PLAN_INVALID, HEALTH_GUIDE_PATIENT_INVALID, HEALTH_GUIDE_PROFESSIONAL_INVALID,
+    HEALTH_GUIDE_APPOINTMENT_INVALID, HEALTH_GUIDE_DATE_REQUIRED, HEALTH_GUIDE_ITEMS_REQUIRED,
+    HEALTH_GUIDE_ITEM_INVALID, HEALTH_GUIDE_PRICE_REQUIRED
+*/
+create or replace function ad.health_guide_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr         bigint;
+  _cur        od.health_guide%rowtype;
+  _new        od.health_guide%rowtype;
+  _it         jsonb;
+  _i          integer := 0;
+  _proc       bigint;
+  _qt         integer;
+  _unit       numeric;
+  _total      numeric;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'health_guide_save');
+
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_FORBIDDEN');
+  end if;
+
+  if _action = 'U' then
+    _nr := (p_json ->> 'nr_guide')::bigint;
+    if _nr is null then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_REQUIRED');
+    end if;
+    select * into _cur from od.health_guide g
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _nr
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_NOT_FOUND');
+    end if;
+    if _cur.it_status <> 1 then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_LOCKED');
+    end if;
+  end if;
+
+  begin
+    _new := _cur;
+    _new.nr_plan         := case when _action = 'I' or p_json ? 'nr_plan' then (p_json ->> 'nr_plan')::bigint else _cur.nr_plan end;
+    _new.nr_patient      := case when _action = 'I' or p_json ? 'nr_patient' then (p_json ->> 'nr_patient')::bigint else _cur.nr_patient end;
+    _new.nr_professional := case when p_json ? 'nr_professional' then (p_json ->> 'nr_professional')::bigint else _cur.nr_professional end;
+    _new.nr_appointment  := case when p_json ? 'nr_appointment' then (p_json ->> 'nr_appointment')::bigint else _cur.nr_appointment end;
+    _new.vc_guide_number := case when p_json ? 'vc_guide_number' then left(nullif(trim(p_json ->> 'vc_guide_number'), ''), 30) else _cur.vc_guide_number end;
+    _new.vc_card_number  := case when p_json ? 'vc_card_number' then left(nullif(trim(p_json ->> 'vc_card_number'), ''), 30) else _cur.vc_card_number end;
+    _new.dt_service      := case when _action = 'I' or p_json ? 'dt_service' then (p_json ->> 'dt_service')::date else _cur.dt_service end;
+    _new.vc_notes        := case when p_json ? 'vc_notes' then left(nullif(trim(p_json ->> 'vc_notes'), ''), 500) else _cur.vc_notes end;
+  exception when others then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_VALUE_INVALID');
+  end;
+
+  if _new.nr_plan is null or not exists (
+       select 1 from od.health_plan h
+        where h.nr_company = _nr_company and h.nr_branch = _nr_branch and h.nr_plan = _new.nr_plan
+          and (h.it_status = 1 or _new.nr_plan is not distinct from _cur.nr_plan)) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_PLAN_INVALID');
+  end if;
+  if _new.nr_patient is null or not exists (
+       select 1 from od.patient p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_PATIENT_INVALID');
+  end if;
+  if _new.nr_professional is not null and not exists (
+       select 1 from od.professional p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _new.nr_professional) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_PROFESSIONAL_INVALID');
+  end if;
+  if _new.nr_appointment is not null and not exists (
+       select 1 from od.appointment a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_appointment = _new.nr_appointment
+          and a.nr_patient = _new.nr_patient) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_APPOINTMENT_INVALID');
+  end if;
+  if _new.dt_service is null then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_DATE_REQUIRED');
+  end if;
+  if (_action = 'I' or p_json ? 'items')
+     and (jsonb_typeof(p_json -> 'items') is distinct from 'array'
+          or jsonb_array_length(p_json -> 'items') not between 1 and 50) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_ITEMS_REQUIRED');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(g.nr_guide), 0) + 1 into _nr
+      from od.health_guide g where g.nr_company = _nr_company and g.nr_branch = _nr_branch;
+    insert into od.health_guide (nr_company, nr_branch, nr_guide, nr_plan, nr_patient, nr_professional,
+                                 nr_appointment, vc_guide_number, vc_card_number, dt_service, vc_notes,
+                                 nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _new.nr_plan, _new.nr_patient, _new.nr_professional,
+            _new.nr_appointment, _new.vc_guide_number, _new.vc_card_number, _new.dt_service, _new.vc_notes,
+            _nr_user, _nr_user);
+  else
+    update od.health_guide g set
+      nr_plan = _new.nr_plan, nr_patient = _new.nr_patient, nr_professional = _new.nr_professional,
+      nr_appointment = _new.nr_appointment, vc_guide_number = _new.vc_guide_number,
+      vc_card_number = _new.vc_card_number, dt_service = _new.dt_service, vc_notes = _new.vc_notes
+    where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _nr;
+  end if;
+
+  if p_json ? 'items' then
+    delete from od.health_guide_item gi
+     where gi.nr_company = _nr_company and gi.nr_branch = _nr_branch and gi.nr_guide = _nr;
+    for _it in select * from jsonb_array_elements(p_json -> 'items') loop
+      _i := _i + 1;
+      begin
+        _proc := (_it ->> 'nr_procedure')::bigint;
+        _qt   := coalesce((_it ->> 'qt_quantity')::integer, 1);
+        _unit := round((_it ->> 'vl_unit')::numeric, 2);
+      exception when others then
+        raise exception '%', ad.fn_message('HEALTH_GUIDE_ITEM_INVALID', jsonb_build_object('Item', _i));
+      end;
+      if _proc is null or _qt not between 1 and 99 or (_unit is not null and _unit < 0)
+         or not exists (select 1 from od.procedure pc
+                         where pc.nr_company = _nr_company and pc.nr_branch = _nr_branch and pc.nr_procedure = _proc) then
+        raise exception '%', ad.fn_message('HEALTH_GUIDE_ITEM_INVALID', jsonb_build_object('Item', _i));
+      end if;
+      if _unit is null then
+        select pp.vl_price into _unit from od.health_plan_price pp
+         where pp.nr_company = _nr_company and pp.nr_branch = _nr_branch
+           and pp.nr_plan = _new.nr_plan and pp.nr_procedure = _proc;
+        if _unit is null then
+          raise exception '%', ad.fn_message('HEALTH_GUIDE_PRICE_REQUIRED', jsonb_build_object('Item', _i));
+        end if;
+      end if;
+      insert into od.health_guide_item (nr_company, nr_branch, nr_guide, nr_item, nr_procedure, vc_tooth,
+                                        qt_quantity, vl_unit, vl_total, nr_operator)
+      values (_nr_company, _nr_branch, _nr, _i, _proc, left(nullif(trim(_it ->> 'vc_tooth'), ''), 10),
+              _qt, _unit, round(_unit * _qt, 2), _nr_user);
+    end loop;
+  end if;
+
+  select coalesce(sum(gi.vl_total), 0) into _total from od.health_guide_item gi
+   where gi.nr_company = _nr_company and gi.nr_branch = _nr_branch and gi.nr_guide = _nr;
+  update od.health_guide g set vl_total = _total
+   where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _nr;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'health_guide', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Guia %s %s', coalesce(_new.vc_guide_number, '#' || _nr), case when _action = 'I' then 'lançada' else 'alterada' end),
+    jsonb_build_object('nr_plan', _new.nr_plan, 'vl_total', _total, 'dt_service', _new.dt_service));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_guide', _nr, 'vl_total', _total);
+end;
+$$;
+
+revoke all on function ad.health_guide_save(jsonb) from public, anon;
+grant execute on function ad.health_guide_save(jsonb) to authenticated;

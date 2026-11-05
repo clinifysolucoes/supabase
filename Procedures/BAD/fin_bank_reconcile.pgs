@@ -1,0 +1,179 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_bank_reconcile(jsonb)                                  ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_bank_reconcile')    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Concilia uma linha do extrato do banco (tela FINANCE):
+      MATCH   (ALTERAR) liga a linha pendente a um lancamento pago ou a uma
+              transferencia da mesma conta, com o mesmo valor (com sinal)
+      CREATE  (CRIAR) cria o lancamento pago a partir da linha (receita se o
+              valor e positivo, despesa se negativo) na categoria informada,
+              na data do banco, e liga
+      IGNORE  (ALTERAR) marca a linha como ignorada (tarifa ja lancada etc.)
+      UNDO    (ALTERAR) volta a linha para pendente (o lancamento criado pelo
+              CREATE continua; cancele no financeiro se precisar)
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version      integer  obrigatorio = 1
+    nr_company      bigint   obrigatorio
+    nr_branch       bigint   obrigatorio
+    vc_action       text     obrigatorio MATCH | CREATE | IGNORE | UNDO
+    nr_line         bigint   obrigatorio
+    nr_entry        bigint   MATCH (ou nr_transfer)
+    nr_transfer     bigint   MATCH (ou nr_entry)
+    nr_category     bigint   CREATE (do tipo certo, ativa)
+    vc_description  text     CREATE (padrao o historico do banco)
+    nr_supplier     bigint   CREATE (opcional, despesa)
+
+  Output jsonb: {"nr_line", "it_status", "nr_entry", "nr_transfer"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_BANK_FORBIDDEN, FIN_BANK_ACTION_INVALID,
+    FIN_BANK_LINE_REQUIRED, FIN_BANK_LINE_NOT_FOUND, FIN_BANK_STATUS_INVALID, FIN_BANK_MATCH_INVALID,
+    FIN_BANK_CATEGORY_INVALID, FIN_ENTRY_SUPPLIER_INVALID
+*/
+create or replace function ad.fin_bank_reconcile(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _l          od.fin_bank_line%rowtype;
+  _nr         bigint;
+  _entry      bigint;
+  _transfer   bigint;
+  _kind       smallint;
+  _cat        bigint;
+  _sup        bigint;
+  _status     smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_bank_reconcile');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if _action not in ('MATCH', 'CREATE', 'IGNORE', 'UNDO') then
+    raise exception '%', ad.fn_message('FIN_BANK_ACTION_INVALID');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'CREATE' and not (_perm ->> 'id_create')::boolean)
+     or (_action <> 'CREATE' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('FIN_BANK_FORBIDDEN');
+  end if;
+
+  begin
+    _nr       := (p_json ->> 'nr_line')::bigint;
+    _entry    := (p_json ->> 'nr_entry')::bigint;
+    _transfer := (p_json ->> 'nr_transfer')::bigint;
+    _cat      := (p_json ->> 'nr_category')::bigint;
+    _sup      := (p_json ->> 'nr_supplier')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_BANK_MATCH_INVALID');
+  end;
+  if _nr is null then
+    raise exception '%', ad.fn_message('FIN_BANK_LINE_REQUIRED');
+  end if;
+  select * into _l from od.fin_bank_line l
+   where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_line = _nr
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('FIN_BANK_LINE_NOT_FOUND');
+  end if;
+  if (_action = 'UNDO' and _l.it_status = 1) or (_action <> 'UNDO' and _l.it_status <> 1) then
+    raise exception '%', ad.fn_message('FIN_BANK_STATUS_INVALID');
+  end if;
+
+  if _action = 'UNDO' then
+    update od.fin_bank_line l set it_status = 1, nr_entry = null, nr_transfer = null
+     where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_line = _nr;
+    _status := 1; _entry := null; _transfer := null;
+
+  elsif _action = 'IGNORE' then
+    update od.fin_bank_line l set it_status = 90
+     where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_line = _nr;
+    _status := 90; _entry := null; _transfer := null;
+
+  elsif _action = 'MATCH' then
+    if (_entry is null) = (_transfer is null)
+       or not exists (select 1 from od.fn_fin_bank_candidates(_nr_company, _nr_branch, _nr) c
+                       where (c.it_source = 1 and c.nr_ref = _entry) or (c.it_source = 2 and c.nr_ref = _transfer))
+       and not exists (
+         /* fora da janela de 5 dias, mas mesmo valor na mesma conta e livre */
+         select 1 from od.fin_entry e
+          where _entry is not null and e.nr_company = _nr_company and e.nr_branch = _nr_branch
+            and e.nr_entry = _entry and e.nr_account = _l.nr_account and e.it_status = 2
+            and (case when e.it_kind = 1 then e.vl_paid else -e.vl_paid end) = _l.vl_amount
+            and not exists (select 1 from od.fin_bank_line b
+                             where b.nr_company = e.nr_company and b.nr_branch = e.nr_branch and b.nr_entry = e.nr_entry)
+         union all
+         select 1 from od.fin_transfer t
+          where _transfer is not null and t.nr_company = _nr_company and t.nr_branch = _nr_branch
+            and t.nr_transfer = _transfer and t.it_status = 1
+            and _l.nr_account in (t.nr_account_from, t.nr_account_to)
+            and (case when t.nr_account_to = _l.nr_account then t.vl_amount else -t.vl_amount end) = _l.vl_amount
+            and not exists (select 1 from od.fin_bank_line b
+                             where b.nr_company = t.nr_company and b.nr_branch = t.nr_branch
+                               and b.nr_transfer = t.nr_transfer and b.nr_account = _l.nr_account)) then
+      raise exception '%', ad.fn_message('FIN_BANK_MATCH_INVALID');
+    end if;
+    update od.fin_bank_line l set it_status = 2, nr_entry = _entry, nr_transfer = _transfer
+     where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_line = _nr;
+    _status := 2;
+
+  else /* CREATE */
+    _kind := case when _l.vl_amount > 0 then 1 else 2 end;
+    if _cat is null or not exists (select 1 from od.fin_category c
+                                    where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                                      and c.nr_category = _cat and c.it_kind = _kind and c.it_status = 1) then
+      raise exception '%', ad.fn_message('FIN_BANK_CATEGORY_INVALID');
+    end if;
+    if _sup is not null and (_kind = 1 or not exists (
+         select 1 from od.fin_supplier s
+          where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_supplier = _sup and s.it_status = 1)) then
+      raise exception '%', ad.fn_message('FIN_ENTRY_SUPPLIER_INVALID');
+    end if;
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(e.nr_entry), 0) + 1 into _entry
+      from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    insert into od.fin_entry (nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, nr_supplier,
+                              vc_description, vl_amount, dt_due, dt_competence, it_payment_method, dt_paid, vl_paid,
+                              it_status, nr_installment, qt_installments, nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _entry, _kind, _cat, _l.nr_account, _sup,
+            left(coalesce(nullif(trim(p_json ->> 'vc_description'), ''), _l.vc_memo, 'Lançamento do extrato'), 140),
+            abs(_l.vl_amount), _l.dt_posted, _l.dt_posted, 5, _l.dt_posted, abs(_l.vl_amount), 2, 1, 1,
+            _nr_user, _nr_user);
+    update od.fin_bank_line l set it_status = 2, nr_entry = _entry
+     where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_line = _nr;
+    _status := 2; _transfer := null;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', case when _action = 'CREATE' then 'CREATE' else 'UPDATE' end,
+    'fin_bank_line', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Extrato bancário: linha %s %s', _nr,
+           case _action when 'MATCH' then 'conciliada' when 'CREATE' then 'lançada e conciliada'
+                        when 'IGNORE' then 'ignorada' else 'voltou para pendente' end),
+    jsonb_build_object('vc_action', _action, 'vl_amount', _l.vl_amount, 'nr_entry', _entry, 'nr_transfer', _transfer));
+
+  return jsonb_build_object('nr_line', _nr, 'it_status', _status, 'nr_entry', _entry, 'nr_transfer', _transfer);
+end;
+$$;
+
+revoke all on function ad.fin_bank_reconcile(jsonb) from public, anon;
+grant execute on function ad.fin_bank_reconcile(jsonb) to authenticated;
