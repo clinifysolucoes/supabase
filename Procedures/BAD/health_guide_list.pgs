@@ -1,0 +1,128 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.health_guide_list(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('health_guide_list')     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Guias de convenio com atendimento no periodo (ate 400 dias), por convenio e
+    situacao (open, invoiced, paid, cancelled, all), com paciente, profissional,
+    itens (procedimento, dente, quantidade, valores, glosa) e o vencimento da
+    conta a receber do faturamento; totais por situacao e de glosa.
+    Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    dt_from     date     obrigatorio
+    dt_to       date     obrigatorio
+    nr_plan     bigint   opcional
+    vc_status   text     opcional (padrao all)
+
+  Output jsonb:
+    {"guides": [{"nr_guide", "nr_plan", "vc_plan", "nr_patient", "vc_patient", "nr_professional",
+                 "vc_professional", "nr_appointment", "vc_guide_number", "vc_card_number", "dt_service",
+                 "vl_total", "it_status", "nr_entry", "dt_invoiced", "dt_due", "dt_paid", "vl_paid",
+                 "vl_denied", "vc_notes",
+                 "items": [{"nr_item", "nr_procedure", "vc_procedure", "vc_tooth", "qt_quantity", "vl_unit",
+                            "vl_total", "vl_denied"}]}],
+     "totals": {"vl_open", "vl_invoiced", "vl_paid", "vl_denied", "qt_total"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID
+*/
+create or replace function ad.health_guide_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _from       date;
+  _to         date;
+  _plan       bigint;
+  _status     text := lower(coalesce(nullif(trim(p_json ->> 'vc_status'), ''), 'all'));
+  _result     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'health_guide_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _from := (p_json ->> 'dt_from')::date;
+    _to   := (p_json ->> 'dt_to')::date;
+    _plan := (p_json ->> 'nr_plan')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _from is null or _to is null or _to < _from or _to - _from > 400
+     or _status not in ('open', 'invoiced', 'paid', 'cancelled', 'all') then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+
+  with g as (
+    select g.*
+      from od.health_guide g
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch
+       and g.dt_service between _from and _to
+       and (_plan is null or g.nr_plan = _plan)
+       and (_status = 'all'
+            or g.it_status = case _status when 'open' then 1 when 'invoiced' then 2 when 'paid' then 3 else 90 end)
+     order by g.dt_service, g.nr_guide
+     limit 1000
+  )
+  select jsonb_build_object(
+           'guides', coalesce(jsonb_agg(jsonb_build_object(
+                       'nr_guide', g.nr_guide, 'nr_plan', g.nr_plan, 'vc_plan', h.vc_name,
+                       'nr_patient', g.nr_patient, 'vc_patient', p.vc_name,
+                       'nr_professional', g.nr_professional, 'vc_professional', pr.vc_name,
+                       'nr_appointment', g.nr_appointment, 'vc_guide_number', g.vc_guide_number,
+                       'vc_card_number', g.vc_card_number, 'dt_service', g.dt_service, 'vl_total', g.vl_total,
+                       'it_status', g.it_status, 'nr_entry', g.nr_entry, 'dt_invoiced', g.dt_invoiced,
+                       'dt_due', e.dt_due, 'dt_paid', g.dt_paid, 'vl_paid', g.vl_paid,
+                       'vl_denied', g.vl_denied, 'vc_notes', g.vc_notes,
+                       'items', (select coalesce(jsonb_agg(jsonb_build_object(
+                                          'nr_item', gi.nr_item, 'nr_procedure', gi.nr_procedure,
+                                          'vc_procedure', pc.vc_name, 'vc_tooth', gi.vc_tooth,
+                                          'qt_quantity', gi.qt_quantity, 'vl_unit', gi.vl_unit,
+                                          'vl_total', gi.vl_total, 'vl_denied', gi.vl_denied)
+                                          order by gi.nr_item), '[]'::jsonb)
+                                   from od.health_guide_item gi
+                                   join od.procedure pc on pc.nr_company = gi.nr_company and pc.nr_branch = gi.nr_branch
+                                                       and pc.nr_procedure = gi.nr_procedure
+                                  where gi.nr_company = g.nr_company and gi.nr_branch = g.nr_branch
+                                    and gi.nr_guide = g.nr_guide))
+                       order by g.dt_service, g.nr_guide), '[]'::jsonb),
+           'totals', jsonb_build_object(
+                       'vl_open', coalesce(sum(g.vl_total) filter (where g.it_status = 1), 0),
+                       'vl_invoiced', coalesce(sum(g.vl_total) filter (where g.it_status = 2), 0),
+                       'vl_paid', coalesce(sum(g.vl_paid) filter (where g.it_status = 3), 0),
+                       'vl_denied', coalesce(sum(g.vl_denied) filter (where g.it_status = 3), 0),
+                       'qt_total', count(*)))
+    into _result
+    from g
+    join od.health_plan h on h.nr_company = g.nr_company and h.nr_branch = g.nr_branch and h.nr_plan = g.nr_plan
+    join od.patient p on p.nr_company = g.nr_company and p.nr_branch = g.nr_branch and p.nr_patient = g.nr_patient
+    left join od.professional pr on pr.nr_company = g.nr_company and pr.nr_branch = g.nr_branch
+                                and pr.nr_professional = g.nr_professional
+    left join od.fin_entry e on e.nr_company = g.nr_company and e.nr_branch = g.nr_branch and e.nr_entry = g.nr_entry;
+
+  return _result;
+end;
+$$;
+
+revoke all on function ad.health_guide_list(jsonb) from public, anon;
+grant execute on function ad.health_guide_list(jsonb) to authenticated;

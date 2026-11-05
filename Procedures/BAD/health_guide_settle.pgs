@@ -1,0 +1,285 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.health_guide_settle(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('health_guide_settle')   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Ciclo da guia (permissao ALTERAR na tela FINANCE), uma ou varias de uma vez
+    (nr_guides, mesmo convenio para faturar):
+      INVOICE    aberta -> faturada: gera UMA conta a receber do convenio com o
+                 total das guias (categoria "Convênios", vence na data do
+                 faturamento + prazo do convenio, conta do convenio)
+      UNINVOICE  faturada -> aberta: cancela a conta a receber (se ainda em
+                 aberto e sem outra guia paga no mesmo faturamento)
+      PAY        faturada -> paga (uma guia): data, valor pago (padrao o total)
+                 e glosa por item ([{nr_item, vl_denied}]) ou a diferenca;
+                 quando todas as guias do faturamento estao pagas, a conta a
+                 receber e baixada com a soma paga (glosa total = cancela)
+      UNPAY      paga -> faturada: desfaz a baixa da conta a receber
+      CANCEL     aberta -> cancelada
+    Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company   bigint   obrigatorio
+    nr_branch    bigint   obrigatorio
+    vc_action    text     obrigatorio INVOICE | UNINVOICE | PAY | UNPAY | CANCEL
+    nr_guide     bigint   (ou nr_guides: array) obrigatorio
+    dt_invoiced  date     INVOICE (padrao hoje no fuso da filial)
+    dt_paid      date     PAY (padrao hoje)
+    vl_paid      numeric  PAY (padrao total - glosa dos itens)
+    denials      array    PAY opcional [{nr_item, vl_denied}]
+    nr_account   bigint   PAY opcional (padrao a conta do convenio)
+
+  Output jsonb: {"qt_guides", "it_status", "nr_entry", "vl_total"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, HEALTH_GUIDE_FORBIDDEN, HEALTH_GUIDE_SETTLE_ACTION_INVALID,
+    HEALTH_GUIDE_REQUIRED, HEALTH_GUIDE_NOT_FOUND, HEALTH_GUIDE_STATUS_INVALID, HEALTH_GUIDE_PLAN_MIXED,
+    HEALTH_GUIDE_EMPTY, HEALTH_GUIDE_VALUE_INVALID, HEALTH_GUIDE_ACCOUNT_REQUIRED,
+    HEALTH_GUIDE_ENTRY_PAID, FIN_CASH_SESSION_CLOSED, FIN_BANK_RECONCILED
+*/
+create or replace function ad.health_guide_settle(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _ids        bigint[];
+  _n          integer;
+  _plan       od.health_plan%rowtype;
+  _g          od.health_guide%rowtype;
+  _tz         text;
+  _today      date;
+  _dt         date;
+  _vl         numeric;
+  _total      numeric;
+  _denied     numeric;
+  _d          jsonb;
+  _cat        bigint;
+  _entry      bigint;
+  _account    bigint;
+  _e          od.fin_entry%rowtype;
+  _paid_sum   numeric;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'health_guide_settle');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_update')::boolean then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_FORBIDDEN');
+  end if;
+  if _action not in ('INVOICE', 'UNINVOICE', 'PAY', 'UNPAY', 'CANCEL') then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_SETTLE_ACTION_INVALID');
+  end if;
+
+  begin
+    if jsonb_typeof(p_json -> 'nr_guides') = 'array' then
+      select array_agg(distinct x::bigint) into _ids from jsonb_array_elements_text(p_json -> 'nr_guides') x;
+    elsif p_json ? 'nr_guide' then
+      _ids := array[(p_json ->> 'nr_guide')::bigint];
+    end if;
+  exception when others then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_VALUE_INVALID');
+  end;
+  if _ids is null or cardinality(_ids) = 0 or (_action in ('PAY', 'UNPAY') and cardinality(_ids) > 1) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_REQUIRED');
+  end if;
+
+  perform 1 from od.health_guide g
+   where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids)
+   for update;
+  select count(*) into _n from od.health_guide g
+   where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids);
+  if _n <> cardinality(_ids) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_NOT_FOUND');
+  end if;
+  if exists (select 1 from od.health_guide g
+              where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids)
+                and g.it_status <> case _action when 'INVOICE' then 1 when 'CANCEL' then 1
+                                                when 'UNINVOICE' then 2 when 'PAY' then 2 else 3 end) then
+    raise exception '%', ad.fn_message('HEALTH_GUIDE_STATUS_INVALID');
+  end if;
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _today := (now() at time zone _tz)::date;
+
+  /* --------------------------------------------------------------------- */
+  if _action = 'CANCEL' then
+    update od.health_guide g set it_status = 90
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids);
+    _vl := 0;
+
+  elsif _action = 'INVOICE' then
+    if (select count(distinct g.nr_plan) from od.health_guide g
+         where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids)) > 1 then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_PLAN_MIXED');
+    end if;
+    select h.* into _plan from od.health_plan h
+      join od.health_guide g on g.nr_company = h.nr_company and g.nr_branch = h.nr_branch and g.nr_plan = h.nr_plan
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _ids[1];
+    select coalesce(sum(g.vl_total), 0) into _vl from od.health_guide g
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids);
+    if _vl <= 0 then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_EMPTY');
+    end if;
+    begin
+      _dt := coalesce((p_json ->> 'dt_invoiced')::date, _today);
+    exception when others then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_VALUE_INVALID');
+    end;
+    _cat := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Convênios', 1::smallint, null, _nr_user);
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(e.nr_entry), 0) + 1 into _entry
+      from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    insert into od.fin_entry (nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_account, vc_description,
+                              vl_amount, dt_due, dt_competence, it_payment_method, it_status,
+                              nr_installment, qt_installments, nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _entry, 1, _cat, _plan.nr_account,
+            left(format('%s: %s guia(s)', _plan.vc_name, cardinality(_ids)), 140),
+            _vl, _dt + _plan.qt_payment_days, _dt, 5, 1, 1, 1, _nr_user, _nr_user);
+    update od.health_guide g set it_status = 2, nr_entry = _entry, dt_invoiced = _dt
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids);
+
+  elsif _action = 'UNINVOICE' then
+    for _entry in select distinct g.nr_entry from od.health_guide g
+                   where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids) loop
+      if exists (select 1 from od.fin_entry e
+                  where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                    and e.nr_entry = _entry and e.it_status = 2)
+         or exists (select 1 from od.health_guide g
+                     where g.nr_company = _nr_company and g.nr_branch = _nr_branch
+                       and g.nr_entry = _entry and g.it_status = 3) then
+        raise exception '%', ad.fn_message('HEALTH_GUIDE_ENTRY_PAID');
+      end if;
+      update od.health_guide g set it_status = 1, nr_entry = null, dt_invoiced = null
+       where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = any (_ids)
+         and g.nr_entry = _entry;
+      select coalesce(sum(g.vl_total), 0) into _total from od.health_guide g
+       where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_entry = _entry and g.it_status = 2;
+      if _total = 0 then
+        update od.fin_entry e set it_status = 90
+         where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _entry;
+      else
+        update od.fin_entry e set vl_amount = _total
+         where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _entry;
+      end if;
+    end loop;
+    _vl := 0;
+
+  elsif _action = 'PAY' then
+    select * into _g from od.health_guide g
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _ids[1];
+    select * into _plan from od.health_plan h
+     where h.nr_company = _nr_company and h.nr_branch = _nr_branch and h.nr_plan = _g.nr_plan;
+    update od.health_guide_item gi set vl_denied = 0
+     where gi.nr_company = _nr_company and gi.nr_branch = _nr_branch and gi.nr_guide = _g.nr_guide;
+    if jsonb_typeof(p_json -> 'denials') = 'array' then
+      for _d in select * from jsonb_array_elements(p_json -> 'denials') loop
+        begin
+          update od.health_guide_item gi set vl_denied = round((_d ->> 'vl_denied')::numeric, 2)
+           where gi.nr_company = _nr_company and gi.nr_branch = _nr_branch and gi.nr_guide = _g.nr_guide
+             and gi.nr_item = (_d ->> 'nr_item')::smallint;
+          if not found then
+            raise exception 'x';
+          end if;
+        exception when others then
+          raise exception '%', ad.fn_message('HEALTH_GUIDE_VALUE_INVALID');
+        end;
+      end loop;
+    end if;
+    select coalesce(sum(gi.vl_denied), 0) into _denied from od.health_guide_item gi
+     where gi.nr_company = _nr_company and gi.nr_branch = _nr_branch and gi.nr_guide = _g.nr_guide;
+    begin
+      _dt := coalesce((p_json ->> 'dt_paid')::date, _today);
+      _vl := round(coalesce((p_json ->> 'vl_paid')::numeric, _g.vl_total - _denied), 2);
+      _account := coalesce((p_json ->> 'nr_account')::bigint, _plan.nr_account);
+    exception when others then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_VALUE_INVALID');
+    end;
+    if _vl < 0 or _vl > _g.vl_total then
+      raise exception '%', ad.fn_message('HEALTH_GUIDE_VALUE_INVALID');
+    end if;
+    update od.health_guide g set it_status = 3, dt_paid = _dt, vl_paid = _vl, vl_denied = _g.vl_total - _vl
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _g.nr_guide;
+
+    /* todas as guias do faturamento pagas: baixa a conta a receber           */
+    if not exists (select 1 from od.health_guide g
+                    where g.nr_company = _nr_company and g.nr_branch = _nr_branch
+                      and g.nr_entry = _g.nr_entry and g.it_status = 2) then
+      select coalesce(sum(g.vl_paid), 0), max(g.dt_paid) into _paid_sum, _dt from od.health_guide g
+       where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_entry = _g.nr_entry and g.it_status = 3;
+      if _paid_sum = 0 then
+        update od.fin_entry e set it_status = 90
+         where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _g.nr_entry;
+      else
+        if _account is null or not exists (
+             select 1 from od.fin_account a
+              where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _account
+                and a.it_status = 1 and a.it_type <> 4) then
+          raise exception '%', ad.fn_message('HEALTH_GUIDE_ACCOUNT_REQUIRED');
+        end if;
+        update od.fin_entry e set it_status = 2, nr_account = _account, dt_paid = _dt, vl_paid = _paid_sum,
+                                  nr_cash_session = od.fn_fin_open_session(_nr_company, _nr_branch, _account)
+         where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _g.nr_entry;
+      end if;
+    end if;
+
+  else /* UNPAY */
+    select * into _g from od.health_guide g
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _ids[1];
+    select * into _e from od.fin_entry e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _g.nr_entry;
+    if _e.it_status = 2 then
+      if exists (select 1 from od.fin_cash_session s
+                  where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                    and s.nr_session = _e.nr_cash_session and s.it_status = 2) then
+        raise exception '%', ad.fn_message('FIN_CASH_SESSION_CLOSED');
+      end if;
+      if exists (select 1 from od.fin_bank_line l
+                  where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_entry = _e.nr_entry) then
+        raise exception '%', ad.fn_message('FIN_BANK_RECONCILED');
+      end if;
+    end if;
+    update od.fin_entry e set it_status = 1, dt_paid = null, vl_paid = null, nr_cash_session = null
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = _g.nr_entry
+       and e.it_status in (2, 90);
+    update od.health_guide g set it_status = 2, dt_paid = null, vl_paid = null, vl_denied = null
+     where g.nr_company = _nr_company and g.nr_branch = _nr_branch and g.nr_guide = _g.nr_guide;
+    update od.health_guide_item gi set vl_denied = 0
+     where gi.nr_company = _nr_company and gi.nr_branch = _nr_branch and gi.nr_guide = _g.nr_guide;
+    _vl := 0;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'UPDATE', 'health_guide',
+    _nr_company::text || '/' || _nr_branch::text || '/' || array_to_string(_ids, ','),
+    format('Guia(s) %s: %s', array_to_string(_ids, ', '),
+           case _action when 'INVOICE' then 'faturada(s)' when 'UNINVOICE' then 'faturamento desfeito'
+                        when 'PAY' then 'paga' when 'UNPAY' then 'pagamento desfeito' else 'cancelada(s)' end),
+    jsonb_build_object('vc_action', _action, 'vl', _vl, 'nr_entry', _entry));
+
+  return jsonb_build_object(
+    'qt_guides', cardinality(_ids),
+    'it_status', case _action when 'INVOICE' then 2 when 'UNINVOICE' then 1 when 'PAY' then 3
+                              when 'UNPAY' then 2 else 90 end,
+    'nr_entry', coalesce(_entry, _g.nr_entry), 'vl_total', _vl);
+end;
+$$;
+
+revoke all on function ad.health_guide_settle(jsonb) from public, anon;
+grant execute on function ad.health_guide_settle(jsonb) to authenticated;

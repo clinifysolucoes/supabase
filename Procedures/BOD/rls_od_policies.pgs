@@ -137,3 +137,33 @@ drop policy if exists fin_receivable_select on od.fin_receivable;
 create policy fin_receivable_select on od.fin_receivable
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.health_plan
+drop policy if exists health_plan_select on od.health_plan;
+create policy health_plan_select on od.health_plan
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.health_plan_price
+drop policy if exists health_plan_price_select on od.health_plan_price;
+create policy health_plan_price_select on od.health_plan_price
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.health_guide
+drop policy if exists health_guide_select on od.health_guide;
+create policy health_guide_select on od.health_guide
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.health_guide_item
+drop policy if exists health_guide_item_select on od.health_guide_item;
+create policy health_guide_item_select on od.health_guide_item
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_bank_line
+drop policy if exists fin_bank_line_select on od.fin_bank_line;
+create policy fin_bank_line_select on od.fin_bank_line
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

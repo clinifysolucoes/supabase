@@ -1,0 +1,146 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_bank_import(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_bank_import')       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Importa as transacoes de um extrato bancario (o app le o arquivo OFX e
+    manda as linhas) para uma conta da filial (permissao CRIAR na tela
+    FINANCE). Cada transacao e identificada pelo FITID do banco: reimportar o
+    mesmo arquivo nao duplica. Linhas novas ficam pendentes de conciliacao; com
+    id_auto (padrao true) as que tem exatamente uma sugestao de mesmo valor e
+    mesma data ja sao conciliadas. Grava ad.event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_account  bigint   obrigatorio (conta ativa, nao a de passagem)
+    lines       array    obrigatorio 1..2000 [{vc_fitid, dt_posted, vl_amount, vc_memo}]
+    id_auto     boolean  opcional (padrao true)
+
+  Output jsonb: {"qt_new", "qt_duplicated", "qt_matched"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_BANK_FORBIDDEN, FIN_BANK_ACCOUNT_INVALID,
+    FIN_BANK_LINES_INVALID, FIN_BANK_LINE_INVALID
+*/
+create or replace function ad.fin_bank_import(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _account    bigint;
+  _auto       boolean := coalesce((p_json ->> 'id_auto')::boolean, true);
+  _l          jsonb;
+  _i          integer := 0;
+  _nr         bigint;
+  _new        integer := 0;
+  _dup        integer := 0;
+  _matched    integer := 0;
+  _fitid      text;
+  _dt         date;
+  _vl         numeric;
+  _line       bigint;
+  _c          record;
+  _qt         integer;
+  _first_new  bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_bank_import');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean then
+    raise exception '%', ad.fn_message('FIN_BANK_FORBIDDEN');
+  end if;
+  begin
+    _account := (p_json ->> 'nr_account')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_BANK_ACCOUNT_INVALID');
+  end;
+  if _account is null or not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _account
+          and a.it_status = 1 and a.it_type <> 4) then
+    raise exception '%', ad.fn_message('FIN_BANK_ACCOUNT_INVALID');
+  end if;
+  if jsonb_typeof(p_json -> 'lines') is distinct from 'array'
+     or jsonb_array_length(p_json -> 'lines') not between 1 and 2000 then
+    raise exception '%', ad.fn_message('FIN_BANK_LINES_INVALID');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select coalesce(max(l.nr_line), 0) into _nr
+    from od.fin_bank_line l where l.nr_company = _nr_company and l.nr_branch = _nr_branch;
+  _first_new := _nr + 1;
+
+  for _l in select * from jsonb_array_elements(p_json -> 'lines') loop
+    _i := _i + 1;
+    begin
+      _fitid := left(nullif(trim(_l ->> 'vc_fitid'), ''), 100);
+      _dt    := (_l ->> 'dt_posted')::date;
+      _vl    := round((_l ->> 'vl_amount')::numeric, 2);
+    exception when others then
+      raise exception '%', ad.fn_message('FIN_BANK_LINE_INVALID', jsonb_build_object('Line', _i));
+    end;
+    if _fitid is null or _dt is null or _vl is null or _vl = 0 then
+      raise exception '%', ad.fn_message('FIN_BANK_LINE_INVALID', jsonb_build_object('Line', _i));
+    end if;
+    if exists (select 1 from od.fin_bank_line l
+                where l.nr_company = _nr_company and l.nr_branch = _nr_branch
+                  and l.nr_account = _account and l.vc_fitid = _fitid) then
+      _dup := _dup + 1;
+      continue;
+    end if;
+    _nr := _nr + 1;
+    insert into od.fin_bank_line (nr_company, nr_branch, nr_line, nr_account, vc_fitid, dt_posted, vl_amount,
+                                  vc_memo, nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _account, _fitid, _dt, _vl,
+            left(nullif(trim(_l ->> 'vc_memo'), ''), 255), _nr_user, _nr_user);
+    _new := _new + 1;
+  end loop;
+
+  /* conciliacao automatica: unica sugestao, mesmo dia                        */
+  if _auto then
+    for _line in select l.nr_line from od.fin_bank_line l
+                  where l.nr_company = _nr_company and l.nr_branch = _nr_branch
+                    and l.nr_line >= _first_new and l.it_status = 1
+                  order by l.dt_posted, l.nr_line loop
+      select count(*) into _qt from od.fn_fin_bank_candidates(_nr_company, _nr_branch, _line) c where c.qt_days = 0;
+      if _qt = 1 and (select count(*) from od.fn_fin_bank_candidates(_nr_company, _nr_branch, _line)) = 1 then
+        select * into _c from od.fn_fin_bank_candidates(_nr_company, _nr_branch, _line);
+        update od.fin_bank_line l set it_status = 2,
+                                      nr_entry = case when _c.it_source = 1 then _c.nr_ref end,
+                                      nr_transfer = case when _c.it_source = 2 then _c.nr_ref end
+         where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_line = _line;
+        _matched := _matched + 1;
+      end if;
+    end loop;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'CREATE', 'fin_bank_line',
+    _nr_company::text || '/' || _nr_branch::text || '/' || _account::text,
+    format('Extrato bancário importado: %s linhas novas, %s conciliadas', _new, _matched),
+    jsonb_build_object('nr_account', _account, 'qt_new', _new, 'qt_duplicated', _dup, 'qt_matched', _matched));
+
+  return jsonb_build_object('qt_new', _new, 'qt_duplicated', _dup, 'qt_matched', _matched);
+end;
+$$;
+
+revoke all on function ad.fin_bank_import(jsonb) from public, anon;
+grant execute on function ad.fin_bank_import(jsonb) to authenticated;

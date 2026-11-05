@@ -97,3 +97,23 @@ create or replace trigger fin_card_rate_audit
 create or replace trigger fin_receivable_audit
   before insert or update on od.fin_receivable
   for each row execute function ad.trg_audit();
+
+create or replace trigger health_plan_audit
+  before insert or update on od.health_plan
+  for each row execute function ad.trg_audit();
+
+create or replace trigger health_plan_price_audit
+  before insert or update on od.health_plan_price
+  for each row execute function ad.trg_audit();
+
+create or replace trigger health_guide_audit
+  before insert or update on od.health_guide
+  for each row execute function ad.trg_audit();
+
+create or replace trigger health_guide_item_audit
+  before insert or update on od.health_guide_item
+  for each row execute function ad.trg_audit();
+
+create or replace trigger fin_bank_line_audit
+  before insert or update on od.fin_bank_line
+  for each row execute function ad.trg_audit();

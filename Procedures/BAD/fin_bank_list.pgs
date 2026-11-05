@@ -1,0 +1,135 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_bank_list(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('fin_bank_list')         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Conciliacao de uma conta num periodo (ate 400 dias): as linhas importadas
+    do banco (pendentes com ate 5 sugestoes, conciliadas com o lancamento ou a
+    transferencia, ignoradas) e os movimentos do sistema na conta que ainda nao
+    apareceram no banco. Totais: banco, conciliado, pendente. Exige permissao
+    de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_account  bigint   obrigatorio
+    dt_from     date     obrigatorio
+    dt_to       date     obrigatorio
+
+  Output jsonb:
+    {"lines": [{"nr_line", "vc_fitid", "dt_posted", "vl_amount", "vc_memo", "it_status", "nr_entry",
+                "nr_transfer", "vc_matched",
+                "candidates": [{"it_source", "nr_ref", "dt_ref", "vl_value", "vc_description", "qt_days"}]}],
+     "unmatched": [{"it_source", "nr_ref", "dt_ref", "vl_value", "vc_description"}],
+     "totals": {"vl_bank", "qt_pending", "qt_matched", "qt_ignored", "vl_system_unmatched"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_LIST_FILTER_INVALID,
+    FIN_BANK_ACCOUNT_INVALID
+*/
+create or replace function ad.fin_bank_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _account    bigint;
+  _from       date;
+  _to         date;
+  _lines      jsonb;
+  _unmatched  jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_bank_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if not (ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _account := (p_json ->> 'nr_account')::bigint;
+    _from    := (p_json ->> 'dt_from')::date;
+    _to      := (p_json ->> 'dt_to')::date;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end;
+  if _from is null or _to is null or _to < _from or _to - _from > 400 then
+    raise exception '%', ad.fn_message('FIN_LIST_FILTER_INVALID');
+  end if;
+  if _account is null or not exists (select 1 from od.fin_account a
+                                      where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+                                        and a.nr_account = _account) then
+    raise exception '%', ad.fn_message('FIN_BANK_ACCOUNT_INVALID');
+  end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'nr_line', l.nr_line, 'vc_fitid', l.vc_fitid, 'dt_posted', l.dt_posted, 'vl_amount', l.vl_amount,
+           'vc_memo', l.vc_memo, 'it_status', l.it_status, 'nr_entry', l.nr_entry, 'nr_transfer', l.nr_transfer,
+           'vc_matched', coalesce(e.vc_description, t.vc_description),
+           'candidates', case when l.it_status = 1 then
+                           (select coalesce(jsonb_agg(to_jsonb(c)), '[]'::jsonb)
+                              from od.fn_fin_bank_candidates(_nr_company, _nr_branch, l.nr_line) c)
+                         else '[]'::jsonb end)
+           order by l.dt_posted, l.nr_line), '[]'::jsonb)
+    into _lines
+    from od.fin_bank_line l
+    left join od.fin_entry e on e.nr_company = l.nr_company and e.nr_branch = l.nr_branch and e.nr_entry = l.nr_entry
+    left join od.fin_transfer t on t.nr_company = l.nr_company and t.nr_branch = l.nr_branch
+                               and t.nr_transfer = l.nr_transfer
+   where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_account = _account
+     and l.dt_posted between _from and _to;
+
+  select coalesce(jsonb_agg(to_jsonb(u) order by u.dt_ref, u.nr_ref), '[]'::jsonb)
+    into _unmatched
+    from (
+      select 1::smallint as it_source, e.nr_entry as nr_ref, e.dt_paid as dt_ref,
+             case when e.it_kind = 1 then e.vl_paid else -e.vl_paid end as vl_value,
+             e.vc_description::text as vc_description
+        from od.fin_entry e
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_account = _account
+         and e.it_status = 2 and e.dt_paid between _from and _to
+         and not exists (select 1 from od.fin_bank_line b
+                          where b.nr_company = e.nr_company and b.nr_branch = e.nr_branch and b.nr_entry = e.nr_entry)
+      union all
+      select 2::smallint, t.nr_transfer, t.dt_transfer,
+             case when t.nr_account_to = _account then t.vl_amount else -t.vl_amount end,
+             coalesce(t.vc_description, 'Transferência')::text
+        from od.fin_transfer t
+       where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.it_status = 1
+         and _account in (t.nr_account_from, t.nr_account_to) and t.dt_transfer between _from and _to
+         and not exists (select 1 from od.fin_bank_line b
+                          where b.nr_company = t.nr_company and b.nr_branch = t.nr_branch
+                            and b.nr_transfer = t.nr_transfer and b.nr_account = _account)
+      limit 1000
+    ) u;
+
+  return jsonb_build_object(
+    'lines', _lines,
+    'unmatched', _unmatched,
+    'totals', jsonb_build_object(
+      'vl_bank', (select coalesce(sum(l.vl_amount), 0) from od.fin_bank_line l
+                   where l.nr_company = _nr_company and l.nr_branch = _nr_branch and l.nr_account = _account
+                     and l.dt_posted between _from and _to and l.it_status <> 90),
+      'qt_pending', (select count(*) from jsonb_array_elements(_lines) x where (x ->> 'it_status')::int = 1),
+      'qt_matched', (select count(*) from jsonb_array_elements(_lines) x where (x ->> 'it_status')::int = 2),
+      'qt_ignored', (select count(*) from jsonb_array_elements(_lines) x where (x ->> 'it_status')::int = 90),
+      'vl_system_unmatched', (select coalesce(sum((x ->> 'vl_value')::numeric), 0)
+                                from jsonb_array_elements(_unmatched) x)));
+end;
+$$;
+
+revoke all on function ad.fin_bank_list(jsonb) from public, anon;
+grant execute on function ad.fin_bank_list(jsonb) to authenticated;

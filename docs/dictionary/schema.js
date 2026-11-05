@@ -9,7 +9,7 @@ window.DICTIONARY = {
     "od": "OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)",
     "private": "helpers de RLS, fora da API"
   },
-  "updated": "2026-11-04",
+  "updated": "2026-11-05",
   "prefixes": {
     "nr_": "Numérico / identificador (bigint, smallint)",
     "vc_": "Texto (varchar, text)",
@@ -3257,6 +3257,562 @@ window.DICTIONARY = {
     },
     {
       "schema": "od",
+      "name": "health_plan",
+      "title": "Convênio",
+      "description": "Convênio odontológico atendido pela filial: nome, registro ANS, CNPJ, prazo de repasse em dias e a conta onde o repasse cai. nr_plan é sequencial por filial.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_plan_save (permissão na tela FINANCE).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_plan",
+          "type": "bigint",
+          "pk": 3,
+          "nullable": false,
+          "description": "Número sequencial do convênio na filial."
+        },
+        {
+          "name": "vc_name",
+          "type": "varchar(80)",
+          "nullable": false,
+          "description": "Nome (único na filial)."
+        },
+        {
+          "name": "vc_ans",
+          "type": "varchar(10)",
+          "nullable": true,
+          "description": "Registro ANS da operadora (6 dígitos)."
+        },
+        {
+          "name": "vc_document",
+          "type": "varchar(14)",
+          "nullable": true,
+          "description": "CNPJ da operadora (só dígitos)."
+        },
+        {
+          "name": "qt_payment_days",
+          "type": "smallint",
+          "nullable": false,
+          "default": "30",
+          "description": "Prazo de repasse em dias depois do faturamento."
+        },
+        {
+          "name": "nr_account",
+          "type": "bigint",
+          "fk": "fin_account.nr_account",
+          "nullable": true,
+          "description": "Conta onde o repasse cai."
+        },
+        {
+          "name": "vc_notes",
+          "type": "varchar(500)",
+          "nullable": true,
+          "description": "Observações (regras de envio, contato)."
+        },
+        {
+          "name": "it_status",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Situação.",
+          "values": {
+            "1": "Ativo",
+            "90": "Inativo"
+          }
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "health_plan_price",
+      "title": "Tabela de preço do convênio",
+      "description": "Valor que o convênio paga por procedimento (e o código da tabela do convênio). Preenche o valor dos itens da guia.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_plan_save (permissão na tela FINANCE).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_plan",
+          "type": "bigint",
+          "pk": 3,
+          "fk": "health_plan.nr_plan",
+          "nullable": false,
+          "description": "Convênio."
+        },
+        {
+          "name": "nr_procedure",
+          "type": "bigint",
+          "pk": 4,
+          "fk": "procedure.nr_procedure",
+          "nullable": false,
+          "description": "Procedimento."
+        },
+        {
+          "name": "vc_code",
+          "type": "varchar(20)",
+          "nullable": true,
+          "description": "Código do procedimento na tabela do convênio."
+        },
+        {
+          "name": "vl_price",
+          "type": "numeric(12,2)",
+          "nullable": false,
+          "description": "Valor pago pelo convênio (R$)."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "health_guide",
+      "title": "Guia de convênio",
+      "description": "Guia de atendimento por convênio: paciente, profissional, carteirinha, número da guia, data, total dos itens e o ciclo aberta → faturada (gera a conta a receber do convênio) → paga (valor pago e glosa). nr_guide é sequencial por filial.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_guide_save e health_guide_settle (permissão na tela FINANCE).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_guide",
+          "type": "bigint",
+          "pk": 3,
+          "nullable": false,
+          "description": "Número sequencial da guia na filial."
+        },
+        {
+          "name": "nr_plan",
+          "type": "bigint",
+          "fk": "health_plan.nr_plan",
+          "nullable": false,
+          "description": "Convênio."
+        },
+        {
+          "name": "nr_patient",
+          "type": "bigint",
+          "fk": "patient.nr_patient",
+          "nullable": false,
+          "description": "Paciente."
+        },
+        {
+          "name": "nr_professional",
+          "type": "bigint",
+          "fk": "professional.nr_professional",
+          "nullable": true,
+          "description": "Profissional que atendeu."
+        },
+        {
+          "name": "nr_appointment",
+          "type": "bigint",
+          "fk": "appointment.nr_appointment",
+          "nullable": true,
+          "description": "Atendimento da agenda (do mesmo paciente)."
+        },
+        {
+          "name": "vc_guide_number",
+          "type": "varchar(30)",
+          "nullable": true,
+          "description": "Número da guia no convênio."
+        },
+        {
+          "name": "vc_card_number",
+          "type": "varchar(30)",
+          "nullable": true,
+          "description": "Número da carteirinha do paciente."
+        },
+        {
+          "name": "dt_service",
+          "type": "date",
+          "nullable": false,
+          "description": "Data do atendimento."
+        },
+        {
+          "name": "vl_total",
+          "type": "numeric(14,2)",
+          "nullable": false,
+          "default": "0",
+          "description": "Total dos itens."
+        },
+        {
+          "name": "it_status",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Situação.",
+          "values": {
+            "1": "Aberta (a faturar)",
+            "2": "Faturada",
+            "3": "Paga",
+            "90": "Cancelada"
+          }
+        },
+        {
+          "name": "nr_entry",
+          "type": "bigint",
+          "fk": "fin_entry.nr_entry",
+          "nullable": true,
+          "description": "Conta a receber do faturamento (várias guias podem compartilhar)."
+        },
+        {
+          "name": "dt_invoiced",
+          "type": "date",
+          "nullable": true,
+          "description": "Data do faturamento."
+        },
+        {
+          "name": "dt_paid",
+          "type": "date",
+          "nullable": true,
+          "description": "Data do pagamento (só paga)."
+        },
+        {
+          "name": "vl_paid",
+          "type": "numeric(14,2)",
+          "nullable": true,
+          "description": "Valor pago pelo convênio (só paga)."
+        },
+        {
+          "name": "vl_denied",
+          "type": "numeric(14,2)",
+          "nullable": true,
+          "description": "Glosa: total − pago (só paga)."
+        },
+        {
+          "name": "vc_notes",
+          "type": "varchar(500)",
+          "nullable": true,
+          "description": "Observações."
+        },
+        {
+          "name": "nr_user_created",
+          "type": "bigint",
+          "fk": "app_user.nr_user",
+          "nullable": true,
+          "description": "Quem lançou."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "health_guide_item",
+      "title": "Item da guia",
+      "description": "Procedimento da guia: dente/região, quantidade, valor unitário (da tabela do convênio ou informado), total e glosa do item.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_guide_save e health_guide_settle (permissão na tela FINANCE).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_guide",
+          "type": "bigint",
+          "pk": 3,
+          "fk": "health_guide.nr_guide",
+          "nullable": false,
+          "description": "Guia."
+        },
+        {
+          "name": "nr_item",
+          "type": "smallint",
+          "pk": 4,
+          "nullable": false,
+          "description": "Número do item na guia."
+        },
+        {
+          "name": "nr_procedure",
+          "type": "bigint",
+          "fk": "procedure.nr_procedure",
+          "nullable": false,
+          "description": "Procedimento."
+        },
+        {
+          "name": "vc_tooth",
+          "type": "varchar(10)",
+          "nullable": true,
+          "description": "Dente ou região."
+        },
+        {
+          "name": "qt_quantity",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Quantidade (1 a 99)."
+        },
+        {
+          "name": "vl_unit",
+          "type": "numeric(12,2)",
+          "nullable": false,
+          "description": "Valor unitário."
+        },
+        {
+          "name": "vl_total",
+          "type": "numeric(14,2)",
+          "nullable": false,
+          "description": "Valor unitário × quantidade."
+        },
+        {
+          "name": "vl_denied",
+          "type": "numeric(14,2)",
+          "nullable": false,
+          "default": "0",
+          "description": "Glosa do item."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "fin_bank_line",
+      "title": "Linha do extrato bancário",
+      "description": "Transação importada do arquivo OFX do banco para uma conta: id do banco (FITID, único por conta), data, valor com sinal e histórico; conciliada com um lançamento pago ou uma transferência da conta, ou ignorada. nr_line é sequencial por filial.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_bank_import e fin_bank_reconcile (permissão na tela FINANCE).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_line",
+          "type": "bigint",
+          "pk": 3,
+          "nullable": false,
+          "description": "Número sequencial da linha na filial."
+        },
+        {
+          "name": "nr_account",
+          "type": "bigint",
+          "fk": "fin_account.nr_account",
+          "nullable": false,
+          "description": "Conta do extrato."
+        },
+        {
+          "name": "vc_fitid",
+          "type": "varchar(100)",
+          "nullable": false,
+          "description": "Id da transação no banco (FITID do OFX); reimportar não duplica."
+        },
+        {
+          "name": "dt_posted",
+          "type": "date",
+          "nullable": false,
+          "description": "Data do lançamento no banco."
+        },
+        {
+          "name": "vl_amount",
+          "type": "numeric(14,2)",
+          "nullable": false,
+          "description": "Valor com sinal (entrada +, saída −)."
+        },
+        {
+          "name": "vc_memo",
+          "type": "varchar(255)",
+          "nullable": true,
+          "description": "Histórico do banco."
+        },
+        {
+          "name": "it_status",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Situação.",
+          "values": {
+            "1": "Pendente",
+            "2": "Conciliada",
+            "90": "Ignorada"
+          }
+        },
+        {
+          "name": "nr_entry",
+          "type": "bigint",
+          "fk": "fin_entry.nr_entry",
+          "nullable": true,
+          "description": "Lançamento conciliado."
+        },
+        {
+          "name": "nr_transfer",
+          "type": "bigint",
+          "fk": "fin_transfer.nr_transfer",
+          "nullable": true,
+          "description": "Transferência conciliada."
+        },
+        {
+          "name": "nr_user_created",
+          "type": "bigint",
+          "fk": "app_user.nr_user",
+          "nullable": true,
+          "description": "Quem importou."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
       "name": "patient",
       "title": "Paciente",
       "description": "Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial.",
@@ -3946,6 +4502,60 @@ window.DICTIONARY = {
       "to": "fin_receivable",
       "card": "|o--o|",
       "label": "confirma"
+    },
+    {
+      "from": "branch",
+      "to": "health_plan",
+      "card": "||--o{",
+      "label": "convênios"
+    },
+    {
+      "from": "health_plan",
+      "to": "health_plan_price",
+      "card": "||--o{",
+      "label": "tabela de preço"
+    },
+    {
+      "from": "procedure",
+      "to": "health_plan_price",
+      "card": "||--o{",
+      "label": "preço no convênio"
+    },
+    {
+      "from": "health_plan",
+      "to": "health_guide",
+      "card": "||--o{",
+      "label": "guias"
+    },
+    {
+      "from": "patient",
+      "to": "health_guide",
+      "card": "||--o{",
+      "label": "atendido por convênio"
+    },
+    {
+      "from": "health_guide",
+      "to": "health_guide_item",
+      "card": "||--|{",
+      "label": "procedimentos"
+    },
+    {
+      "from": "fin_entry",
+      "to": "health_guide",
+      "card": "|o--o{",
+      "label": "faturamento"
+    },
+    {
+      "from": "fin_account",
+      "to": "fin_bank_line",
+      "card": "||--o{",
+      "label": "extrato do banco"
+    },
+    {
+      "from": "fin_entry",
+      "to": "fin_bank_line",
+      "card": "|o--o|",
+      "label": "concilia"
     },
     {
       "from": "fin_account",
@@ -4722,7 +5332,8 @@ window.DICTIONARY = {
         "FIN_ENTRY_AMOUNT_INVALID",
         "FIN_ENTRY_METHOD_INVALID",
         "FIN_CASH_SESSION_CLOSED",
-        "FIN_RECEIVABLE_CONFIRMED"
+        "FIN_RECEIVABLE_CONFIRMED",
+        "FIN_BANK_RECONCILED"
       ]
     },
     {
@@ -4884,7 +5495,8 @@ window.DICTIONARY = {
         "FIN_TRANSFER_REQUIRED",
         "FIN_TRANSFER_NOT_FOUND",
         "FIN_TRANSFER_STATUS_INVALID",
-        "FIN_CASH_SESSION_CLOSED"
+        "FIN_CASH_SESSION_CLOSED",
+        "FIN_BANK_RECONCILED"
       ]
     },
     {
@@ -4977,6 +5589,159 @@ window.DICTIONARY = {
       "description": "Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada."
     },
     {
+      "name": "health_plan_save",
+      "signature": "ad.health_plan_save(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Cria (I, criar) ou altera parcialmente (U, alterar) um convênio: nome, ANS, CNPJ, prazo de repasse, conta e situação; com prices substitui a tabela de preço por procedimento. Grava event_log.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "HEALTH_PLAN_ACTION_INVALID",
+        "FINANCE_BRANCH_REQUIRED",
+        "HEALTH_PLAN_FORBIDDEN",
+        "HEALTH_PLAN_REQUIRED",
+        "HEALTH_PLAN_NOT_FOUND",
+        "HEALTH_PLAN_VALUE_INVALID",
+        "HEALTH_PLAN_NAME_REQUIRED",
+        "HEALTH_PLAN_NAME_IN_USE",
+        "HEALTH_PLAN_ANS_INVALID",
+        "HEALTH_PLAN_DOCUMENT_INVALID",
+        "HEALTH_PLAN_DAYS_INVALID",
+        "HEALTH_PLAN_ACCOUNT_INVALID",
+        "HEALTH_PLAN_STATUS_INVALID",
+        "HEALTH_PLAN_PRICES_INVALID",
+        "HEALTH_PLAN_PRICE_INVALID"
+      ]
+    },
+    {
+      "name": "health_plan_list",
+      "signature": "ad.health_plan_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Convênios da filial com a tabela de preço (e o valor particular para comparar), conta do repasse e guias abertas e faturadas, mais os procedimentos e profissionais ativos para os formulários. Exige leitura na tela FINANCE.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "FINANCE_BRANCH_REQUIRED",
+        "FINANCE_FORBIDDEN"
+      ]
+    },
+    {
+      "name": "health_guide_save",
+      "signature": "ad.health_guide_save(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Cria (I, criar) ou altera parcialmente (U, alterar) uma guia aberta: convênio, paciente, profissional, atendimento, números, data e itens (valor da tabela do convênio quando não informado). Grava event_log sem dados pessoais.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "HEALTH_GUIDE_ACTION_INVALID",
+        "FINANCE_BRANCH_REQUIRED",
+        "HEALTH_GUIDE_FORBIDDEN",
+        "HEALTH_GUIDE_REQUIRED",
+        "HEALTH_GUIDE_NOT_FOUND",
+        "HEALTH_GUIDE_LOCKED",
+        "HEALTH_GUIDE_VALUE_INVALID",
+        "HEALTH_GUIDE_PLAN_INVALID",
+        "HEALTH_GUIDE_PATIENT_INVALID",
+        "HEALTH_GUIDE_PROFESSIONAL_INVALID",
+        "HEALTH_GUIDE_APPOINTMENT_INVALID",
+        "HEALTH_GUIDE_DATE_REQUIRED",
+        "HEALTH_GUIDE_ITEMS_REQUIRED",
+        "HEALTH_GUIDE_ITEM_INVALID",
+        "HEALTH_GUIDE_PRICE_REQUIRED"
+      ]
+    },
+    {
+      "name": "health_guide_settle",
+      "signature": "ad.health_guide_settle(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Ciclo das guias (alterar na tela FINANCE): INVOICE fatura uma ou várias do mesmo convênio numa conta a receber (categoria Convênios, vence no prazo do convênio), UNINVOICE desfaz, PAY registra o pago e a glosa por item (com todas as guias do faturamento pagas, baixa a conta; glosa total cancela), UNPAY desfaz e CANCEL cancela a aberta. Grava event_log.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "FINANCE_BRANCH_REQUIRED",
+        "HEALTH_GUIDE_FORBIDDEN",
+        "HEALTH_GUIDE_SETTLE_ACTION_INVALID",
+        "HEALTH_GUIDE_REQUIRED",
+        "HEALTH_GUIDE_NOT_FOUND",
+        "HEALTH_GUIDE_STATUS_INVALID",
+        "HEALTH_GUIDE_PLAN_MIXED",
+        "HEALTH_GUIDE_EMPTY",
+        "HEALTH_GUIDE_VALUE_INVALID",
+        "HEALTH_GUIDE_ACCOUNT_REQUIRED",
+        "HEALTH_GUIDE_ENTRY_PAID",
+        "FIN_CASH_SESSION_CLOSED",
+        "FIN_BANK_RECONCILED"
+      ]
+    },
+    {
+      "name": "health_guide_list",
+      "signature": "ad.health_guide_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Guias com atendimento no período (até 400 dias) por convênio e situação, com paciente, profissional, itens, vencimento do faturamento, pago e glosa, e os totais. Exige leitura na tela FINANCE.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "FINANCE_BRANCH_REQUIRED",
+        "FINANCE_FORBIDDEN",
+        "FIN_LIST_FILTER_INVALID"
+      ]
+    },
+    {
+      "name": "fin_bank_import",
+      "signature": "ad.fin_bank_import(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Importa as linhas do extrato do banco (o app lê o OFX) para uma conta (criar na tela FINANCE); o FITID evita duplicar; com id_auto concilia as que têm uma única sugestão no mesmo dia. Grava event_log.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "FINANCE_BRANCH_REQUIRED",
+        "FIN_BANK_FORBIDDEN",
+        "FIN_BANK_ACCOUNT_INVALID",
+        "FIN_BANK_LINES_INVALID",
+        "FIN_BANK_LINE_INVALID"
+      ]
+    },
+    {
+      "name": "fin_bank_list",
+      "signature": "ad.fin_bank_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Conciliação de uma conta no período: linhas do banco (pendentes com sugestões, conciliadas, ignoradas), movimentos do sistema que ainda não apareceram no banco e totais. Exige leitura na tela FINANCE.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "FINANCE_BRANCH_REQUIRED",
+        "FINANCE_FORBIDDEN",
+        "FIN_LIST_FILTER_INVALID",
+        "FIN_BANK_ACCOUNT_INVALID"
+      ]
+    },
+    {
+      "name": "fin_bank_reconcile",
+      "signature": "ad.fin_bank_reconcile(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Concilia uma linha do extrato: MATCH (alterar) liga a um lançamento pago ou transferência de mesmo valor na conta, CREATE (criar) lança receita/despesa paga a partir da linha, IGNORE e UNDO (alterar). Grava event_log.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "FINANCE_BRANCH_REQUIRED",
+        "FIN_BANK_FORBIDDEN",
+        "FIN_BANK_ACTION_INVALID",
+        "FIN_BANK_LINE_REQUIRED",
+        "FIN_BANK_LINE_NOT_FOUND",
+        "FIN_BANK_STATUS_INVALID",
+        "FIN_BANK_MATCH_INVALID",
+        "FIN_BANK_CATEGORY_INVALID",
+        "FIN_ENTRY_SUPPLIER_INVALID"
+      ]
+    },
+    {
+      "name": "fn_fin_bank_candidates",
+      "signature": "od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados."
+    },
+    {
       "name": "fn_pricing_calc",
       "signature": "od.fn_pricing_calc(p_json jsonb)",
       "kind": "helper",
@@ -5067,5 +5832,5 @@ window.DICTIONARY = {
       ]
     }
   ],
-  "mermaid": "erDiagram\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  branch ||--o| pricing_param : \"parâmetros de preço\"\n  branch ||--o{ clinic_expense : \"despesas\"\n  branch ||--o{ pricing_fee : \"taxas adicionais\"\n  branch ||--o{ material : \"materiais\"\n  branch ||--o{ specialty : \"especialidades\"\n  specialty |o--o{ procedure : \"agrupa procedimentos\"\n  branch ||--o{ procedure : \"procedimentos\"\n  procedure ||--o{ procedure_material : \"usa materiais\"\n  material ||--o{ procedure_material : \"usado em\"\n  branch ||--o{ patient : \"pacientes\"\n  branch ||--o{ professional : \"profissionais\"\n  professional ||--o{ professional_schedule : \"horário de atendimento\"\n  app_user |o--o{ professional : \"é o profissional\"\n  branch ||--o{ fin_account : \"contas\"\n  branch ||--o{ fin_category : \"plano de contas\"\n  branch ||--o{ fin_supplier : \"fornecedores\"\n  fin_category ||--o{ fin_entry : \"classifica\"\n  fin_account |o--o{ fin_entry : \"movimenta\"\n  fin_supplier |o--o{ fin_entry : \"cobra\"\n  fin_account ||--o{ fin_cash_session : \"caixa do dia\"\n  fin_cash_session |o--o{ fin_entry : \"recebe no caixa\"\n  fin_account ||--o{ fin_card_rate : \"recebe da taxa\"\n  fin_entry ||--o{ fin_receivable : \"gera recebíveis\"\n  fin_card_rate |o--o{ fin_receivable : \"aplica\"\n  fin_transfer |o--o| fin_receivable : \"confirma\"\n  fin_account ||--o{ fin_transfer : \"transfere\"\n  fin_cash_session |o--o{ fin_transfer : \"sangria / suprimento\"\n  appointment |o--o{ fin_entry : \"fecha o atendimento\"\n  professional |o--o{ fin_entry : \"comissão\"\n  patient |o--o{ fin_entry : \"paga\"\n  branch ||--o{ appointment : \"agenda\"\n  patient |o--o{ appointment : \"consultas\"\n  professional |o--o{ appointment : \"atende\"\n  procedure |o--o{ appointment : \"previsto em\"\n  patient ||--o{ patient_note : \"notas\"\n  app_user ||--o{ patient_note : \"autor\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }\n  pricing_param {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_rooms\n    numeric qt_hours_week\n    numeric qt_weeks_month\n    numeric pc_occupancy\n    numeric vl_professional_hour\n    numeric pc_card\n    numeric pc_commission\n    smallint it_tax_regime\n    numeric pc_tax_pf\n    numeric pc_tax_pj\n    numeric pc_profit\n    numeric vl_structure_hour_manual\n  }\n  clinic_expense {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_expense PK\n    varchar vc_name\n    smallint it_type\n    numeric vl_amount\n    smallint it_status\n  }\n  pricing_fee {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_fee PK\n    varchar vc_name\n    varchar vc_hint\n    numeric pc_rate\n    boolean id_active\n  }\n  material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK\n    varchar vc_name UK\n    varchar vc_package\n    numeric vl_package_price\n    numeric qt_yield\n    varchar vc_unit\n    numeric pc_waste\n    smallint it_price_source\n    varchar vc_price_source\n    timestamptz dh_price_updated\n    smallint it_status\n  }\n  specialty {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_specialty PK\n    varchar vc_name UK\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_template {\n    bigint nr_template PK\n    varchar vc_specialty UK\n    varchar vc_code\n    varchar vc_name UK\n    numeric qt_minutes\n    numeric vl_material_other\n    numeric vl_lab_cost\n    numeric vl_reference_price\n    integer nr_order\n    smallint it_status\n  }\n  procedure {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK\n    varchar vc_code UK\n    varchar vc_name UK\n    bigint nr_specialty FK\n    numeric qt_minutes\n    numeric vl_lab_cost\n    numeric vl_material_other\n    numeric vl_current_price\n    numeric pc_commission\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK, FK\n    bigint nr_material PK, FK\n    numeric qt_used\n  }\n  professional {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK\n    varchar vc_name UK\n    varchar vc_council\n    varchar vc_color\n    smallint qt_slot_minutes\n    bigint nr_user FK, UK\n    smallint it_status\n  }\n  professional_schedule {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK, FK\n    bigint nr_schedule PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  appointment {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_appointment PK\n    smallint it_type\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_procedure FK\n    varchar vc_title\n    text vc_notes\n    timestamptz dh_start\n    timestamptz dh_end\n    boolean id_all_day\n    boolean id_fit_in\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_account {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_account PK\n    varchar vc_name UK\n    smallint it_type\n    numeric vl_opening\n    smallint it_status\n  }\n  fin_category {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_category PK\n    varchar vc_name UK\n    smallint it_kind\n    smallint it_cost_type\n    smallint it_status\n  }\n  fin_supplier {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_supplier PK\n    varchar vc_name UK\n    varchar vc_document\n    varchar vc_phone\n    varchar vc_email\n    varchar vc_notes\n    smallint it_status\n  }\n  fin_entry {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_entry PK\n    smallint it_kind\n    bigint nr_category FK\n    bigint nr_account FK\n    bigint nr_supplier FK\n    bigint nr_patient FK\n    varchar vc_description\n    numeric vl_amount\n    date dt_due\n    date dt_competence\n    smallint it_payment_method\n    date dt_paid\n    numeric vl_paid\n    smallint it_status\n    uuid uu_group\n    smallint nr_installment\n    smallint qt_installments\n    boolean id_recurring\n    varchar vc_notes\n    bigint nr_user_created FK\n    bigint nr_appointment FK\n    bigint nr_professional FK\n    bigint nr_cash_session FK\n  }\n  fin_cash_session {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_session PK\n    bigint nr_account FK\n    bigint nr_user FK\n    timestamptz dh_open\n    numeric vl_open\n    timestamptz dh_close\n    numeric vl_counted\n    numeric vl_expected\n    smallint it_status\n    varchar vc_notes\n    bigint nr_user_closed FK\n  }\n  fin_transfer {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_transfer PK\n    smallint it_type\n    bigint nr_account_from FK\n    bigint nr_account_to FK\n    numeric vl_amount\n    date dt_transfer\n    varchar vc_description\n    bigint nr_cash_session FK\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_card_rate {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_rate PK\n    varchar vc_name\n    smallint it_payment_method\n    smallint qt_installments_min\n    smallint qt_installments_max\n    numeric pc_fee\n    numeric vl_fee_fixed\n    smallint qt_days\n    bigint nr_account FK\n    smallint it_status\n  }\n  fin_receivable {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_receivable PK\n    bigint nr_entry FK\n    bigint nr_rate FK\n    smallint it_payment_method\n    smallint nr_installment\n    smallint qt_installments\n    numeric vl_gross\n    numeric vl_fee\n    numeric vl_net\n    date dt_expected\n    bigint nr_account FK\n    smallint it_status\n    date dt_received\n    numeric vl_received\n    bigint nr_transfer FK\n    bigint nr_fee_entry FK\n    varchar vc_reference\n    bigint nr_user_created FK\n  }\n  patient {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK\n    varchar vc_name\n    varchar vc_nickname\n    varchar vc_cpf UK\n    varchar vc_rg\n    date dt_birth\n    smallint it_gender\n    smallint it_marital_status\n    smallint it_education\n    smallint it_source\n    varchar vc_referral\n    text vc_notes\n    varchar vc_phone\n    varchar vc_mobile\n    varchar vc_phone_other\n    varchar vc_contact_name\n    varchar vc_email\n    boolean id_no_email\n    varchar vc_zip\n    varchar vc_state\n    varchar vc_city\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_district\n    varchar vc_address_complement\n    varchar vc_record_number\n    varchar vc_profession\n    varchar vc_workplace\n    varchar vc_work_time\n    varchar vc_plan_name\n    varchar vc_plan_number\n    varchar vc_father_name\n    varchar vc_father_cpf\n    varchar vc_father_rg\n    varchar vc_father_profession\n    varchar vc_mother_name\n    varchar vc_mother_cpf\n    varchar vc_mother_rg\n    varchar vc_mother_profession\n    varchar vc_guardian_name\n    varchar vc_guardian_cpf\n    varchar vc_guardian_rg\n    varchar vc_guardian_phone\n    date dt_return_alert\n    varchar vc_return_alert\n    smallint it_status\n  }\n  patient_note {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_note PK\n    text vc_note\n    bigint nr_user FK\n    timestamptz dh_note\n    smallint it_status\n  }"
+  "mermaid": "erDiagram\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  branch ||--o| pricing_param : \"parâmetros de preço\"\n  branch ||--o{ clinic_expense : \"despesas\"\n  branch ||--o{ pricing_fee : \"taxas adicionais\"\n  branch ||--o{ material : \"materiais\"\n  branch ||--o{ specialty : \"especialidades\"\n  specialty |o--o{ procedure : \"agrupa procedimentos\"\n  branch ||--o{ procedure : \"procedimentos\"\n  procedure ||--o{ procedure_material : \"usa materiais\"\n  material ||--o{ procedure_material : \"usado em\"\n  branch ||--o{ patient : \"pacientes\"\n  branch ||--o{ professional : \"profissionais\"\n  professional ||--o{ professional_schedule : \"horário de atendimento\"\n  app_user |o--o{ professional : \"é o profissional\"\n  branch ||--o{ fin_account : \"contas\"\n  branch ||--o{ fin_category : \"plano de contas\"\n  branch ||--o{ fin_supplier : \"fornecedores\"\n  fin_category ||--o{ fin_entry : \"classifica\"\n  fin_account |o--o{ fin_entry : \"movimenta\"\n  fin_supplier |o--o{ fin_entry : \"cobra\"\n  fin_account ||--o{ fin_cash_session : \"caixa do dia\"\n  fin_cash_session |o--o{ fin_entry : \"recebe no caixa\"\n  fin_account ||--o{ fin_card_rate : \"recebe da taxa\"\n  fin_entry ||--o{ fin_receivable : \"gera recebíveis\"\n  fin_card_rate |o--o{ fin_receivable : \"aplica\"\n  fin_transfer |o--o| fin_receivable : \"confirma\"\n  branch ||--o{ health_plan : \"convênios\"\n  health_plan ||--o{ health_plan_price : \"tabela de preço\"\n  procedure ||--o{ health_plan_price : \"preço no convênio\"\n  health_plan ||--o{ health_guide : \"guias\"\n  patient ||--o{ health_guide : \"atendido por convênio\"\n  health_guide ||--|{ health_guide_item : \"procedimentos\"\n  fin_entry |o--o{ health_guide : \"faturamento\"\n  fin_account ||--o{ fin_bank_line : \"extrato do banco\"\n  fin_entry |o--o| fin_bank_line : \"concilia\"\n  fin_account ||--o{ fin_transfer : \"transfere\"\n  fin_cash_session |o--o{ fin_transfer : \"sangria / suprimento\"\n  appointment |o--o{ fin_entry : \"fecha o atendimento\"\n  professional |o--o{ fin_entry : \"comissão\"\n  patient |o--o{ fin_entry : \"paga\"\n  branch ||--o{ appointment : \"agenda\"\n  patient |o--o{ appointment : \"consultas\"\n  professional |o--o{ appointment : \"atende\"\n  procedure |o--o{ appointment : \"previsto em\"\n  patient ||--o{ patient_note : \"notas\"\n  app_user ||--o{ patient_note : \"autor\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }\n  pricing_param {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_rooms\n    numeric qt_hours_week\n    numeric qt_weeks_month\n    numeric pc_occupancy\n    numeric vl_professional_hour\n    numeric pc_card\n    numeric pc_commission\n    smallint it_tax_regime\n    numeric pc_tax_pf\n    numeric pc_tax_pj\n    numeric pc_profit\n    numeric vl_structure_hour_manual\n  }\n  clinic_expense {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_expense PK\n    varchar vc_name\n    smallint it_type\n    numeric vl_amount\n    smallint it_status\n  }\n  pricing_fee {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_fee PK\n    varchar vc_name\n    varchar vc_hint\n    numeric pc_rate\n    boolean id_active\n  }\n  material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK\n    varchar vc_name UK\n    varchar vc_package\n    numeric vl_package_price\n    numeric qt_yield\n    varchar vc_unit\n    numeric pc_waste\n    smallint it_price_source\n    varchar vc_price_source\n    timestamptz dh_price_updated\n    smallint it_status\n  }\n  specialty {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_specialty PK\n    varchar vc_name UK\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_template {\n    bigint nr_template PK\n    varchar vc_specialty UK\n    varchar vc_code\n    varchar vc_name UK\n    numeric qt_minutes\n    numeric vl_material_other\n    numeric vl_lab_cost\n    numeric vl_reference_price\n    integer nr_order\n    smallint it_status\n  }\n  procedure {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK\n    varchar vc_code UK\n    varchar vc_name UK\n    bigint nr_specialty FK\n    numeric qt_minutes\n    numeric vl_lab_cost\n    numeric vl_material_other\n    numeric vl_current_price\n    numeric pc_commission\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK, FK\n    bigint nr_material PK, FK\n    numeric qt_used\n  }\n  professional {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK\n    varchar vc_name UK\n    varchar vc_council\n    varchar vc_color\n    smallint qt_slot_minutes\n    bigint nr_user FK, UK\n    smallint it_status\n  }\n  professional_schedule {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK, FK\n    bigint nr_schedule PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  appointment {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_appointment PK\n    smallint it_type\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_procedure FK\n    varchar vc_title\n    text vc_notes\n    timestamptz dh_start\n    timestamptz dh_end\n    boolean id_all_day\n    boolean id_fit_in\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_account {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_account PK\n    varchar vc_name UK\n    smallint it_type\n    numeric vl_opening\n    smallint it_status\n  }\n  fin_category {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_category PK\n    varchar vc_name UK\n    smallint it_kind\n    smallint it_cost_type\n    smallint it_status\n  }\n  fin_supplier {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_supplier PK\n    varchar vc_name UK\n    varchar vc_document\n    varchar vc_phone\n    varchar vc_email\n    varchar vc_notes\n    smallint it_status\n  }\n  fin_entry {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_entry PK\n    smallint it_kind\n    bigint nr_category FK\n    bigint nr_account FK\n    bigint nr_supplier FK\n    bigint nr_patient FK\n    varchar vc_description\n    numeric vl_amount\n    date dt_due\n    date dt_competence\n    smallint it_payment_method\n    date dt_paid\n    numeric vl_paid\n    smallint it_status\n    uuid uu_group\n    smallint nr_installment\n    smallint qt_installments\n    boolean id_recurring\n    varchar vc_notes\n    bigint nr_user_created FK\n    bigint nr_appointment FK\n    bigint nr_professional FK\n    bigint nr_cash_session FK\n  }\n  fin_cash_session {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_session PK\n    bigint nr_account FK\n    bigint nr_user FK\n    timestamptz dh_open\n    numeric vl_open\n    timestamptz dh_close\n    numeric vl_counted\n    numeric vl_expected\n    smallint it_status\n    varchar vc_notes\n    bigint nr_user_closed FK\n  }\n  fin_transfer {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_transfer PK\n    smallint it_type\n    bigint nr_account_from FK\n    bigint nr_account_to FK\n    numeric vl_amount\n    date dt_transfer\n    varchar vc_description\n    bigint nr_cash_session FK\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_card_rate {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_rate PK\n    varchar vc_name\n    smallint it_payment_method\n    smallint qt_installments_min\n    smallint qt_installments_max\n    numeric pc_fee\n    numeric vl_fee_fixed\n    smallint qt_days\n    bigint nr_account FK\n    smallint it_status\n  }\n  fin_receivable {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_receivable PK\n    bigint nr_entry FK\n    bigint nr_rate FK\n    smallint it_payment_method\n    smallint nr_installment\n    smallint qt_installments\n    numeric vl_gross\n    numeric vl_fee\n    numeric vl_net\n    date dt_expected\n    bigint nr_account FK\n    smallint it_status\n    date dt_received\n    numeric vl_received\n    bigint nr_transfer FK\n    bigint nr_fee_entry FK\n    varchar vc_reference\n    bigint nr_user_created FK\n  }\n  health_plan {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_plan PK\n    varchar vc_name\n    varchar vc_ans\n    varchar vc_document\n    smallint qt_payment_days\n    bigint nr_account FK\n    varchar vc_notes\n    smallint it_status\n  }\n  health_plan_price {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_plan PK, FK\n    bigint nr_procedure PK, FK\n    varchar vc_code\n    numeric vl_price\n  }\n  health_guide {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_guide PK\n    bigint nr_plan FK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_appointment FK\n    varchar vc_guide_number\n    varchar vc_card_number\n    date dt_service\n    numeric vl_total\n    smallint it_status\n    bigint nr_entry FK\n    date dt_invoiced\n    date dt_paid\n    numeric vl_paid\n    numeric vl_denied\n    varchar vc_notes\n    bigint nr_user_created FK\n  }\n  health_guide_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_guide PK, FK\n    smallint nr_item PK\n    bigint nr_procedure FK\n    varchar vc_tooth\n    smallint qt_quantity\n    numeric vl_unit\n    numeric vl_total\n    numeric vl_denied\n  }\n  fin_bank_line {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_line PK\n    bigint nr_account FK\n    varchar vc_fitid\n    date dt_posted\n    numeric vl_amount\n    varchar vc_memo\n    smallint it_status\n    bigint nr_entry FK\n    bigint nr_transfer FK\n    bigint nr_user_created FK\n  }\n  patient {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK\n    varchar vc_name\n    varchar vc_nickname\n    varchar vc_cpf UK\n    varchar vc_rg\n    date dt_birth\n    smallint it_gender\n    smallint it_marital_status\n    smallint it_education\n    smallint it_source\n    varchar vc_referral\n    text vc_notes\n    varchar vc_phone\n    varchar vc_mobile\n    varchar vc_phone_other\n    varchar vc_contact_name\n    varchar vc_email\n    boolean id_no_email\n    varchar vc_zip\n    varchar vc_state\n    varchar vc_city\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_district\n    varchar vc_address_complement\n    varchar vc_record_number\n    varchar vc_profession\n    varchar vc_workplace\n    varchar vc_work_time\n    varchar vc_plan_name\n    varchar vc_plan_number\n    varchar vc_father_name\n    varchar vc_father_cpf\n    varchar vc_father_rg\n    varchar vc_father_profession\n    varchar vc_mother_name\n    varchar vc_mother_cpf\n    varchar vc_mother_rg\n    varchar vc_mother_profession\n    varchar vc_guardian_name\n    varchar vc_guardian_cpf\n    varchar vc_guardian_rg\n    varchar vc_guardian_phone\n    date dt_return_alert\n    varchar vc_return_alert\n    smallint it_status\n  }\n  patient_note {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_note PK\n    text vc_note\n    bigint nr_user FK\n    timestamptz dh_note\n    smallint it_status\n  }"
 };

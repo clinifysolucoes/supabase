@@ -1,6 +1,6 @@
 # Dicionário de dados — Supabase multi-company login
 
-> Base multi-empresa / multi-filial do futuro sistema de odontologia. Schemas: **`ad`** (AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)), **`od`** (OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)), **`private`** (helpers de RLS, fora da API). Atualizado em 2026-11-04.
+> Base multi-empresa / multi-filial do futuro sistema de odontologia. Schemas: **`ad`** (AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)), **`od`** (OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)), **`private`** (helpers de RLS, fora da API). Atualizado em 2026-11-05.
 >
 > **Gerado** por `node tools/gen-dictionary.mjs` a partir de [`docs/dictionary/schema.json`](dictionary/schema.json). Não edite este arquivo à mão.
 > Viewer interativo: abra [`docs/dictionary/index.html`](dictionary/index.html) no navegador.
@@ -64,6 +64,11 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.fin_transfer`](#odfintransfer) | Transferência entre contas | Dinheiro que passa de uma conta da filial para outra (não é receita nem despesa): transferência, sangria (do caixa para outra conta) ou suprimento (de outra conta para o caixa). Entra no saldo e no extrato das duas contas. nr_transfer é sequencial por filial. |
 | [`od.fin_card_rate`](#odfincardrate) | Taxa de recebimento | Taxa da filial por forma de pagamento (cartão de crédito, débito, boleto, cheque) e faixa de parcelas: percentual, tarifa fixa, prazo em dias para o dinheiro cair e a conta destino. Com taxa cadastrada, a baixa nessa forma gera recebíveis. nr_rate é sequencial por filial. |
 | [`od.fin_receivable`](#odfinreceivable) | Recebível | Parcela a receber da operadora ou do banco depois de uma baixa em cartão, boleto ou cheque: bruto, taxa, líquido, previsão e conta destino. Enquanto não cai, o valor fica na conta de passagem Recebíveis; a confirmação transfere o recebido para a conta destino e lança a diferença como despesa (Taxas de recebimento). nr_receivable é sequencial por filial. |
+| [`od.health_plan`](#odhealthplan) | Convênio | Convênio odontológico atendido pela filial: nome, registro ANS, CNPJ, prazo de repasse em dias e a conta onde o repasse cai. nr_plan é sequencial por filial. |
+| [`od.health_plan_price`](#odhealthplanprice) | Tabela de preço do convênio | Valor que o convênio paga por procedimento (e o código da tabela do convênio). Preenche o valor dos itens da guia. |
+| [`od.health_guide`](#odhealthguide) | Guia de convênio | Guia de atendimento por convênio: paciente, profissional, carteirinha, número da guia, data, total dos itens e o ciclo aberta → faturada (gera a conta a receber do convênio) → paga (valor pago e glosa). nr_guide é sequencial por filial. |
+| [`od.health_guide_item`](#odhealthguideitem) | Item da guia | Procedimento da guia: dente/região, quantidade, valor unitário (da tabela do convênio ou informado), total e glosa do item. |
+| [`od.fin_bank_line`](#odfinbankline) | Linha do extrato bancário | Transação importada do arquivo OFX do banco para uma conta: id do banco (FITID, único por conta), data, valor com sinal e histórico; conciliada com um lançamento pago ou uma transferência da conta, ou ignorada. nr_line é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
 
@@ -109,6 +114,15 @@ erDiagram
   fin_entry ||--o{ fin_receivable : "gera recebíveis"
   fin_card_rate |o--o{ fin_receivable : "aplica"
   fin_transfer |o--o| fin_receivable : "confirma"
+  branch ||--o{ health_plan : "convênios"
+  health_plan ||--o{ health_plan_price : "tabela de preço"
+  procedure ||--o{ health_plan_price : "preço no convênio"
+  health_plan ||--o{ health_guide : "guias"
+  patient ||--o{ health_guide : "atendido por convênio"
+  health_guide ||--|{ health_guide_item : "procedimentos"
+  fin_entry |o--o{ health_guide : "faturamento"
+  fin_account ||--o{ fin_bank_line : "extrato do banco"
+  fin_entry |o--o| fin_bank_line : "concilia"
   fin_account ||--o{ fin_transfer : "transfere"
   fin_cash_session |o--o{ fin_transfer : "sangria / suprimento"
   appointment |o--o{ fin_entry : "fecha o atendimento"
@@ -493,6 +507,73 @@ erDiagram
     bigint nr_transfer FK
     bigint nr_fee_entry FK
     varchar vc_reference
+    bigint nr_user_created FK
+  }
+  health_plan {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_plan PK
+    varchar vc_name
+    varchar vc_ans
+    varchar vc_document
+    smallint qt_payment_days
+    bigint nr_account FK
+    varchar vc_notes
+    smallint it_status
+  }
+  health_plan_price {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_plan PK, FK
+    bigint nr_procedure PK, FK
+    varchar vc_code
+    numeric vl_price
+  }
+  health_guide {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_guide PK
+    bigint nr_plan FK
+    bigint nr_patient FK
+    bigint nr_professional FK
+    bigint nr_appointment FK
+    varchar vc_guide_number
+    varchar vc_card_number
+    date dt_service
+    numeric vl_total
+    smallint it_status
+    bigint nr_entry FK
+    date dt_invoiced
+    date dt_paid
+    numeric vl_paid
+    numeric vl_denied
+    varchar vc_notes
+    bigint nr_user_created FK
+  }
+  health_guide_item {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_guide PK, FK
+    smallint nr_item PK
+    bigint nr_procedure FK
+    varchar vc_tooth
+    smallint qt_quantity
+    numeric vl_unit
+    numeric vl_total
+    numeric vl_denied
+  }
+  fin_bank_line {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_line PK
+    bigint nr_account FK
+    varchar vc_fitid
+    date dt_posted
+    numeric vl_amount
+    varchar vc_memo
+    smallint it_status
+    bigint nr_entry FK
+    bigint nr_transfer FK
     bigint nr_user_created FK
   }
   patient {
@@ -1278,6 +1359,133 @@ Parcela a receber da operadora ou do banco depois de uma baixa em cartão, bolet
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.health_plan
+
+**Convênio**
+
+Convênio odontológico atendido pela filial: nome, registro ANS, CNPJ, prazo de repasse em dias e a conta onde o repasse cai. nr_plan é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_plan_save (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_plan` | `bigint` | PK3 | NOT NULL |  | Número sequencial do convênio na filial. |
+| `vc_name` | `varchar(80)` |  | NOT NULL |  | Nome (único na filial). |
+| `vc_ans` | `varchar(10)` |  | NULL |  | Registro ANS da operadora (6 dígitos). |
+| `vc_document` | `varchar(14)` |  | NULL |  | CNPJ da operadora (só dígitos). |
+| `qt_payment_days` | `smallint` |  | NOT NULL | `30` | Prazo de repasse em dias depois do faturamento. |
+| `nr_account` | `bigint` | FK → `fin_account.nr_account` | NULL |  | Conta onde o repasse cai. |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observações (regras de envio, contato). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.health_plan_price
+
+**Tabela de preço do convênio**
+
+Valor que o convênio paga por procedimento (e o código da tabela do convênio). Preenche o valor dos itens da guia.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_plan_save (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_plan` | `bigint` | PK3, FK → `health_plan.nr_plan` | NOT NULL |  | Convênio. |
+| `nr_procedure` | `bigint` | PK4, FK → `procedure.nr_procedure` | NOT NULL |  | Procedimento. |
+| `vc_code` | `varchar(20)` |  | NULL |  | Código do procedimento na tabela do convênio. |
+| `vl_price` | `numeric(12,2)` |  | NOT NULL |  | Valor pago pelo convênio (R$). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.health_guide
+
+**Guia de convênio**
+
+Guia de atendimento por convênio: paciente, profissional, carteirinha, número da guia, data, total dos itens e o ciclo aberta → faturada (gera a conta a receber do convênio) → paga (valor pago e glosa). nr_guide é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_guide_save e health_guide_settle (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_guide` | `bigint` | PK3 | NOT NULL |  | Número sequencial da guia na filial. |
+| `nr_plan` | `bigint` | FK → `health_plan.nr_plan` | NOT NULL |  | Convênio. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional que atendeu. |
+| `nr_appointment` | `bigint` | FK → `appointment.nr_appointment` | NULL |  | Atendimento da agenda (do mesmo paciente). |
+| `vc_guide_number` | `varchar(30)` |  | NULL |  | Número da guia no convênio. |
+| `vc_card_number` | `varchar(30)` |  | NULL |  | Número da carteirinha do paciente. |
+| `dt_service` | `date` |  | NOT NULL |  | Data do atendimento. |
+| `vl_total` | `numeric(14,2)` |  | NOT NULL | `0` | Total dos itens. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Aberta (a faturar); 2 = Faturada; 3 = Paga; 90 = Cancelada. |
+| `nr_entry` | `bigint` | FK → `fin_entry.nr_entry` | NULL |  | Conta a receber do faturamento (várias guias podem compartilhar). |
+| `dt_invoiced` | `date` |  | NULL |  | Data do faturamento. |
+| `dt_paid` | `date` |  | NULL |  | Data do pagamento (só paga). |
+| `vl_paid` | `numeric(14,2)` |  | NULL |  | Valor pago pelo convênio (só paga). |
+| `vl_denied` | `numeric(14,2)` |  | NULL |  | Glosa: total − pago (só paga). |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observações. |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Quem lançou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.health_guide_item
+
+**Item da guia**
+
+Procedimento da guia: dente/região, quantidade, valor unitário (da tabela do convênio ou informado), total e glosa do item.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via health_guide_save e health_guide_settle (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_guide` | `bigint` | PK3, FK → `health_guide.nr_guide` | NOT NULL |  | Guia. |
+| `nr_item` | `smallint` | PK4 | NOT NULL |  | Número do item na guia. |
+| `nr_procedure` | `bigint` | FK → `procedure.nr_procedure` | NOT NULL |  | Procedimento. |
+| `vc_tooth` | `varchar(10)` |  | NULL |  | Dente ou região. |
+| `qt_quantity` | `smallint` |  | NOT NULL | `1` | Quantidade (1 a 99). |
+| `vl_unit` | `numeric(12,2)` |  | NOT NULL |  | Valor unitário. |
+| `vl_total` | `numeric(14,2)` |  | NOT NULL |  | Valor unitário × quantidade. |
+| `vl_denied` | `numeric(14,2)` |  | NOT NULL | `0` | Glosa do item. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.fin_bank_line
+
+**Linha do extrato bancário**
+
+Transação importada do arquivo OFX do banco para uma conta: id do banco (FITID, único por conta), data, valor com sinal e histórico; conciliada com um lançamento pago ou uma transferência da conta, ou ignorada. nr_line é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_bank_import e fin_bank_reconcile (permissão na tela FINANCE).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_line` | `bigint` | PK3 | NOT NULL |  | Número sequencial da linha na filial. |
+| `nr_account` | `bigint` | FK → `fin_account.nr_account` | NOT NULL |  | Conta do extrato. |
+| `vc_fitid` | `varchar(100)` |  | NOT NULL |  | Id da transação no banco (FITID do OFX); reimportar não duplica. |
+| `dt_posted` | `date` |  | NOT NULL |  | Data do lançamento no banco. |
+| `vl_amount` | `numeric(14,2)` |  | NOT NULL |  | Valor com sinal (entrada +, saída −). |
+| `vc_memo` | `varchar(255)` |  | NULL |  | Histórico do banco. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Pendente; 2 = Conciliada; 90 = Ignorada. |
+| `nr_entry` | `bigint` | FK → `fin_entry.nr_entry` | NULL |  | Lançamento conciliado. |
+| `nr_transfer` | `bigint` | FK → `fin_transfer.nr_transfer` | NULL |  | Transferência conciliada. |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Quem importou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.patient
 
 **Paciente**
@@ -1419,6 +1627,14 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_receivable_settle(p_json jsonb)` | authenticated | Confirma (CONFIRM: data e valor que caiu; transfere de Recebíveis para a conta destino e lança a taxa real como despesa) ou desfaz (UNDO) um recebível. Permissão alterar na tela FINANCE. Grava event_log. |
 | `ad.fin_receivable_list(p_json jsonb)` | authenticated | Recebíveis com previsão no período (até 400 dias) por situação (a receber, vencidos, recebidos, cancelados) e forma, com paciente, taxa, conta destino e totais bruto, taxa e líquido. Exige leitura na tela FINANCE. |
 | `ad.fin_health_export(p_json jsonb)` | authenticated | Recebimentos de pacientes no período (até 366 dias) para a Receita Saúde: data, valor, paciente e CPF (ou responsável legal), profissional, quantos ficaram sem CPF e o CNPJ da empresa; o app gera o CSV. Exige leitura na tela FINANCE; grava event_log sem dados pessoais. |
+| `ad.health_plan_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um convênio: nome, ANS, CNPJ, prazo de repasse, conta e situação; com prices substitui a tabela de preço por procedimento. Grava event_log. |
+| `ad.health_plan_list(p_json jsonb)` | authenticated | Convênios da filial com a tabela de preço (e o valor particular para comparar), conta do repasse e guias abertas e faturadas, mais os procedimentos e profissionais ativos para os formulários. Exige leitura na tela FINANCE. |
+| `ad.health_guide_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) uma guia aberta: convênio, paciente, profissional, atendimento, números, data e itens (valor da tabela do convênio quando não informado). Grava event_log sem dados pessoais. |
+| `ad.health_guide_settle(p_json jsonb)` | authenticated | Ciclo das guias (alterar na tela FINANCE): INVOICE fatura uma ou várias do mesmo convênio numa conta a receber (categoria Convênios, vence no prazo do convênio), UNINVOICE desfaz, PAY registra o pago e a glosa por item (com todas as guias do faturamento pagas, baixa a conta; glosa total cancela), UNPAY desfaz e CANCEL cancela a aberta. Grava event_log. |
+| `ad.health_guide_list(p_json jsonb)` | authenticated | Guias com atendimento no período (até 400 dias) por convênio e situação, com paciente, profissional, itens, vencimento do faturamento, pago e glosa, e os totais. Exige leitura na tela FINANCE. |
+| `ad.fin_bank_import(p_json jsonb)` | authenticated | Importa as linhas do extrato do banco (o app lê o OFX) para uma conta (criar na tela FINANCE); o FITID evita duplicar; com id_auto concilia as que têm uma única sugestão no mesmo dia. Grava event_log. |
+| `ad.fin_bank_list(p_json jsonb)` | authenticated | Conciliação de uma conta no período: linhas do banco (pendentes com sugestões, conciliadas, ignoradas), movimentos do sistema que ainda não apareceram no banco e totais. Exige leitura na tela FINANCE. |
+| `ad.fin_bank_reconcile(p_json jsonb)` | authenticated | Concilia uma linha do extrato: MATCH (alterar) liga a um lançamento pago ou transferência de mesmo valor na conta, CREATE (criar) lança receita/despesa paga a partir da linha, IGNORE e UNDO (alterar). Grava event_log. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
 | `ad.patient_get(p_json jsonb)` | authenticated | Ficha completa de um paciente (todas as colunas, mais qt_age) e as notas gerais ativas, da mais recente para a mais antiga, com o nome do autor. Exige leitura na tela PATIENTS. |
 | `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). |
@@ -1446,6 +1662,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)` | interna | Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento. |
 | `od.fn_fin_receivable_make(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_qt_installments integer, p_vc_reference text, p_nr_user bigint)` | interna | Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada. |
+| `od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)` | interna | Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados. |
 | `od.fn_pricing_calc(p_json jsonb)` | interna | Fórmula do preço: custo direto = materiais + laboratório + tempo × estrutura/h + tempo × hora clínica; preço = custo ÷ (1 − cartão − comissão − taxas − IR − lucro) no regime PJ (IR sobre o faturamento) ou (1 − IR) × custo ÷ ((1 − IR)(1 − cartão − comissão − taxas) − lucro) no regime PF (IR sobre o lucro); preço mínimo com lucro zero. Devolve a decomposição e id_valid. Com vl_current_price (valor cobrado hoje) devolve também o lucro que sobra com ele e it_price_status: 0 sem valor, 1 ok, 2 abaixo do sugerido, 3 abaixo do mínimo, 4 abaixo do custo direto. |
 | `od.fn_pricing_context(p_nr_company bigint, p_nr_branch bigint)` | interna | Parâmetros da filial (ou padrões) e resumo: custo mensal das despesas (eventuais ÷ 12), horas por mês, horas produtivas, custo da estrutura por hora (calculado e o efetivo, que pode ser o valor manual), soma das taxas ativas e IR do regime. |
 | `ad.fn_screen_permission(p_nr_company bigint, p_nr_branch bigint, p_vc_screen text)` | interna | Permissão efetiva do usuário logado numa tela e filial ({id_read, id_create, id_update}): filial acessível + nível 100 ou união das linhas de access_profile_screen dos perfis do usuário. Usada pelas RPCs de negócio (schema od). |
@@ -1564,10 +1781,21 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_ACCOUNT_STATUS_INVALID` | `fin_account_save` |  |
 | `FIN_ACCOUNT_TYPE_INVALID` | `fin_account_save` |  |
 | `FIN_ACCOUNT_VALUE_INVALID` | `fin_account_save` |  |
+| `FIN_BANK_ACCOUNT_INVALID` | `fin_bank_import`, `fin_bank_list` |  |
+| `FIN_BANK_ACTION_INVALID` | `fin_bank_reconcile` |  |
+| `FIN_BANK_CATEGORY_INVALID` | `fin_bank_reconcile` |  |
+| `FIN_BANK_FORBIDDEN` | `fin_bank_import`, `fin_bank_reconcile` |  |
+| `FIN_BANK_LINE_INVALID` | `fin_bank_import` |  |
+| `FIN_BANK_LINE_NOT_FOUND` | `fin_bank_reconcile` |  |
+| `FIN_BANK_LINE_REQUIRED` | `fin_bank_reconcile` |  |
+| `FIN_BANK_LINES_INVALID` | `fin_bank_import` |  |
+| `FIN_BANK_MATCH_INVALID` | `fin_bank_reconcile` |  |
+| `FIN_BANK_RECONCILED` | `fin_entry_settle`, `fin_transfer_save`, `health_guide_settle` |  |
+| `FIN_BANK_STATUS_INVALID` | `fin_bank_reconcile` |  |
 | `FIN_CASH_ACCOUNT_IN_USE` | `fin_cash_open` |  |
 | `FIN_CASH_ACCOUNT_INVALID` | `fin_cash_open` |  |
 | `FIN_CASH_FORBIDDEN` | `fin_cash_open`, `fin_cash_close` |  |
-| `FIN_CASH_SESSION_CLOSED` | `fin_entry_settle`, `fin_cash_close`, `fin_transfer_save` |  |
+| `FIN_CASH_SESSION_CLOSED` | `fin_entry_settle`, `fin_cash_close`, `fin_transfer_save`, `health_guide_settle` |  |
 | `FIN_CASH_SESSION_NOT_FOUND` | `fin_cash_close` |  |
 | `FIN_CASH_USER_HAS_OPEN` | `fin_cash_open` |  |
 | `FIN_CASH_VALUE_INVALID` | `fin_cash_open`, `fin_cash_close` |  |
@@ -1597,9 +1825,9 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_ENTRY_PATIENT_INVALID` | `fin_entry_save` |  |
 | `FIN_ENTRY_PROFESSIONAL_INVALID` | `fin_entry_save` |  |
 | `FIN_ENTRY_REQUIRED` | `fin_entry_save`, `fin_entry_settle` |  |
-| `FIN_ENTRY_SUPPLIER_INVALID` | `fin_entry_save` |  |
+| `FIN_ENTRY_SUPPLIER_INVALID` | `fin_entry_save`, `fin_bank_reconcile` |  |
 | `FIN_ENTRY_VALUE_INVALID` | `fin_entry_save`, `fin_entry_settle`, `appointment_checkout` |  |
-| `FIN_LIST_FILTER_INVALID` | `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `fin_receivable_list`, `fin_health_export` |  |
+| `FIN_LIST_FILTER_INVALID` | `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `fin_receivable_list`, `fin_health_export`, `health_guide_list`, `fin_bank_list` |  |
 | `FIN_RATE_ACCOUNT_INVALID` | `fin_rate_save` |  |
 | `FIN_RATE_ACTION_INVALID` | `fin_rate_save` |  |
 | `FIN_RATE_DAYS_INVALID` | `fin_rate_save` |  |
@@ -1643,8 +1871,42 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_TRANSFER_STATUS_INVALID` | `fin_transfer_save` |  |
 | `FIN_TRANSFER_TYPE_INVALID` | `fin_transfer_save` |  |
 | `FIN_TRANSFER_VALUE_INVALID` | `fin_transfer_save` |  |
-| `FINANCE_BRANCH_REQUIRED` | `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export` |  |
-| `FINANCE_FORBIDDEN` | `fin_setup`, `fin_catalog`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `fin_cash_status`, `fin_receivable_list`, `fin_health_export` |  |
+| `FINANCE_BRANCH_REQUIRED` | `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile` |  |
+| `FINANCE_FORBIDDEN` | `fin_setup`, `fin_catalog`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `fin_cash_status`, `fin_receivable_list`, `fin_health_export`, `health_plan_list`, `health_guide_list`, `fin_bank_list` |  |
+| `HEALTH_GUIDE_ACCOUNT_REQUIRED` | `health_guide_settle` |  |
+| `HEALTH_GUIDE_ACTION_INVALID` | `health_guide_save` |  |
+| `HEALTH_GUIDE_APPOINTMENT_INVALID` | `health_guide_save` |  |
+| `HEALTH_GUIDE_DATE_REQUIRED` | `health_guide_save` |  |
+| `HEALTH_GUIDE_EMPTY` | `health_guide_settle` |  |
+| `HEALTH_GUIDE_ENTRY_PAID` | `health_guide_settle` |  |
+| `HEALTH_GUIDE_FORBIDDEN` | `health_guide_save`, `health_guide_settle` |  |
+| `HEALTH_GUIDE_ITEM_INVALID` | `health_guide_save` |  |
+| `HEALTH_GUIDE_ITEMS_REQUIRED` | `health_guide_save` |  |
+| `HEALTH_GUIDE_LOCKED` | `health_guide_save` |  |
+| `HEALTH_GUIDE_NOT_FOUND` | `health_guide_save`, `health_guide_settle` |  |
+| `HEALTH_GUIDE_PATIENT_INVALID` | `health_guide_save` |  |
+| `HEALTH_GUIDE_PLAN_INVALID` | `health_guide_save` |  |
+| `HEALTH_GUIDE_PLAN_MIXED` | `health_guide_settle` |  |
+| `HEALTH_GUIDE_PRICE_REQUIRED` | `health_guide_save` |  |
+| `HEALTH_GUIDE_PROFESSIONAL_INVALID` | `health_guide_save` |  |
+| `HEALTH_GUIDE_REQUIRED` | `health_guide_save`, `health_guide_settle` |  |
+| `HEALTH_GUIDE_SETTLE_ACTION_INVALID` | `health_guide_settle` |  |
+| `HEALTH_GUIDE_STATUS_INVALID` | `health_guide_settle` |  |
+| `HEALTH_GUIDE_VALUE_INVALID` | `health_guide_save`, `health_guide_settle` |  |
+| `HEALTH_PLAN_ACCOUNT_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_ACTION_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_ANS_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_DAYS_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_DOCUMENT_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_FORBIDDEN` | `health_plan_save` |  |
+| `HEALTH_PLAN_NAME_IN_USE` | `health_plan_save` |  |
+| `HEALTH_PLAN_NAME_REQUIRED` | `health_plan_save` |  |
+| `HEALTH_PLAN_NOT_FOUND` | `health_plan_save` |  |
+| `HEALTH_PLAN_PRICE_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_PRICES_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_REQUIRED` | `health_plan_save` |  |
+| `HEALTH_PLAN_STATUS_INVALID` | `health_plan_save` |  |
+| `HEALTH_PLAN_VALUE_INVALID` | `health_plan_save` |  |
 | `MATERIAL_ACTION_INVALID` | `material_save` |  |
 | `MATERIAL_FORBIDDEN` | `material_save` |  |
 | `MATERIAL_NAME_IN_USE` | `material_save` | Name |
@@ -1742,5 +2004,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

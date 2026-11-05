@@ -1,0 +1,103 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.health_plan_list(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('health_plan_list')      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Convenios da filial com a tabela de preco (procedimento, codigo, valor e o
+    valor particular cobrado hoje para comparar), a conta do repasse e quantas
+    guias estao abertas e faturadas. Exige permissao de LEITURA na tela FINANCE.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    id_include_inactive  boolean  opcional (padrao false)
+
+  Output jsonb:
+    {"plans": [{"nr_plan", "vc_name", "vc_ans", "vc_document", "qt_payment_days", "nr_account",
+                "vc_account", "vc_notes", "it_status", "qt_open", "qt_invoiced", "vl_invoiced",
+                "prices": [{"nr_procedure", "vc_procedure", "vc_code", "vl_price", "vl_private"}]}],
+     "procedures": [{"nr_procedure", "vc_name", "vl_current_price"}] (ativos, para a tabela e as guias),
+     "professionals": [{"nr_professional", "vc_name"}] (ativos),
+     "permission": {"id_read", "id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
+*/
+create or replace function ad.health_plan_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'health_plan_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if not (_perm ->> 'id_read')::boolean then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+
+  return jsonb_build_object(
+    'plans', (select coalesce(jsonb_agg(jsonb_build_object(
+                       'nr_plan', h.nr_plan, 'vc_name', h.vc_name, 'vc_ans', h.vc_ans,
+                       'vc_document', h.vc_document, 'qt_payment_days', h.qt_payment_days,
+                       'nr_account', h.nr_account, 'vc_account', a.vc_name, 'vc_notes', h.vc_notes,
+                       'it_status', h.it_status,
+                       'qt_open', (select count(*) from od.health_guide g
+                                    where g.nr_company = h.nr_company and g.nr_branch = h.nr_branch
+                                      and g.nr_plan = h.nr_plan and g.it_status = 1),
+                       'qt_invoiced', (select count(*) from od.health_guide g
+                                        where g.nr_company = h.nr_company and g.nr_branch = h.nr_branch
+                                          and g.nr_plan = h.nr_plan and g.it_status = 2),
+                       'vl_invoiced', (select coalesce(sum(g.vl_total), 0) from od.health_guide g
+                                        where g.nr_company = h.nr_company and g.nr_branch = h.nr_branch
+                                          and g.nr_plan = h.nr_plan and g.it_status = 2),
+                       'prices', (select coalesce(jsonb_agg(jsonb_build_object(
+                                           'nr_procedure', pp.nr_procedure, 'vc_procedure', pc.vc_name,
+                                           'vc_code', pp.vc_code, 'vl_price', pp.vl_price,
+                                           'vl_private', pc.vl_current_price)
+                                           order by pc.vc_name), '[]'::jsonb)
+                                    from od.health_plan_price pp
+                                    join od.procedure pc on pc.nr_company = pp.nr_company and pc.nr_branch = pp.nr_branch
+                                                        and pc.nr_procedure = pp.nr_procedure
+                                   where pp.nr_company = h.nr_company and pp.nr_branch = h.nr_branch
+                                     and pp.nr_plan = h.nr_plan))
+                       order by h.vc_name), '[]'::jsonb)
+                from od.health_plan h
+                left join od.fin_account a on a.nr_company = h.nr_company and a.nr_branch = h.nr_branch
+                                          and a.nr_account = h.nr_account
+               where h.nr_company = _nr_company and h.nr_branch = _nr_branch
+                 and (_inactive or h.it_status = 1)),
+    'procedures', (select coalesce(jsonb_agg(jsonb_build_object('nr_procedure', pc.nr_procedure, 'vc_name', pc.vc_name,
+                                                                'vl_current_price', pc.vl_current_price)
+                                             order by pc.vc_name), '[]'::jsonb)
+                     from od.procedure pc
+                    where pc.nr_company = _nr_company and pc.nr_branch = _nr_branch and pc.it_status = 1),
+    'professionals', (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', p.nr_professional,
+                                                                   'vc_name', p.vc_name)
+                                                order by p.vc_name), '[]'::jsonb)
+                        from od.professional p
+                       where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.it_status = 1),
+    'permission', _perm);
+end;
+$$;
+
+revoke all on function ad.health_plan_list(jsonb) from public, anon;
+grant execute on function ad.health_plan_list(jsonb) to authenticated;

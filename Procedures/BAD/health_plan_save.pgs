@@ -1,0 +1,187 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.health_plan_save(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> supabase.schema('ad').rpc('health_plan_save')      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I, permissao CRIAR) ou altera parcialmente (U, permissao ALTERAR) um
+    convenio da filial: nome, registro ANS (6 digitos), CNPJ, prazo de repasse
+    em dias, conta onde o repasse cai, observacoes e situacao. Com "prices"
+    presente, substitui a tabela de preco do convenio inteira
+    ([{nr_procedure, vl_price, vc_code}]; procedimentos ativos, sem repetir).
+    Documento so com digitos. Grava ad.event_log.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    nr_company       bigint   obrigatorio
+    nr_branch        bigint   obrigatorio
+    vc_action        text     obrigatorio I | U
+    nr_plan          bigint   obrigatorio em U
+    vc_name          text     obrigatorio em I
+    vc_ans           text     opcional
+    vc_document      text     opcional (CNPJ)
+    qt_payment_days  integer  opcional 0..365 (padrao 30)
+    nr_account       bigint   opcional (conta ativa, nao a de passagem)
+    vc_notes         text     opcional
+    it_status        integer  opcional 1 | 90 (so em U)
+    prices           array    opcional
+
+  Output jsonb: {"nr_company", "nr_branch", "nr_plan", "qt_prices"}
+
+  Errors: VERSION_MISMATCH, HEALTH_PLAN_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, HEALTH_PLAN_FORBIDDEN,
+    HEALTH_PLAN_REQUIRED, HEALTH_PLAN_NOT_FOUND, HEALTH_PLAN_VALUE_INVALID, HEALTH_PLAN_NAME_REQUIRED,
+    HEALTH_PLAN_NAME_IN_USE, HEALTH_PLAN_ANS_INVALID, HEALTH_PLAN_DOCUMENT_INVALID, HEALTH_PLAN_DAYS_INVALID,
+    HEALTH_PLAN_ACCOUNT_INVALID, HEALTH_PLAN_STATUS_INVALID, HEALTH_PLAN_PRICES_INVALID,
+    HEALTH_PLAN_PRICE_INVALID
+*/
+create or replace function ad.health_plan_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr         bigint;
+  _cur        od.health_plan%rowtype;
+  _new        od.health_plan%rowtype;
+  _p          jsonb;
+  _qt         integer := 0;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'health_plan_save');
+
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'I' and not (_perm ->> 'id_create')::boolean)
+     or (_action = 'U' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_FORBIDDEN');
+  end if;
+
+  if _action = 'U' then
+    _nr := (p_json ->> 'nr_plan')::bigint;
+    if _nr is null then
+      raise exception '%', ad.fn_message('HEALTH_PLAN_REQUIRED');
+    end if;
+    select * into _cur from od.health_plan h
+     where h.nr_company = _nr_company and h.nr_branch = _nr_branch and h.nr_plan = _nr
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('HEALTH_PLAN_NOT_FOUND');
+    end if;
+  else
+    _cur.it_status := 1;
+    _cur.qt_payment_days := 30;
+  end if;
+
+  begin
+    _new := _cur;
+    _new.vc_name         := case when p_json ? 'vc_name' then left(nullif(trim(p_json ->> 'vc_name'), ''), 80) else _cur.vc_name end;
+    _new.vc_ans          := case when p_json ? 'vc_ans' then nullif(regexp_replace(coalesce(p_json ->> 'vc_ans', ''), '[^0-9]', '', 'g'), '') else _cur.vc_ans end;
+    _new.vc_document     := case when p_json ? 'vc_document' then nullif(upper(regexp_replace(coalesce(p_json ->> 'vc_document', ''), '[^0-9A-Za-z]', '', 'g')), '') else _cur.vc_document end;
+    _new.qt_payment_days := case when p_json ? 'qt_payment_days' then (p_json ->> 'qt_payment_days')::smallint else _cur.qt_payment_days end;
+    _new.nr_account      := case when p_json ? 'nr_account' then (p_json ->> 'nr_account')::bigint else _cur.nr_account end;
+    _new.vc_notes        := case when p_json ? 'vc_notes' then left(nullif(trim(p_json ->> 'vc_notes'), ''), 500) else _cur.vc_notes end;
+    _new.it_status       := case when _action = 'U' and p_json ? 'it_status' then (p_json ->> 'it_status')::smallint else _cur.it_status end;
+  exception when others then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_VALUE_INVALID');
+  end;
+
+  if _new.vc_name is null then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_NAME_REQUIRED');
+  end if;
+  if exists (select 1 from od.health_plan h
+              where h.nr_company = _nr_company and h.nr_branch = _nr_branch
+                and lower(h.vc_name) = lower(_new.vc_name) and h.nr_plan is distinct from _nr) then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_NAME_IN_USE', jsonb_build_object('Name', _new.vc_name));
+  end if;
+  if _new.vc_ans is not null and _new.vc_ans !~ '^[0-9]{6}$' then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_ANS_INVALID');
+  end if;
+  if _new.vc_document is not null and _new.vc_document !~ '^[0-9A-Z]{14}$' then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_DOCUMENT_INVALID');
+  end if;
+  if _new.qt_payment_days is null or _new.qt_payment_days not between 0 and 365 then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_DAYS_INVALID');
+  end if;
+  if _new.nr_account is not null and not exists (
+       select 1 from od.fin_account a
+        where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_account = _new.nr_account
+          and a.it_type <> 4 and (a.it_status = 1 or _new.nr_account is not distinct from _cur.nr_account)) then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_ACCOUNT_INVALID');
+  end if;
+  if _new.it_status not in (1, 90) then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_STATUS_INVALID');
+  end if;
+  if p_json ? 'prices' and jsonb_typeof(p_json -> 'prices') <> 'array' then
+    raise exception '%', ad.fn_message('HEALTH_PLAN_PRICES_INVALID');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(h.nr_plan), 0) + 1 into _nr
+      from od.health_plan h where h.nr_company = _nr_company and h.nr_branch = _nr_branch;
+    insert into od.health_plan (nr_company, nr_branch, nr_plan, vc_name, vc_ans, vc_document, qt_payment_days,
+                                nr_account, vc_notes, it_status, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _new.vc_name, _new.vc_ans, _new.vc_document, _new.qt_payment_days,
+            _new.nr_account, _new.vc_notes, 1, _nr_user);
+  else
+    update od.health_plan h set
+      vc_name = _new.vc_name, vc_ans = _new.vc_ans, vc_document = _new.vc_document,
+      qt_payment_days = _new.qt_payment_days, nr_account = _new.nr_account,
+      vc_notes = _new.vc_notes, it_status = _new.it_status
+    where h.nr_company = _nr_company and h.nr_branch = _nr_branch and h.nr_plan = _nr;
+  end if;
+
+  if p_json ? 'prices' then
+    delete from od.health_plan_price pp
+     where pp.nr_company = _nr_company and pp.nr_branch = _nr_branch and pp.nr_plan = _nr;
+    for _p in select * from jsonb_array_elements(p_json -> 'prices') loop
+      begin
+        if not exists (select 1 from od.procedure pc
+                        where pc.nr_company = _nr_company and pc.nr_branch = _nr_branch
+                          and pc.nr_procedure = (_p ->> 'nr_procedure')::bigint and pc.it_status = 1)
+           or coalesce((_p ->> 'vl_price')::numeric, -1) < 0 then
+          raise exception 'x';
+        end if;
+        insert into od.health_plan_price (nr_company, nr_branch, nr_plan, nr_procedure, vc_code, vl_price, nr_operator)
+        values (_nr_company, _nr_branch, _nr, (_p ->> 'nr_procedure')::bigint,
+                left(nullif(trim(_p ->> 'vc_code'), ''), 20), round((_p ->> 'vl_price')::numeric, 2), _nr_user);
+      exception when others then
+        raise exception '%', ad.fn_message('HEALTH_PLAN_PRICE_INVALID',
+                                           jsonb_build_object('Procedure', _p ->> 'nr_procedure'));
+      end;
+      _qt := _qt + 1;
+    end loop;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'health_plan', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Convênio %s %s', _new.vc_name, case when _action = 'I' then 'cadastrado' else 'alterado' end),
+    jsonb_build_object('qt_payment_days', _new.qt_payment_days, 'it_status', _new.it_status,
+                       'qt_prices', case when p_json ? 'prices' then _qt end));
+
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_plan', _nr, 'qt_prices', _qt);
+end;
+$$;
+
+revoke all on function ad.health_plan_save(jsonb) from public, anon;
+grant execute on function ad.health_plan_save(jsonb) to authenticated;
