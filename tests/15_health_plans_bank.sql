@@ -83,6 +83,8 @@ begin
   perform pg_temp.expect_error('health_plan_save', _base || jsonb_build_object('vc_action', 'I', 'vc_name', 'odonto plus'),
             'HEALTH_PLAN_NAME_IN_USE');
   _r := ad.health_plan_list(_base);
+  assert jsonb_array_length(_r -> 'procedures') = 2 and jsonb_array_length(_r -> 'professionals') = 1,
+    'procedimentos e profissionais para os formularios';
   assert (_r -> 'plans' -> 0 -> 'prices' -> 0 ->> 'vc_procedure') = 'Limpeza'
      and (_r -> 'plans' -> 0 -> 'prices' -> 0 ->> 'vl_private')::numeric = 200, 'tabela com o preco particular';
 

@@ -5618,7 +5618,7 @@ window.DICTIONARY = {
       "signature": "ad.health_plan_list(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Convênios da filial com a tabela de preço (e o valor particular para comparar), conta do repasse e guias abertas e faturadas. Exige leitura na tela FINANCE.",
+      "description": "Convênios da filial com a tabela de preço (e o valor particular para comparar), conta do repasse e guias abertas e faturadas, mais os procedimentos e profissionais ativos para os formulários. Exige leitura na tela FINANCE.",
       "errors": [
         "VERSION_MISMATCH",
         "FINANCE_BRANCH_REQUIRED",

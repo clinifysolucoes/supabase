@@ -23,6 +23,8 @@
     {"plans": [{"nr_plan", "vc_name", "vc_ans", "vc_document", "qt_payment_days", "nr_account",
                 "vc_account", "vc_notes", "it_status", "qt_open", "qt_invoiced", "vl_invoiced",
                 "prices": [{"nr_procedure", "vc_procedure", "vc_code", "vl_price", "vl_private"}]}],
+     "procedures": [{"nr_procedure", "vc_name", "vl_current_price"}] (ativos, para a tabela e as guias),
+     "professionals": [{"nr_professional", "vc_name"}] (ativos),
      "permission": {"id_read", "id_create", "id_update"}}
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN
@@ -83,6 +85,16 @@ begin
                                           and a.nr_account = h.nr_account
                where h.nr_company = _nr_company and h.nr_branch = _nr_branch
                  and (_inactive or h.it_status = 1)),
+    'procedures', (select coalesce(jsonb_agg(jsonb_build_object('nr_procedure', pc.nr_procedure, 'vc_name', pc.vc_name,
+                                                                'vl_current_price', pc.vl_current_price)
+                                             order by pc.vc_name), '[]'::jsonb)
+                     from od.procedure pc
+                    where pc.nr_company = _nr_company and pc.nr_branch = _nr_branch and pc.it_status = 1),
+    'professionals', (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', p.nr_professional,
+                                                                   'vc_name', p.vc_name)
+                                                order by p.vc_name), '[]'::jsonb)
+                        from od.professional p
+                       where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.it_status = 1),
     'permission', _perm);
 end;
 $$;
