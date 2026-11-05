@@ -71,6 +71,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.fin_bank_line`](#odfinbankline) | Linha do extrato bancário | Transação importada do arquivo OFX do banco para uma conta: id do banco (FITID, único por conta), data, valor com sinal e histórico; conciliada com um lançamento pago ou uma transferência da conta, ou ignorada. nr_line é sequencial por filial. |
 | [`od.fin_recurrence`](#odfinrecurrence) | Conta recorrente | Regra de conta que se repete todo mês no mesmo dia (aluguel, salário, internet...), sem data final ou até uma data. Os lançamentos são gerados a partir dela (od.fn_fin_recurrence_fill) até 12 meses à frente; alterar a regra muda os futuros em aberto e encerrar cancela os futuros. nr_recurrence é sequencial por filial. |
 | [`od.fin_attachment`](#odfinattachment) | Anexo de conta | Arquivo anexado a uma conta a pagar/receber: documento (nota, boleto) ou comprovante de pagamento. O arquivo fica no Storage (bucket privado finance, caminho empresa/filial/conta/uuid.ext); upload e download só por URL assinada da Edge Function fin-attachment. Excluir é lógico. nr_attachment é sequencial por filial. |
+| [`od.branch_setting`](#odbranchsetting) | Configurações da filial | Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento) e cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios). |
+| [`od.branch_hour`](#odbranchhour) | Horário de funcionamento | Horário de funcionamento da clínica por dia da semana (um ou mais intervalos por dia, sem sobreposição). nr_hour é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
 
@@ -183,6 +185,11 @@ erDiagram
     char vc_state
     varchar vc_zip_code
     varchar vc_timezone
+    varchar vc_phone_extra
+    varchar vc_technical_name
+    varchar vc_technical_cro
+    varchar vc_technical_cro_state
+    varchar vc_forum_city
     boolean id_main
     smallint it_status
     timestamptz dh_status
@@ -627,6 +634,25 @@ erDiagram
     smallint it_status
     bigint nr_user_created FK
   }
+  branch_setting {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    smallint qt_slot_minutes
+    smallint qt_max_parallel
+    boolean id_allow_outside_hours
+    boolean id_auto_record_number
+    bigint nr_next_record
+    boolean id_require_cpf
+    boolean id_require_mobile
+  }
+  branch_hour {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_hour PK
+    smallint it_weekday
+    smallint qt_minute_start
+    smallint qt_minute_end
+  }
   patient {
     bigint nr_company PK, FK
     bigint nr_branch PK, FK
@@ -752,6 +778,11 @@ Filial (unidade/clínica) da empresa. PK composta (nr_company, nr_branch) com nu
 | `vc_state` | `char(2)` |  | NULL |  | UF. |
 | `vc_zip_code` | `varchar(8)` |  | NULL |  | CEP, 8 dígitos. |
 | `vc_timezone` | `varchar(60)` |  | NOT NULL | `'America/Sao_Paulo'` | Fuso horário IANA da filial (validado em pg_timezone_names). Base da agenda da clínica. |
+| `vc_phone_extra` | `varchar(11)` |  | NULL |  | Telefone adicional (só dígitos). |
+| `vc_technical_name` | `varchar(120)` |  | NULL |  | Responsável técnico da clínica. |
+| `vc_technical_cro` | `varchar(20)` |  | NULL |  | CRO do responsável técnico. |
+| `vc_technical_cro_state` | `varchar(2)` |  | NULL |  | UF do CRO. |
+| `vc_forum_city` | `varchar(60)` |  | NULL |  | Cidade do foro dos contratos (nulo = a da clínica). |
 | `id_main` | `boolean` |  | NOT NULL | `false` | Matriz. Única por empresa (índice branch_id_main_uk). |
 | `it_status` | `smallint` |  | NOT NULL | `1` | Situação da filial. Valores: 1 = Ativa; 90 = Inativa. |
 | `dh_status` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última mudança de situação. |
@@ -1607,6 +1638,49 @@ Arquivo anexado a uma conta a pagar/receber: documento (nota, boleto) ou comprov
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.branch_setting
+
+**Configurações da filial**
+
+Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento) e cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via settings_save (permissão de alterar na tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `qt_slot_minutes` | `smallint` |  | NOT NULL | `15` | Intervalo de visualização da agenda (5, 15, 20 ou 30 minutos). |
+| `qt_max_parallel` | `smallint` |  | NOT NULL | `1` | Quantas consultas do mesmo profissional podem ocupar o mesmo horário (1 a 20; encaixe não conta). |
+| `id_allow_outside_hours` | `boolean` |  | NOT NULL | `true` | Permite agendar fora do horário de atendimento do profissional. |
+| `id_auto_record_number` | `boolean` |  | NOT NULL | `false` | Numera o prontuário automaticamente no cadastro do paciente. |
+| `nr_next_record` | `bigint` |  | NOT NULL | `1` | Próximo número de prontuário. |
+| `id_require_cpf` | `boolean` |  | NOT NULL | `false` | CPF obrigatório no cadastro do paciente. |
+| `id_require_mobile` | `boolean` |  | NOT NULL | `false` | Celular obrigatório no cadastro do paciente. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.branch_hour
+
+**Horário de funcionamento**
+
+Horário de funcionamento da clínica por dia da semana (um ou mais intervalos por dia, sem sobreposição). nr_hour é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via settings_save (permissão de alterar na tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_hour` | `bigint` | PK3 | NOT NULL |  | Número sequencial do intervalo na filial. |
+| `it_weekday` | `smallint` |  | NOT NULL |  | Dia da semana. Valores: 0 = Domingo; 1 = Segunda; 2 = Terça; 3 = Quarta; 4 = Quinta; 5 = Sexta; 6 = Sábado. |
+| `qt_minute_start` | `smallint` |  | NOT NULL |  | Início (minutos desde 0h). |
+| `qt_minute_end` | `smallint` |  | NOT NULL |  | Fim (minutos desde 0h; depois do início). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.patient
 
 **Paciente**
@@ -1703,7 +1777,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.company_create(p_json jsonb)` | authenticated | Onboarding: cria empresa, matriz (filial 1), perfis Administrador/Usuário e vincula o criador como administrador. Qualquer usuário ativo pode criar. |
 | `ad.company_update(p_json jsonb)` | authenticated | Atualização parcial dos dados cadastrais da empresa. Somente administrador. Situação/bloqueio só por service_role. |
 | `ad.branch_create(p_json jsonb)` | authenticated | Cria filial (numeração sequencial por empresa, serializada com FOR UPDATE na empresa) e vincula o criador com o seu perfil de maior nível. Somente administrador. |
-| `ad.branch_update(p_json jsonb)` | authenticated | Atualização parcial da filial, inclusive transferência de matriz (id_main). Somente administrador. |
+| `ad.branch_update(p_json jsonb)` | authenticated | Atualização parcial da filial, inclusive transferência de matriz (id_main). Somente administrador. Também telefone adicional, responsável técnico (nome, CRO e UF) e cidade do foro. |
 | `ad.access_profile_save(p_json jsonb)` | authenticated | Cria (I) ou atualiza (U) perfis de acesso da empresa; screens (opcional) substitui as permissões por tela (ler/criar/alterar). Guarda contra deixar a empresa sem administrador ativo. Grava event_log. Somente administrador. |
 | `ad.company_user_save(p_json jsonb)` | authenticated | Vincula (I, por e-mail de usuário já cadastrado no Auth), altera (U: situação, motivo, filiais/perfis) ou remove (D) um usuário da empresa. Guarda do último administrador. Somente administrador. Grava event_log. |
 | `ad.user_update(p_json jsonb)` | authenticated | Autoatendimento: nome, CPF (validado), telefones e avatar do próprio usuário. E-mail/senha mudam pelo Supabase Auth. |
@@ -1722,7 +1796,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
 | `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING. |
 | `ad.appointment_list(p_json jsonb)` | authenticated | Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. |
-| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. |
+| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. Segue as configurações da filial: consultas do mesmo profissional no mesmo horário até o limite e, sem permissão de agendar fora do horário, a consulta precisa caber no horário de atendimento do profissional (encaixe passa por cima). |
 | `ad.professional_list(p_json jsonb)` | authenticated | Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA. |
 | `ad.professional_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
@@ -1762,9 +1836,11 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
 | `ad.patient_get(p_json jsonb)` | authenticated | Ficha completa de um paciente (todas as colunas, mais qt_age) e as notas gerais ativas, da mais recente para a mais antiga, com o nome do autor. Exige leitura na tela PATIENTS. |
-| `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). |
+| `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). Segue as configurações da filial: número de prontuário automático e CPF/celular obrigatórios. |
 | `ad.patient_note_save(p_json jsonb)` | authenticated | Notas gerais do paciente: I adiciona (permissão criar ou alterar; autor = usuário da sessão), D exclui logicamente (permissão alterar). Grava event_log. |
 
 ### Helpers (regras compartilhadas / RLS)
@@ -1834,6 +1910,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `APPOINTMENT_FORBIDDEN` | `appointment_save` |  |
 | `APPOINTMENT_LIST_PERIOD_INVALID` | `appointment_list` |  |
 | `APPOINTMENT_NOT_FOUND` | `appointment_save` |  |
+| `APPOINTMENT_OUTSIDE_HOURS` | `appointment_save` |  |
 | `APPOINTMENT_PATIENT_INVALID` | `appointment_save` |  |
 | `APPOINTMENT_PATIENT_REQUIRED` | `appointment_save` |  |
 | `APPOINTMENT_PERIOD_INVALID` | `appointment_save` |  |
@@ -1861,6 +1938,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `BRANCH_UPDATE_KEY_REQUIRED` | `branch_update` |  |
 | `BRANCH_UPDATE_NAME_REQUIRED` | `branch_update` |  |
 | `BRANCH_UPDATE_NOT_FOUND` | `branch_update` |  |
+| `BRANCH_UPDATE_PHONE_INVALID` | `branch_update` |  |
+| `BRANCH_UPDATE_STATE_INVALID` | `branch_update` |  |
 | `BRANCH_UPDATE_TIMEZONE_INVALID` | `branch_update` | Timezone |
 | `CHECKOUT_ALREADY_DONE` | `appointment_checkout` |  |
 | `CHECKOUT_APPOINTMENT_INVALID` | `appointment_checkout` |  |
@@ -2070,8 +2149,10 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_BRANCH_REQUIRED` | `patient_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_CPF_IN_USE` | `patient_save` |  |
 | `PATIENT_CPF_INVALID` | `patient_save` |  |
+| `PATIENT_CPF_REQUIRED` | `patient_save` |  |
 | `PATIENT_EMAIL_INVALID` | `patient_save` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
+| `PATIENT_MOBILE_REQUIRED` | `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
 | `PATIENT_NOT_FOUND` | `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
@@ -2134,6 +2215,13 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SESSION_USER_INACTIVE` | `session_context` |  |
 | `SESSION_USER_NOT_FOUND` | `session_context` |  |
 | `SESSION_WITHOUT_PROFILE` | `session_context` |  |
+| `SETTINGS_BRANCH_REQUIRED` | `settings_get`, `settings_save` |  |
+| `SETTINGS_FORBIDDEN` | `settings_get`, `settings_save` |  |
+| `SETTINGS_HOURS_INVALID` | `settings_save` |  |
+| `SETTINGS_PARALLEL_INVALID` | `settings_save` |  |
+| `SETTINGS_RECORD_INVALID` | `settings_save` |  |
+| `SETTINGS_SLOT_INVALID` | `settings_save` |  |
+| `SETTINGS_VALUE_INVALID` | `settings_save` |  |
 | `SPECIALTY_ACTION_INVALID` | `specialty_save` |  |
 | `SPECIALTY_FORBIDDEN` | `specialty_save` |  |
 | `SPECIALTY_NAME_IN_USE` | `specialty_save` |  |
@@ -2153,5 +2241,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

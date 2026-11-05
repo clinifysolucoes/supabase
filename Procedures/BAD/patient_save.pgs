@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 14/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - prontuario automatico e campos obrigatorios      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastro do paciente (ficha completa).
@@ -49,6 +49,7 @@
     PATIENT_REQUIRED, PATIENT_NOT_FOUND, PATIENT_VALUE_INVALID {Field}, PATIENT_NAME_REQUIRED,
     PATIENT_BIRTH_REQUIRED, PATIENT_BIRTH_INVALID, PATIENT_CPF_INVALID {Field},
     PATIENT_CPF_IN_USE {Name}, PATIENT_EMAIL_INVALID, PATIENT_PHONE_INVALID {Field},
+    PATIENT_CPF_REQUIRED, PATIENT_MOBILE_REQUIRED (configuracoes da filial),
     PATIENT_ZIP_INVALID, PATIENT_STATE_INVALID, PATIENT_STATUS_INVALID
 */
 create or replace function ad.patient_save(p_json jsonb)
@@ -59,6 +60,7 @@ set search_path = ''
 as $$
 declare
   _nr_user    bigint;
+  _setting    od.branch_setting%rowtype;
   _vc_action  text;
   _nr_company bigint;
   _nr_branch  bigint;
@@ -262,6 +264,18 @@ begin
     raise exception '%', ad.fn_message('PATIENT_STATUS_INVALID');
   end if;
 
+  -- configuracoes da filial: obrigatorios no cadastro (na alteracao, so se o
+  -- campo veio e ficou vazio, para nao travar fichas antigas)
+  select * into _setting from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+  if coalesce(_setting.id_require_cpf, false) and _new.vc_cpf is null
+     and (_vc_action = 'I' or p_json ? 'vc_cpf') then
+    raise exception '%', ad.fn_message('PATIENT_CPF_REQUIRED');
+  end if;
+  if coalesce(_setting.id_require_mobile, false) and _new.vc_mobile is null
+     and (_vc_action = 'I' or p_json ? 'vc_mobile') then
+    raise exception '%', ad.fn_message('PATIENT_MOBILE_REQUIRED');
+  end if;
+
   /*------------------------------------------------------------------------
     6. grava
   ------------------------------------------------------------------------*/
@@ -274,6 +288,12 @@ begin
      where p.nr_company = _nr_company and p.nr_branch = _nr_branch;
 
     _new.nr_patient  := _nr_patient;
+    -- numero de prontuario automatico (o proximo da filial)
+    if coalesce(_setting.id_auto_record_number, false) and _new.vc_record_number is null then
+      _new.vc_record_number := _setting.nr_next_record::text;
+      update od.branch_setting s set nr_next_record = s.nr_next_record + 1
+       where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+    end if;
     _new.nr_operator := _nr_user;
     _new.dh_created  := now();
     _new.dh_updated  := now();

@@ -179,3 +179,15 @@ drop policy if exists fin_attachment_select on od.fin_attachment;
 create policy fin_attachment_select on od.fin_attachment
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.branch_setting
+drop policy if exists branch_setting_select on od.branch_setting;
+create policy branch_setting_select on od.branch_setting
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.branch_hour
+drop policy if exists branch_hour_select on od.branch_hour;
+create policy branch_hour_select on od.branch_hour
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

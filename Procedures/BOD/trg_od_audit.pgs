@@ -125,3 +125,11 @@ create or replace trigger fin_recurrence_audit
 create or replace trigger fin_attachment_audit
   before insert or update on od.fin_attachment
   for each row execute function ad.trg_audit();
+
+create or replace trigger branch_setting_audit
+  before insert or update on od.branch_setting
+  for each row execute function ad.trg_audit();
+
+create or replace trigger branch_hour_audit
+  before insert or update on od.branch_hour
+  for each row execute function ad.trg_audit();
