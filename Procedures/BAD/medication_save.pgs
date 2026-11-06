@@ -1,0 +1,117 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.medication_save(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('medication_save') (Configuracoes)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I) ou altera parcialmente (U) um medicamento do catalogo (permissao
+    ALTERAR na tela SETTINGS). Inativar = it_status 90. Grava ad.event_log.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     obrigatorio 'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_medication    bigint   obrigatorio em 'U'
+    vc_name          text     obrigatorio em 'I' (ate 120)
+    vc_presentation  text     opcional (ate 120)
+    vc_dosage        text     opcional (posologia, ate 300)
+    vc_quantity      text     opcional (ate 60)
+    it_use           integer  opcional 1 uso interno | 2 uso externo | 3 uso topico (padrao 1)
+    id_controlled    boolean  opcional (receita de controle especial)
+    it_status        integer  opcional 1 | 90
+
+  Output jsonb: {"nr_medication"}
+
+  Errors: VERSION_MISMATCH, MEDICATION_ACTION_INVALID, RECORD_BRANCH_REQUIRED, MEDICATION_FORBIDDEN,
+    MEDICATION_NOT_FOUND, MEDICATION_NAME_REQUIRED, MEDICATION_VALUE_INVALID
+*/
+create or replace function ad.medication_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_med     bigint;
+  _name       text := left(nullif(trim(p_json ->> 'vc_name'), ''), 120);
+  _use        smallint;
+  _ctrl       boolean;
+  _status     smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'medication_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('MEDICATION_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('MEDICATION_FORBIDDEN');
+  end if;
+  begin
+    _use    := (p_json ->> 'it_use')::smallint;
+    _ctrl   := (p_json ->> 'id_controlled')::boolean;
+    _status := (p_json ->> 'it_status')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('MEDICATION_VALUE_INVALID');
+  end;
+  if (p_json ? 'it_use' and (_use is null or _use not in (1, 2, 3)))
+     or (p_json ? 'it_status' and (_status is null or _status not in (1, 90))) then
+    raise exception '%', ad.fn_message('MEDICATION_VALUE_INVALID');
+  end if;
+  if (_action = 'I' or p_json ? 'vc_name') and _name is null then
+    raise exception '%', ad.fn_message('MEDICATION_NAME_REQUIRED');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  if _action = 'I' then
+    select coalesce(max(m.nr_medication), 0) + 1 into _nr_med
+      from od.medication m where m.nr_company = _nr_company and m.nr_branch = _nr_branch;
+    insert into od.medication (nr_company, nr_branch, nr_medication, vc_name, vc_presentation, vc_dosage, vc_quantity,
+                               it_use, id_controlled, it_status, nr_operator)
+    values (_nr_company, _nr_branch, _nr_med, _name,
+            left(nullif(trim(p_json ->> 'vc_presentation'), ''), 120), left(nullif(trim(p_json ->> 'vc_dosage'), ''), 300),
+            left(nullif(trim(p_json ->> 'vc_quantity'), ''), 60), coalesce(_use, 1), coalesce(_ctrl, false),
+            coalesce(_status, 1), _nr_user);
+  else
+    _nr_med := (p_json ->> 'nr_medication')::bigint;
+    update od.medication m set
+      vc_name         = case when p_json ? 'vc_name' then _name else m.vc_name end,
+      vc_presentation = case when p_json ? 'vc_presentation' then left(nullif(trim(p_json ->> 'vc_presentation'), ''), 120) else m.vc_presentation end,
+      vc_dosage       = case when p_json ? 'vc_dosage' then left(nullif(trim(p_json ->> 'vc_dosage'), ''), 300) else m.vc_dosage end,
+      vc_quantity     = case when p_json ? 'vc_quantity' then left(nullif(trim(p_json ->> 'vc_quantity'), ''), 60) else m.vc_quantity end,
+      it_use          = case when p_json ? 'it_use' then _use else m.it_use end,
+      id_controlled   = case when p_json ? 'id_controlled' then coalesce(_ctrl, false) else m.id_controlled end,
+      it_status       = case when p_json ? 'it_status' then _status else m.it_status end
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_medication = _nr_med
+    returning m.vc_name into _name;
+    if not found then
+      raise exception '%', ad.fn_message('MEDICATION_NOT_FOUND');
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'medication', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_med::text,
+    format('Medicamento %s %s', _name, case when _action = 'I' then 'cadastrado' else 'alterado' end),
+    jsonb_build_object('nr_medication', _nr_med));
+
+  return jsonb_build_object('nr_medication', _nr_med);
+end;
+$$;
+
+revoke all on function ad.medication_save(jsonb) from public, anon;
+grant execute on function ad.medication_save(jsonb) to authenticated;

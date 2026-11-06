@@ -245,3 +245,27 @@ drop policy if exists tooth_mark_select on od.tooth_mark;
 create policy tooth_mark_select on od.tooth_mark
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.document_template
+drop policy if exists document_template_select on od.document_template;
+create policy document_template_select on od.document_template
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.medication
+drop policy if exists medication_select on od.medication;
+create policy medication_select on od.medication
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_document
+drop policy if exists patient_document_select on od.patient_document;
+create policy patient_document_select on od.patient_document
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_document_item
+drop policy if exists patient_document_item_select on od.patient_document_item;
+create policy patient_document_item_select on od.patient_document_item
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

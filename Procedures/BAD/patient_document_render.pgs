@@ -1,0 +1,86 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_document_render(jsonb)                             ::
+  ::  UsedBy      : Flutter -> rpc('patient_document_render') (documentos)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Pre-visualizacao de um documento: preenche os campos {{...}} do modelo (ou
+    do texto enviado) com os dados do paciente, do profissional e da clinica
+    (od.fn_document_render). Nao grava nada. Exige LER na tela PATIENTS.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_template      bigint   o modelo (ou vc_body)
+    vc_body          text     texto com campos (substitui o do modelo)
+    nr_professional  bigint   opcional
+    extra            object   opcional: dias, cid, hora_inicio, hora_fim, valor, texto
+
+  Output jsonb: {"it_kind", "vc_title", "vc_body"}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND,
+    DOCUMENT_TEMPLATE_NOT_FOUND, PATIENT_DOCUMENT_PROFESSIONAL_INVALID
+*/
+create or replace function ad.patient_document_render(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _prof       bigint;
+  _t          od.document_template;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_document_render');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  if not exists (select 1 from od.patient p where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                              and p.nr_patient = _nr_patient) then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+  _prof := (p_json ->> 'nr_professional')::bigint;
+  if _prof is not null and not exists (
+       select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                         and r.nr_professional = _prof) then
+    raise exception '%', ad.fn_message('PATIENT_DOCUMENT_PROFESSIONAL_INVALID');
+  end if;
+  if p_json ? 'nr_template' then
+    select * into _t from od.document_template t
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch
+       and t.nr_template = (p_json ->> 'nr_template')::bigint;
+    if not found then
+      raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_NOT_FOUND');
+    end if;
+  end if;
+
+  return jsonb_build_object(
+    'it_kind', coalesce(_t.it_kind, 9),
+    'vc_title', coalesce(_t.vc_name, 'Documento'),
+    'vc_body', od.fn_document_render(_nr_company, _nr_branch, _nr_patient, _prof,
+                                     left(coalesce(p_json ->> 'vc_body', _t.vc_body, ''), 20000), p_json -> 'extra'));
+end;
+$$;
+
+revoke all on function ad.patient_document_render(jsonb) from public, anon;
+grant execute on function ad.patient_document_render(jsonb) to authenticated;
