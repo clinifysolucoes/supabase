@@ -1,0 +1,188 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_document_save(jsonb)                               ::
+  ::  UsedBy      : Flutter -> rpc('patient_document_save') (documentos)          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Documentos do paciente (tela PATIENTS).
+      vc_action = 'I'  emite: guarda o titulo, o texto final (ja preenchido) e,
+                       no receituario, os medicamentos      -> CRIAR ou ALTERAR
+      vc_action = 'D'  exclui (it_status 90)                -> ALTERAR
+    O documento emitido nao se altera (para corrigir, exclui e emite outro).
+    Grava ad.event_log sem o texto.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     obrigatorio 'I' | 'D'
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    it_kind          integer  obrigatorio em 'I' (1 atestado, 2 receituario, 3 contrato, 4 declaracao, 9 outro)
+    nr_template      bigint   opcional
+    vc_title         text     obrigatorio em 'I' (ate 120)
+    vc_body          text     texto final (ate 20000); obrigatorio fora do receituario
+    dt_document      date     opcional (padrao hoje)
+    nr_professional  bigint   opcional
+    items            array    receituario (obrigatorio): [{"nr_medication", "vc_name", "vc_presentation",
+                              "vc_dosage", "vc_quantity", "it_use", "id_controlled"}]; com nr_medication os
+                              campos vazios vem do catalogo
+    nr_document      bigint   obrigatorio em 'D'
+
+  Output jsonb: {"nr_document"}
+
+  Errors: VERSION_MISMATCH, PATIENT_DOCUMENT_ACTION_INVALID, RECORD_BRANCH_REQUIRED, PATIENT_DOCUMENT_FORBIDDEN,
+    PATIENT_REQUIRED, PATIENT_NOT_FOUND, PATIENT_DOCUMENT_VALUE_INVALID, PATIENT_DOCUMENT_TITLE_REQUIRED,
+    PATIENT_DOCUMENT_BODY_REQUIRED, PATIENT_DOCUMENT_ITEMS_REQUIRED, PATIENT_DOCUMENT_ITEM_INVALID {Item},
+    DOCUMENT_TEMPLATE_NOT_FOUND, PATIENT_DOCUMENT_PROFESSIONAL_INVALID, PATIENT_DOCUMENT_NOT_FOUND
+*/
+create or replace function ad.patient_document_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_doc     bigint;
+  _perm       jsonb;
+  _vc_name    text;
+  _kind       smallint;
+  _tpl        bigint;
+  _prof       bigint;
+  _dt         date;
+  _title      text := left(nullif(trim(p_json ->> 'vc_title'), ''), 120);
+  _body       text := nullif(trim(p_json ->> 'vc_body'), '');
+  _it         jsonb;
+  _i          integer := 0;
+  _m          od.medication;
+  _use        smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_document_save');
+  if _action not in ('I', 'D') then
+    raise exception '%', ad.fn_message('PATIENT_DOCUMENT_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
+     or (_action = 'D' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PATIENT_DOCUMENT_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _vc_name
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  if _action = 'D' then
+    _nr_doc := (p_json ->> 'nr_document')::bigint;
+    update od.patient_document d set it_status = 90
+     where d.nr_company = _nr_company and d.nr_branch = _nr_branch and d.nr_patient = _nr_patient
+       and d.nr_document = _nr_doc and d.it_status = 1
+    returning d.vc_title into _title;
+    if not found then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_NOT_FOUND');
+    end if;
+  else
+    begin
+      _kind := (p_json ->> 'it_kind')::smallint;
+      _tpl  := (p_json ->> 'nr_template')::bigint;
+      _prof := (p_json ->> 'nr_professional')::bigint;
+      _dt   := coalesce((p_json ->> 'dt_document')::date, current_date);
+    exception when others then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_VALUE_INVALID');
+    end;
+    if _kind is null or _kind not in (1, 2, 3, 4, 9) or length(coalesce(_body, '')) > 20000
+       or (p_json ? 'items' and jsonb_typeof(p_json -> 'items') <> 'array') then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_VALUE_INVALID');
+    end if;
+    if _title is null then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_TITLE_REQUIRED');
+    end if;
+    if _kind = 2 and coalesce(jsonb_array_length(p_json -> 'items'), 0) = 0 then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_ITEMS_REQUIRED');
+    end if;
+    if _kind <> 2 and _body is null then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_BODY_REQUIRED');
+    end if;
+    if _tpl is not null and not exists (
+         select 1 from od.document_template t where t.nr_company = _nr_company and t.nr_branch = _nr_branch
+                                                and t.nr_template = _tpl) then
+      raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_NOT_FOUND');
+    end if;
+    if _prof is not null and not exists (
+         select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                           and r.nr_professional = _prof) then
+      raise exception '%', ad.fn_message('PATIENT_DOCUMENT_PROFESSIONAL_INVALID');
+    end if;
+
+    select coalesce(max(d.nr_document), 0) + 1 into _nr_doc
+      from od.patient_document d
+     where d.nr_company = _nr_company and d.nr_branch = _nr_branch and d.nr_patient = _nr_patient;
+    insert into od.patient_document (nr_company, nr_branch, nr_patient, nr_document, it_kind, nr_template, vc_title,
+                                     vc_body, dt_document, nr_professional, nr_user, nr_operator)
+    values (_nr_company, _nr_branch, _nr_patient, _nr_doc, _kind, _tpl, _title, _body, _dt, _prof, _nr_user, _nr_user);
+
+    if _kind = 2 then
+      for _it in select * from jsonb_array_elements(p_json -> 'items') loop
+        _i := _i + 1;
+        _m := null;
+        begin
+          if _it ? 'nr_medication' and _it ->> 'nr_medication' is not null then
+            select * into _m from od.medication m
+             where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+               and m.nr_medication = (_it ->> 'nr_medication')::bigint;
+            if not found then
+              raise exception 'invalid';
+            end if;
+          end if;
+          _use := coalesce((_it ->> 'it_use')::smallint, _m.it_use, 1);
+          if _use not in (1, 2, 3) or coalesce(nullif(trim(_it ->> 'vc_name'), ''), _m.vc_name) is null then
+            raise exception 'invalid';
+          end if;
+          insert into od.patient_document_item (nr_company, nr_branch, nr_patient, nr_document, nr_item, nr_medication,
+                                                vc_name, vc_presentation, vc_dosage, vc_quantity, it_use, id_controlled,
+                                                nr_operator)
+          values (_nr_company, _nr_branch, _nr_patient, _nr_doc, _i, _m.nr_medication,
+                  left(coalesce(nullif(trim(_it ->> 'vc_name'), ''), _m.vc_name), 120),
+                  left(coalesce(nullif(trim(_it ->> 'vc_presentation'), ''), _m.vc_presentation), 120),
+                  left(coalesce(nullif(trim(_it ->> 'vc_dosage'), ''), _m.vc_dosage), 300),
+                  left(coalesce(nullif(trim(_it ->> 'vc_quantity'), ''), _m.vc_quantity), 60),
+                  _use, coalesce((_it ->> 'id_controlled')::boolean, _m.id_controlled, false), _nr_user);
+        exception when others then
+          raise exception '%', ad.fn_message('PATIENT_DOCUMENT_ITEM_INVALID', jsonb_build_object('Item', _i));
+        end;
+      end loop;
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS', case when _action = 'I' then 'CREATE' else 'DELETE' end,
+    'patient_document', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_doc::text,
+    format('%s %s para o paciente %s', _title, case when _action = 'I' then 'emitido' else 'excluído' end, _vc_name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_document', _nr_doc, 'it_kind', _kind, 'qt_items', _i));
+
+  return jsonb_build_object('nr_document', _nr_doc);
+end;
+$$;
+
+revoke all on function ad.patient_document_save(jsonb) from public, anon;
+grant execute on function ad.patient_document_save(jsonb) to authenticated;

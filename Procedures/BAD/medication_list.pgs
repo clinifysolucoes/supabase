@@ -1,0 +1,75 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.medication_list(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('medication_list') (receituario, config.)      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Catalogo de medicamentos da filial, com busca por nome. Na primeira chamada
+    cria a lista inicial (od.fn_medication_default). Exige LER na tela
+    PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_search   text     opcional (nome ou apresentacao, ILIKE)
+    id_include_inactive  boolean opcional (padrao false)
+
+  Output jsonb:
+    {"medications": [{"nr_medication", "vc_name", "vc_presentation", "vc_dosage", "vc_quantity",
+                      "it_use", "id_controlled", "it_status"}], "permission": {"id_update"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN
+*/
+create or replace function ad.medication_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _search     text := nullif(trim(p_json ->> 'vc_search'), '');
+  _settings   jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'medication_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user  := private.fn_current_user_nr();
+  _settings := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if _nr_user is null
+     or not (coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS') ->> 'id_read')::boolean, false)
+             or coalesce((_settings ->> 'id_read')::boolean, false)) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+
+  perform od.fn_medication_default(_nr_company, _nr_branch, _nr_user);
+
+  return jsonb_build_object(
+    'medications', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_medication', m.nr_medication, 'vc_name', m.vc_name, 'vc_presentation', m.vc_presentation,
+               'vc_dosage', m.vc_dosage, 'vc_quantity', m.vc_quantity, 'it_use', m.it_use,
+               'id_controlled', m.id_controlled, 'it_status', m.it_status)
+             order by m.vc_name, m.vc_presentation, m.nr_medication)
+        from od.medication m
+       where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+         and (_inactive or m.it_status = 1)
+         and (_search is null or m.vc_name ilike '%' || _search || '%' or m.vc_presentation ilike '%' || _search || '%')),
+      '[]'::jsonb),
+    'permission', jsonb_build_object('id_update', coalesce((_settings ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.medication_list(jsonb) from public, anon;
+grant execute on function ad.medication_list(jsonb) to authenticated;

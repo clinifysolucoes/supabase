@@ -1,0 +1,77 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_medication_default(bigint, bigint, bigint)              ::
+  ::  UsedBy      : ad.medication_list                                            ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria a lista inicial de medicamentos usuais na odontologia (com a posologia
+    de referencia, que o profissional confere e ajusta) quando a filial ainda
+    nao tem nenhum. Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_user (operador)
+  Output: integer (medicamentos criados)
+*/
+create or replace function od.fn_medication_default(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_user    bigint)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _n integer;
+begin
+  if exists (select 1 from od.medication m where m.nr_company = p_nr_company and m.nr_branch = p_nr_branch) then
+    return 0;
+  end if;
+  perform 1 from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch for update;
+  if exists (select 1 from od.medication m where m.nr_company = p_nr_company and m.nr_branch = p_nr_branch) then
+    return 0;
+  end if;
+  insert into od.medication (nr_company, nr_branch, nr_medication, vc_name, vc_presentation, vc_dosage, vc_quantity,
+                             it_use, nr_operator)
+  select p_nr_company, p_nr_branch, row_number() over (order by d.name), d.name, d.pres, d.dose, d.qty, d.use, p_nr_user
+    from (values
+      ('Dipirona sódica', '500 mg comprimido', 'Tomar 1 comprimido de 6 em 6 horas, se dor.', '1 caixa', 1),
+      ('Dipirona sódica', '500 mg/ml gotas', 'Tomar 40 gotas de 6 em 6 horas, se dor.', '1 frasco', 1),
+      ('Paracetamol', '750 mg comprimido', 'Tomar 1 comprimido de 6 em 6 horas, se dor.', '1 caixa', 1),
+      ('Paracetamol + codeína', '500 mg + 30 mg comprimido', 'Tomar 1 comprimido de 6 em 6 horas, se dor intensa, por até 3 dias.', '12 comprimidos', 1),
+      ('Ibuprofeno', '600 mg comprimido', 'Tomar 1 comprimido de 8 em 8 horas, por 3 dias, após as refeições.', '9 comprimidos', 1),
+      ('Nimesulida', '100 mg comprimido', 'Tomar 1 comprimido de 12 em 12 horas, por 3 dias, após as refeições.', '6 comprimidos', 1),
+      ('Cetorolaco de trometamina', '10 mg comprimido sublingual', 'Dissolver 1 comprimido sob a língua de 8 em 8 horas, por até 3 dias.', '9 comprimidos', 1),
+      ('Diclofenaco potássico', '50 mg comprimido', 'Tomar 1 comprimido de 8 em 8 horas, por 3 dias, após as refeições.', '9 comprimidos', 1),
+      ('Dexametasona', '4 mg comprimido', 'Tomar 2 comprimidos 1 hora antes do procedimento.', '2 comprimidos', 1),
+      ('Betametasona', '2 mg comprimido', 'Tomar 2 comprimidos 1 hora antes do procedimento.', '2 comprimidos', 1),
+      ('Amoxicilina', '500 mg cápsula', 'Tomar 1 cápsula de 8 em 8 horas, por 7 dias.', '21 cápsulas', 1),
+      ('Amoxicilina', '500 mg cápsula (profilaxia)', 'Tomar 4 cápsulas (2 g) 1 hora antes do procedimento.', '4 cápsulas', 1),
+      ('Amoxicilina + clavulanato de potássio', '875 mg + 125 mg comprimido', 'Tomar 1 comprimido de 12 em 12 horas, por 7 dias.', '14 comprimidos', 1),
+      ('Azitromicina', '500 mg comprimido', 'Tomar 1 comprimido ao dia, por 3 dias.', '3 comprimidos', 1),
+      ('Clindamicina', '300 mg cápsula', 'Tomar 1 cápsula de 6 em 6 horas, por 7 dias.', '28 cápsulas', 1),
+      ('Metronidazol', '400 mg comprimido', 'Tomar 1 comprimido de 8 em 8 horas, por 7 dias.', '21 comprimidos', 1),
+      ('Cefalexina', '500 mg cápsula', 'Tomar 1 cápsula de 6 em 6 horas, por 7 dias.', '28 cápsulas', 1),
+      ('Aciclovir', '200 mg comprimido', 'Tomar 1 comprimido de 4 em 4 horas (5 vezes ao dia), por 5 dias.', '25 comprimidos', 1),
+      ('Nistatina', '100.000 UI/ml suspensão oral', 'Bochechar 5 ml por 1 minuto e engolir, 4 vezes ao dia, por 14 dias.', '1 frasco', 1),
+      ('Omeprazol', '20 mg cápsula', 'Tomar 1 cápsula em jejum, enquanto usar o anti-inflamatório.', '1 caixa', 1),
+      ('Loratadina', '10 mg comprimido', 'Tomar 1 comprimido ao dia, por 5 dias.', '5 comprimidos', 1),
+      ('Digluconato de clorexidina', '0,12% solução', 'Bochechar 15 ml por 1 minuto, de 12 em 12 horas, por 7 dias. Não engolir.', '1 frasco', 2),
+      ('Aciclovir creme', '5% creme', 'Aplicar na lesão 5 vezes ao dia, por 5 dias.', '1 bisnaga', 3),
+      ('Triancinolona acetonida orabase', '1 mg/g pomada', 'Aplicar uma fina camada na lesão 3 vezes ao dia, após as refeições.', '1 bisnaga', 3),
+      ('Miconazol gel oral', '20 mg/g gel', 'Aplicar na região afetada 4 vezes ao dia, por 7 dias.', '1 bisnaga', 3),
+      ('Benzocaína gel', '20% gel', 'Aplicar na região dolorida até 4 vezes ao dia.', '1 bisnaga', 3),
+      ('Fluoreto de sódio', '0,05% solução', 'Bochechar 10 ml por 1 minuto, 1 vez ao dia, à noite. Não engolir.', '1 frasco', 2),
+      ('Gel dental com flúor', '5.000 ppm', 'Escovar os dentes com o gel à noite, sem enxaguar depois.', '1 bisnaga', 2),
+      ('Água bicarbonatada', 'bicarbonato de sódio', 'Bochechar com 1 colher de chá dissolvida em 1 copo de água morna, 3 vezes ao dia.', '1 pacote', 2),
+      ('Soro fisiológico', '0,9% solução', 'Fazer bochechos com o soro morno 3 vezes ao dia.', '1 frasco', 2)
+    ) d(name, pres, dose, qty, use);
+  get diagnostics _n = row_count;
+  return _n;
+end;
+$$;
+
+revoke all on function od.fn_medication_default(bigint, bigint, bigint) from public, anon, authenticated;

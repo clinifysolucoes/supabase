@@ -1,0 +1,116 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.document_template_save(jsonb)                              ::
+  ::  UsedBy      : Flutter -> rpc('document_template_save') (Configuracoes)      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I) ou altera parcialmente (U) um modelo de documento (permissao
+    ALTERAR na tela SETTINGS). Os documentos ja emitidos guardam o proprio
+    texto. Grava ad.event_log.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     obrigatorio 'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_template  bigint   obrigatorio em 'U'
+    it_kind      integer  obrigatorio em 'I': 1 atestado, 2 receituario, 3 contrato,
+                          4 declaracao de comparecimento, 9 outro
+    vc_name      text     obrigatorio em 'I' (ate 80)
+    vc_body      text     obrigatorio em 'I' (ate 20000; campos {{...}})
+    it_status    integer  opcional 1 | 90
+
+  Output jsonb: {"nr_template"}
+
+  Errors: VERSION_MISMATCH, DOCUMENT_TEMPLATE_ACTION_INVALID, RECORD_BRANCH_REQUIRED,
+    DOCUMENT_TEMPLATE_FORBIDDEN, DOCUMENT_TEMPLATE_NOT_FOUND, DOCUMENT_TEMPLATE_NAME_REQUIRED,
+    DOCUMENT_TEMPLATE_BODY_REQUIRED, DOCUMENT_TEMPLATE_VALUE_INVALID
+*/
+create or replace function ad.document_template_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_tpl     bigint;
+  _name       text := left(nullif(trim(p_json ->> 'vc_name'), ''), 80);
+  _body       text := nullif(trim(p_json ->> 'vc_body'), '');
+  _kind       smallint;
+  _status     smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'document_template_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_FORBIDDEN');
+  end if;
+  begin
+    _kind   := (p_json ->> 'it_kind')::smallint;
+    _status := (p_json ->> 'it_status')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_VALUE_INVALID');
+  end;
+  if (p_json ? 'it_kind' and (_kind is null or _kind not in (1, 2, 3, 4, 9)))
+     or (p_json ? 'it_status' and (_status is null or _status not in (1, 90)))
+     or length(coalesce(_body, '')) > 20000 then
+    raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_VALUE_INVALID');
+  end if;
+  if (_action = 'I' or p_json ? 'vc_name') and _name is null then
+    raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_NAME_REQUIRED');
+  end if;
+  if (_action = 'I' or p_json ? 'vc_body') and _body is null then
+    raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_BODY_REQUIRED');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  if _action = 'I' then
+    if _kind is null then
+      raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_VALUE_INVALID');
+    end if;
+    select coalesce(max(t.nr_template), 0) + 1 into _nr_tpl
+      from od.document_template t where t.nr_company = _nr_company and t.nr_branch = _nr_branch;
+    insert into od.document_template (nr_company, nr_branch, nr_template, it_kind, vc_name, vc_body, it_status, nr_operator)
+    values (_nr_company, _nr_branch, _nr_tpl, _kind, _name, _body, coalesce(_status, 1), _nr_user);
+  else
+    _nr_tpl := (p_json ->> 'nr_template')::bigint;
+    update od.document_template t set
+      it_kind   = case when p_json ? 'it_kind' then _kind else t.it_kind end,
+      vc_name   = case when p_json ? 'vc_name' then _name else t.vc_name end,
+      vc_body   = case when p_json ? 'vc_body' then _body else t.vc_body end,
+      it_status = case when p_json ? 'it_status' then _status else t.it_status end
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_template = _nr_tpl
+    returning t.vc_name into _name;
+    if not found then
+      raise exception '%', ad.fn_message('DOCUMENT_TEMPLATE_NOT_FOUND');
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'document_template', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_tpl::text,
+    format('Modelo de documento %s %s', _name, case when _action = 'I' then 'criado' else 'alterado' end),
+    jsonb_build_object('nr_template', _nr_tpl));
+
+  return jsonb_build_object('nr_template', _nr_tpl);
+end;
+$$;
+
+revoke all on function ad.document_template_save(jsonb) from public, anon;
+grant execute on function ad.document_template_save(jsonb) to authenticated;

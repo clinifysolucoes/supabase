@@ -169,3 +169,19 @@ create or replace trigger clinical_evolution_audit
 create or replace trigger tooth_mark_audit
   before insert or update on od.tooth_mark
   for each row execute function ad.trg_audit();
+
+create or replace trigger document_template_audit
+  before insert or update on od.document_template
+  for each row execute function ad.trg_audit();
+
+create or replace trigger medication_audit
+  before insert or update on od.medication
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_document_audit
+  before insert or update on od.patient_document
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_document_item_audit
+  before insert or update on od.patient_document_item
+  for each row execute function ad.trg_audit();

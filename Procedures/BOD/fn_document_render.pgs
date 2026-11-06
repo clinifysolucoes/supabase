@@ -1,0 +1,103 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_document_render(bigint x4, text, jsonb)                 ::
+  ::  UsedBy      : ad.patient_document_render                                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Preenche os campos {{...}} de um modelo de documento com os dados do
+    paciente, do profissional e da clinica. Campos sem valor ficam em branco;
+    campos desconhecidos ficam como estao. Helper interno (sem grant).
+      paciente cpf rg nascimento idade endereco responsavel_paciente
+      profissional cro clinica cnpj endereco_clinica telefone_clinica cidade
+      responsavel_tecnico cro_responsavel foro data data_extenso hora
+      e os extras de p_extra: dias cid hora_inicio hora_fim valor texto
+  Input:
+    p_nr_company, p_nr_branch, p_nr_patient, p_nr_professional (opcional),
+    p_body (texto do modelo), p_extra (jsonb com os extras)
+  Output: text
+*/
+create or replace function od.fn_document_render(
+  p_nr_company      bigint,
+  p_nr_branch       bigint,
+  p_nr_patient      bigint,
+  p_nr_professional bigint,
+  p_body            text,
+  p_extra           jsonb)
+returns text
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _p      od.patient;
+  _b      ad.branch;
+  _pr     od.professional;
+  _now    timestamp;
+  _months text[] := array['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho',
+                          'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+  _v      jsonb;
+  _k      text;
+  _out    text := coalesce(p_body, '');
+begin
+  select * into _p from od.patient p
+   where p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.nr_patient = p_nr_patient;
+  select * into _b from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch;
+  if p_nr_professional is not null then
+    select * into _pr from od.professional r
+     where r.nr_company = p_nr_company and r.nr_branch = p_nr_branch and r.nr_professional = p_nr_professional;
+  end if;
+  _now := now() at time zone coalesce(_b.vc_timezone, 'America/Sao_Paulo');
+
+  _v := jsonb_build_object(
+    'paciente', _p.vc_name,
+    'cpf', case when length(_p.vc_cpf) = 11 then
+             substr(_p.vc_cpf, 1, 3) || '.' || substr(_p.vc_cpf, 4, 3) || '.' || substr(_p.vc_cpf, 7, 3) || '-' || substr(_p.vc_cpf, 10, 2)
+           end,
+    'rg', _p.vc_rg,
+    'nascimento', to_char(_p.dt_birth, 'DD/MM/YYYY'),
+    'idade', case when _p.dt_birth is not null then extract(year from age(_now::date, _p.dt_birth))::int::text end,
+    'endereco', nullif(concat_ws(', ', _p.vc_address, _p.vc_address_number, _p.vc_address_complement, _p.vc_district,
+                                 nullif(concat_ws('/', _p.vc_city, _p.vc_state), '')), ''),
+    'responsavel_paciente', _p.vc_guardian_name,
+    'profissional', _pr.vc_name,
+    'cro', _pr.vc_council,
+    'clinica', coalesce(_b.vc_legal_name, _b.vc_name),
+    'cnpj', case when length(_b.vc_cnpj) = 14 then
+              substr(_b.vc_cnpj, 1, 2) || '.' || substr(_b.vc_cnpj, 3, 3) || '.' || substr(_b.vc_cnpj, 6, 3) || '/' ||
+              substr(_b.vc_cnpj, 9, 4) || '-' || substr(_b.vc_cnpj, 13, 2)
+            else _b.vc_cnpj end,
+    'endereco_clinica', nullif(concat_ws(', ', _b.vc_address, _b.vc_address_number, _b.vc_address_extra, _b.vc_district,
+                                         nullif(concat_ws('/', _b.vc_city, _b.vc_state), '')), ''),
+    'telefone_clinica', _b.vc_phone,
+    'cidade', _b.vc_city,
+    'responsavel_tecnico', _b.vc_technical_name,
+    'cro_responsavel', nullif(concat_ws('-', _b.vc_technical_cro, _b.vc_technical_cro_state), ''),
+    'foro', coalesce(_b.vc_forum_city, _b.vc_city),
+    'data', to_char(_now, 'DD/MM/YYYY'),
+    'data_extenso', extract(day from _now)::int || ' de ' || _months[extract(month from _now)::int] || ' de ' ||
+                    extract(year from _now)::int,
+    'hora', to_char(_now, 'HH24:MI'));
+  if jsonb_typeof(p_extra) = 'object' then
+    for _k in select * from jsonb_object_keys(p_extra) loop
+      if _k in ('dias', 'cid', 'hora_inicio', 'hora_fim', 'valor', 'texto') then
+        _v := _v || jsonb_build_object(_k, left(p_extra ->> _k, 2000));
+      end if;
+    end loop;
+  end if;
+
+  for _k in select * from jsonb_object_keys(_v) loop
+    _out := replace(_out, '{{' || _k || '}}', coalesce(_v ->> _k, ''));
+  end loop;
+  foreach _k in array array['dias', 'cid', 'hora_inicio', 'hora_fim', 'valor', 'texto'] loop
+    _out := replace(_out, '{{' || _k || '}}', '');
+  end loop;
+  return _out;
+end;
+$$;
+
+revoke all on function od.fn_document_render(bigint, bigint, bigint, bigint, text, jsonb) from public, anon, authenticated;

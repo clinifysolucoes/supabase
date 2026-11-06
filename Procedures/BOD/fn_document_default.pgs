@@ -1,0 +1,56 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_document_default(bigint, bigint, bigint)                ::
+  ::  UsedBy      : ad.document_template_list                                     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria os modelos de documento padrao (atestado, receituario, declaracao de
+    comparecimento, contrato e termo de consentimento) quando a filial ainda
+    nao tem nenhum. Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_user (operador)
+  Output: integer (modelos criados)
+*/
+create or replace function od.fn_document_default(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_user    bigint)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _n integer;
+begin
+  if exists (select 1 from od.document_template t where t.nr_company = p_nr_company and t.nr_branch = p_nr_branch) then
+    return 0;
+  end if;
+  perform 1 from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch for update;
+  if exists (select 1 from od.document_template t where t.nr_company = p_nr_company and t.nr_branch = p_nr_branch) then
+    return 0;
+  end if;
+  insert into od.document_template (nr_company, nr_branch, nr_template, it_kind, vc_name, vc_body, nr_operator)
+  select p_nr_company, p_nr_branch, d.nr, d.kind, d.name, d.body, p_nr_user
+    from (values
+      (1, 1, 'Atestado odontológico',
+       E'Atesto, para os devidos fins, que {{paciente}}, CPF {{cpf}}, esteve sob meus cuidados profissionais nesta data, das {{hora_inicio}} às {{hora_fim}}, devendo permanecer afastado(a) de suas atividades por {{dias}} dia(s).\n\nCID: {{cid}}\n\n{{cidade}}, {{data_extenso}}.'),
+      (2, 2, 'Receituário',
+       E'Paciente: {{paciente}}\nEndereço: {{endereco}}'),
+      (3, 4, 'Declaração de comparecimento',
+       E'Declaro, para os devidos fins, que {{paciente}}, CPF {{cpf}}, compareceu a esta clínica para atendimento odontológico em {{data}}, das {{hora_inicio}} às {{hora_fim}}.\n\n{{cidade}}, {{data_extenso}}.'),
+      (4, 3, 'Contrato de prestação de serviços odontológicos',
+       E'CONTRATANTE: {{paciente}}, CPF {{cpf}}, RG {{rg}}, residente em {{endereco}}.\n\nCONTRATADA: {{clinica}}, CNPJ {{cnpj}}, com sede em {{endereco_clinica}}, responsável técnico {{responsavel_tecnico}} (CRO {{cro_responsavel}}).\n\n1. OBJETO. A CONTRATADA prestará ao CONTRATANTE os serviços odontológicos descritos no plano de tratamento aprovado: {{texto}}.\n\n2. VALOR. O CONTRATANTE pagará pelos serviços o valor de {{valor}}, nas condições do orçamento aprovado.\n\n3. OBRIGAÇÕES DO CONTRATANTE. Comparecer às consultas agendadas, avisar faltas com antecedência, seguir as orientações recebidas e informar qualquer alteração em seu estado de saúde.\n\n4. OBRIGAÇÕES DA CONTRATADA. Executar os serviços com técnica e materiais adequados, esclarecer o CONTRATANTE sobre o tratamento e manter sigilo sobre suas informações de saúde (LGPD).\n\n5. RESCISÃO. O contrato pode ser rescindido por qualquer das partes, pagando-se os serviços já realizados.\n\n6. FORO. Fica eleito o foro da comarca de {{foro}} para dirimir dúvidas deste contrato.\n\n{{cidade}}, {{data_extenso}}.\n\n\n______________________________          ______________________________\n{{paciente}}                                        {{clinica}}'),
+      (5, 9, 'Termo de consentimento',
+       E'Eu, {{paciente}}, CPF {{cpf}}, declaro que fui informado(a) de forma clara sobre o diagnóstico, o tratamento proposto ({{texto}}), suas alternativas, riscos, benefícios e cuidados necessários, tive a oportunidade de fazer perguntas e autorizo a sua realização pelo(a) profissional {{profissional}}, CRO {{cro}}.\n\n{{cidade}}, {{data_extenso}}.\n\n\n______________________________\n{{paciente}}')
+    ) d(nr, kind, name, body);
+  get diagnostics _n = row_count;
+  return _n;
+end;
+$$;
+
+revoke all on function od.fn_document_default(bigint, bigint, bigint) from public, anon, authenticated;
