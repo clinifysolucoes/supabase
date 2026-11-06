@@ -1,0 +1,253 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.budget_save(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> rpc('budget_save') (Orcamentos)                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I, permissao CRIAR) ou altera parcialmente (U, permissao ALTERAR)
+    um orcamento em aberto ou aguardando aprovacao do desconto. Com "items"
+    (lista) substitui os procedimentos; valor unitario padrao = valor cobrado
+    hoje do procedimento. Totais recalculados: bruto = soma dos itens,
+    desconto em valor (vl_discount) ou percentual (pc_discount), total.
+    Desconto acima do maximo da filial (od.branch_setting.pc_budget_max_discount,
+    padrao 10%): quem e administrador da empresa ja aprova; os demais deixam
+    o orcamento "aguardando aprovacao do desconto" (situacao 2). Validade
+    padrao: data do orcamento + qt_budget_valid_days (padrao 30).
+    Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    vc_action          text     obrigatorio 'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_budget          bigint   obrigatorio em 'U'
+    nr_patient         bigint   obrigatorio em 'I' (paciente ativo)
+    nr_professional    bigint   opcional (profissional ativo)
+    vc_title           text     opcional (ate 80)
+    dt_budget          date     opcional (padrao hoje no fuso da filial)
+    dt_valid           date     opcional (>= dt_budget)
+    vl_discount        numeric  opcional (>= 0)  | pc_discount numeric opcional 0..100
+    qt_installments    integer  opcional 1..24 (condicao de pagamento)
+    it_payment_method  integer  opcional 1..7, 9
+    vc_notes           text     opcional (ate 1000)
+    items              array    obrigatorio em 'I': [{"nr_procedure", "vc_description", "vc_tooth",
+                                "qt_quantity", "vl_unit"}] (procedimento ou descricao livre)
+
+  Output jsonb: o mesmo de ad.budget_get
+
+  Errors: VERSION_MISMATCH, BUDGET_ACTION_INVALID, BUDGET_BRANCH_REQUIRED, BUDGET_FORBIDDEN,
+    BUDGET_REQUIRED, BUDGET_NOT_FOUND, BUDGET_STATUS_INVALID, BUDGET_VALUE_INVALID,
+    BUDGET_PATIENT_INVALID, BUDGET_PROFESSIONAL_INVALID, BUDGET_DATE_INVALID, BUDGET_ITEMS_REQUIRED,
+    BUDGET_ITEM_INVALID {Item}, BUDGET_PROCEDURE_INVALID {Item}, BUDGET_DISCOUNT_INVALID
+*/
+create or replace function ad.budget_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_budget  bigint;
+  _perm       jsonb;
+  _cur        od.budget%rowtype;
+  _new        od.budget%rowtype;
+  _tz         text;
+  _max        numeric;
+  _days       integer;
+  _pc         numeric;
+  _it         jsonb;
+  _i          integer := 0;
+  _proc       od.procedure%rowtype;
+  _qt         numeric;
+  _unit       numeric;
+  _desc       text;
+  _admin      boolean;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'budget_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('BUDGET_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('BUDGET_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'U' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('BUDGET_FORBIDDEN');
+  end if;
+  _admin := private.fn_is_company_admin(_nr_company);
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  select coalesce(s.pc_budget_max_discount, 10), coalesce(s.qt_budget_valid_days, 30) into _max, _days
+    from (select 1) x
+    left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+  if _action = 'U' then
+    _nr_budget := (p_json ->> 'nr_budget')::bigint;
+    if _nr_budget is null then
+      raise exception '%', ad.fn_message('BUDGET_REQUIRED');
+    end if;
+    select * into _cur from od.budget b
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _nr_budget
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('BUDGET_NOT_FOUND');
+    end if;
+    if _cur.it_status not in (1, 2) then
+      raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+  else
+    if not (p_json ? 'items') then
+      raise exception '%', ad.fn_message('BUDGET_ITEMS_REQUIRED');
+    end if;
+    _cur.dt_budget := (now() at time zone _tz)::date;
+  end if;
+
+  begin
+    _new.nr_patient        := case when p_json ? 'nr_patient'        then (p_json ->> 'nr_patient')::bigint        else _cur.nr_patient end;
+    _new.nr_professional   := case when p_json ? 'nr_professional'   then (p_json ->> 'nr_professional')::bigint   else _cur.nr_professional end;
+    _new.vc_title          := case when p_json ? 'vc_title'          then left(nullif(trim(p_json ->> 'vc_title'), ''), 80) else _cur.vc_title end;
+    _new.dt_budget         := case when p_json ? 'dt_budget'         then (p_json ->> 'dt_budget')::date           else _cur.dt_budget end;
+    _new.dt_valid          := case when p_json ? 'dt_valid'          then (p_json ->> 'dt_valid')::date            else _cur.dt_valid end;
+    _new.qt_installments   := case when p_json ? 'qt_installments'   then (p_json ->> 'qt_installments')::smallint else _cur.qt_installments end;
+    _new.it_payment_method := case when p_json ? 'it_payment_method' then (p_json ->> 'it_payment_method')::smallint else _cur.it_payment_method end;
+    _new.vc_notes          := case when p_json ? 'vc_notes'          then left(nullif(trim(p_json ->> 'vc_notes'), ''), 1000) else _cur.vc_notes end;
+    _pc                    := (p_json ->> 'pc_discount')::numeric;
+    _new.vl_discount       := case when p_json ? 'vl_discount'       then round((p_json ->> 'vl_discount')::numeric, 2) else _cur.vl_discount end;
+  exception when others then
+    raise exception '%', ad.fn_message('BUDGET_VALUE_INVALID');
+  end;
+  _new.dt_budget := coalesce(_new.dt_budget, (now() at time zone _tz)::date);
+  _new.dt_valid  := coalesce(_new.dt_valid, _new.dt_budget + _days);
+  if _new.dt_valid < _new.dt_budget then
+    raise exception '%', ad.fn_message('BUDGET_DATE_INVALID');
+  end if;
+  if (_new.qt_installments is not null and _new.qt_installments not between 1 and 24)
+     or (_new.it_payment_method is not null and _new.it_payment_method not in (1, 2, 3, 4, 5, 6, 7, 9)) then
+    raise exception '%', ad.fn_message('BUDGET_VALUE_INVALID');
+  end if;
+  if _new.nr_patient is null or not exists (
+       select 1 from od.patient p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient
+          and (p.it_status = 1 or _new.nr_patient is not distinct from _cur.nr_patient)) then
+    raise exception '%', ad.fn_message('BUDGET_PATIENT_INVALID');
+  end if;
+  if _new.nr_professional is not null and not exists (
+       select 1 from od.professional p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _new.nr_professional
+          and (p.it_status = 1 or _new.nr_professional is not distinct from _cur.nr_professional)) then
+    raise exception '%', ad.fn_message('BUDGET_PROFESSIONAL_INVALID');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(b.nr_budget), 0) + 1 into _nr_budget
+      from od.budget b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+    insert into od.budget (nr_company, nr_branch, nr_budget, nr_patient, nr_professional, vc_title, dt_budget, dt_valid,
+                           qt_installments, it_payment_method, vc_notes, nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _nr_budget, _new.nr_patient, _new.nr_professional, _new.vc_title, _new.dt_budget,
+            _new.dt_valid, _new.qt_installments, _new.it_payment_method, _new.vc_notes, _nr_user, _nr_user);
+  end if;
+
+  -- itens
+  if p_json ? 'items' then
+    if jsonb_typeof(p_json -> 'items') <> 'array' or jsonb_array_length(p_json -> 'items') = 0 then
+      raise exception '%', ad.fn_message('BUDGET_ITEMS_REQUIRED');
+    end if;
+    delete from od.budget_item i where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _nr_budget;
+    for _it in select * from jsonb_array_elements(p_json -> 'items') loop
+      _i := _i + 1;
+      _proc := null;
+      begin
+        _qt   := coalesce(round((_it ->> 'qt_quantity')::numeric, 2), 1);
+        _unit := round((_it ->> 'vl_unit')::numeric, 2);
+      exception when others then
+        raise exception '%', ad.fn_message('BUDGET_ITEM_INVALID', jsonb_build_object('Item', _i));
+      end;
+      if (_it ->> 'nr_procedure') is not null then
+        select * into _proc from od.procedure p
+         where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+           and p.nr_procedure = (_it ->> 'nr_procedure')::bigint;
+        if not found then
+          raise exception '%', ad.fn_message('BUDGET_PROCEDURE_INVALID', jsonb_build_object('Item', _i));
+        end if;
+      end if;
+      _desc := left(coalesce(nullif(trim(_it ->> 'vc_description'), ''), _proc.vc_name), 120);
+      _unit := coalesce(_unit, _proc.vl_current_price, 0);
+      if _desc is null or _qt <= 0 or _unit < 0 then
+        raise exception '%', ad.fn_message('BUDGET_ITEM_INVALID', jsonb_build_object('Item', _i));
+      end if;
+      insert into od.budget_item (nr_company, nr_branch, nr_budget, nr_item, nr_procedure, vc_description, vc_tooth,
+                                  qt_quantity, vl_unit, vl_total, nr_operator)
+      values (_nr_company, _nr_branch, _nr_budget, _i, _proc.nr_procedure, _desc,
+              left(nullif(trim(_it ->> 'vc_tooth'), ''), 40), _qt, _unit, round(_qt * _unit, 2), _nr_user);
+    end loop;
+  end if;
+
+  -- totais e desconto
+  select coalesce(sum(i.vl_total), 0) into _new.vl_gross
+    from od.budget_item i where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _nr_budget;
+  if _pc is not null then
+    if _pc < 0 or _pc > 100 then
+      raise exception '%', ad.fn_message('BUDGET_DISCOUNT_INVALID');
+    end if;
+    _new.vl_discount := round(_new.vl_gross * _pc / 100, 2);
+  end if;
+  _new.vl_discount := coalesce(_new.vl_discount, 0);
+  if _new.vl_discount < 0 or _new.vl_discount > _new.vl_gross then
+    raise exception '%', ad.fn_message('BUDGET_DISCOUNT_INVALID');
+  end if;
+  _pc := case when _new.vl_gross = 0 then 0 else _new.vl_discount / _new.vl_gross * 100 end;
+
+  -- desconto acima do maximo: o administrador ja aprova; os demais aguardam
+  if _pc > _max + 0.005 then
+    if _admin then
+      _new.it_status := 1; _new.id_discount_approved := true;
+      _new.nr_user_discount := _nr_user; _new.dh_discount := now();
+    elsif _action = 'U' and _cur.id_discount_approved and _new.vl_discount <= _cur.vl_discount
+          and _new.vl_gross = _cur.vl_gross then
+      _new.it_status := 1; _new.id_discount_approved := true;
+      _new.nr_user_discount := _cur.nr_user_discount; _new.dh_discount := _cur.dh_discount;
+    else
+      _new.it_status := 2; _new.id_discount_approved := false;
+    end if;
+  else
+    _new.it_status := 1; _new.id_discount_approved := false;
+  end if;
+
+  update od.budget b set
+    nr_patient = _new.nr_patient, nr_professional = _new.nr_professional, vc_title = _new.vc_title,
+    dt_budget = _new.dt_budget, dt_valid = _new.dt_valid, qt_installments = _new.qt_installments,
+    it_payment_method = _new.it_payment_method, vc_notes = _new.vc_notes,
+    vl_gross = _new.vl_gross, vl_discount = _new.vl_discount, vl_total = _new.vl_gross - _new.vl_discount,
+    it_status = _new.it_status, id_discount_approved = _new.id_discount_approved,
+    nr_user_discount = case when _new.id_discount_approved then _new.nr_user_discount end,
+    dh_discount = case when _new.id_discount_approved then _new.dh_discount end
+  where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _nr_budget;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'BUDGETS', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'budget', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_budget::text,
+    format('Orçamento %s %s', _nr_budget, case when _action = 'I' then 'criado' else 'alterado' end),
+    jsonb_build_object('nr_patient', _new.nr_patient, 'vl_gross', _new.vl_gross, 'vl_discount', _new.vl_discount,
+                       'it_status', _new.it_status, 'qt_items', _i));
+
+  return ad.budget_get(jsonb_build_object('nr_version', 1, 'nr_company', _nr_company, 'nr_branch', _nr_branch,
+                                          'nr_budget', _nr_budget));
+end;
+$$;
+
+revoke all on function ad.budget_save(jsonb) from public, anon;
+grant execute on function ad.budget_save(jsonb) to authenticated;

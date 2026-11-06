@@ -60,6 +60,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.fin_category`](#odfincategory) | Categoria financeira (plano de contas) | Plano de contas da filial: categorias de receita e de despesa. A despesa tem o tipo de custo (fixo, variável, investimento, outros), como as despesas da precificação, de onde fin_setup cria as primeiras. nr_category é sequencial por filial. |
 | [`od.fin_supplier`](#odfinsupplier) | Fornecedor | Fornecedores da filial, usados nas contas a pagar. CPF/CNPJ e telefone só com dígitos. nr_supplier é sequencial por filial. |
 | [`od.fin_entry`](#odfinentry) | Lançamento financeiro | Conta a receber ou a pagar da filial: categoria, conta, fornecedor ou paciente, descrição, valor, vencimento, competência, forma de pagamento, pagamento (data e valor) e situação. Parcelas e repetições mensais ficam ligadas pelo mesmo uu_group. nr_entry é sequencial por filial. |
+| [`od.budget`](#odbudget) | Orçamento | Orçamento (plano de tratamento) do paciente: itens, desconto, validade e condição de pagamento. Desconto acima do máximo da filial fica aguardando o administrador; aprovado pelo paciente gera as contas a receber (fin_entry.nr_budget). nr_budget é sequencial por filial. |
+| [`od.budget_item`](#odbudgetitem) | Item do orçamento | Procedimento (ou item livre) do orçamento com dente/região, quantidade e valores. |
 | [`od.fin_cash_session`](#odfincashsession) | Sessão de caixa | Caixa do dia por pessoa: abertura (valor contado) e fechamento (contado × esperado) numa conta do tipo caixa. Uma sessão aberta por conta e por usuário; recebimentos, pagamentos e transferências feitos na conta enquanto aberta entram no fechamento. nr_session é sequencial por filial. |
 | [`od.fin_transfer`](#odfintransfer) | Transferência entre contas | Dinheiro que passa de uma conta da filial para outra (não é receita nem despesa): transferência, sangria (do caixa para outra conta) ou suprimento (de outra conta para o caixa). Entra no saldo e no extrato das duas contas. nr_transfer é sequencial por filial. |
 | [`od.fin_card_rate`](#odfincardrate) | Taxa de recebimento | Taxa da filial por forma de pagamento (cartão de crédito, débito, boleto, cheque) e faixa de parcelas: percentual, tarifa fixa, prazo em dias para o dinheiro cair e a conta destino. Com taxa cadastrada, a baixa nessa forma gera recebíveis. nr_rate é sequencial por filial. |
@@ -131,6 +133,10 @@ erDiagram
   fin_category ||--o{ fin_recurrence : "classifica"
   fin_recurrence |o--o{ fin_entry : "gera"
   fin_entry ||--o{ fin_attachment : "anexa"
+  patient ||--o{ budget : "orçamentos"
+  budget ||--|{ budget_item : "itens"
+  procedure ||--o{ budget_item : "orçado"
+  budget ||--o{ fin_entry : "gera contas"
   fin_entry ||--o{ fin_receipt : "recibos"
   fin_account ||--o{ fin_transfer : "transfere"
   fin_cash_session |o--o{ fin_transfer : "sangria / suprimento"
@@ -462,8 +468,43 @@ erDiagram
     varchar vc_notes
     bigint nr_user_created FK
     bigint nr_appointment FK
+    bigint nr_budget FK
     bigint nr_professional FK
     bigint nr_cash_session FK
+  }
+  budget {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_budget PK
+    bigint nr_patient FK
+    bigint nr_professional FK
+    varchar vc_title
+    date dt_budget
+    date dt_valid
+    numeric vl_gross
+    numeric vl_discount
+    numeric vl_total
+    smallint qt_installments
+    smallint it_payment_method
+    varchar vc_notes
+    smallint it_status
+    boolean id_discount_approved
+    bigint nr_user_discount FK
+    timestamptz dh_discount
+    timestamptz dh_accepted
+    bigint nr_user_created FK
+  }
+  budget_item {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_budget PK, FK
+    smallint nr_item PK
+    bigint nr_procedure FK
+    varchar vc_description
+    varchar vc_tooth
+    numeric qt_quantity
+    numeric vl_unit
+    numeric vl_total
   }
   fin_cash_session {
     bigint nr_company PK, FK
@@ -670,6 +711,8 @@ erDiagram
     numeric pc_late_interest
     varchar vc_receipt_prefix
     bigint nr_next_receipt
+    numeric pc_budget_max_discount
+    smallint qt_budget_valid_days
     numeric pc_dre_revenue_tax
     numeric pc_dre_income_tax
     numeric pc_dre_csll
@@ -1358,8 +1401,67 @@ Conta a receber ou a pagar da filial: categoria, conta, fornecedor ou paciente, 
 | `vc_notes` | `varchar(500)` |  | NULL |  | Observações. |
 | `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Quem lançou. |
 | `nr_appointment` | `bigint` | FK → `appointment.nr_appointment` | NULL |  | Atendimento da agenda que gerou o lançamento (fechamento da consulta: recebimento e comissão). |
+| `nr_budget` | `bigint` | FK → `budget.nr_budget` | NULL |  | Orçamento aprovado que gerou a conta a receber. |
 | `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional (comissão a pagar ou atendimento a receber). |
 | `nr_cash_session` | `bigint` | FK → `fin_cash_session.nr_session` | NULL |  | Sessão de caixa em que o pagamento entrou (conta com caixa aberto no momento da baixa). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.budget
+
+**Orçamento**
+
+Orçamento (plano de tratamento) do paciente: itens, desconto, validade e condição de pagamento. Desconto acima do máximo da filial fica aguardando o administrador; aprovado pelo paciente gera as contas a receber (fin_entry.nr_budget). nr_budget é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via budget_save e budget_status (tela BUDGETS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_budget` | `bigint` | PK3 | NOT NULL |  | Número sequencial do orçamento na filial. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional responsável. |
+| `vc_title` | `varchar(80)` |  | NULL |  | Título (ex. Reabilitação superior). |
+| `dt_budget` | `date` |  | NOT NULL |  | Data do orçamento. |
+| `dt_valid` | `date` |  | NOT NULL |  | Validade (padrão: data + qt_budget_valid_days). |
+| `vl_gross` | `numeric(14,2)` |  | NOT NULL | `0` | Soma dos itens. |
+| `vl_discount` | `numeric(14,2)` |  | NOT NULL | `0` | Desconto em valor. |
+| `vl_total` | `numeric(14,2)` |  | NOT NULL | `0` | Total (bruto − desconto). |
+| `qt_installments` | `smallint` |  | NULL |  | Condição de pagamento: parcelas (1 a 24). |
+| `it_payment_method` | `smallint` |  | NULL |  | Forma de pagamento prevista. Valores: 1 = Dinheiro; 2 = Pix; 3 = Cartão de crédito; 4 = Cartão de débito; 5 = Transferência; 6 = Boleto; 7 = Cheque; 9 = Outro. |
+| `vc_notes` | `varchar(1000)` |  | NULL |  | Observações. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do orçamento. Valores: 1 = Em aberto; 2 = Aguardando aprovação do desconto; 3 = Aprovado pelo paciente; 4 = Recusado; 90 = Cancelado. |
+| `id_discount_approved` | `boolean` |  | NOT NULL | `false` | Desconto acima do máximo aprovado pelo administrador. |
+| `nr_user_discount` | `bigint` | FK → `app_user.nr_user` | NULL |  | Administrador que aprovou o desconto. |
+| `dh_discount` | `timestamptz` |  | NULL |  | Quando o desconto foi aprovado. |
+| `dh_accepted` | `timestamptz` |  | NULL |  | Quando o paciente aprovou (gerou as contas a receber). |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Usuário que criou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.budget_item
+
+**Item do orçamento**
+
+Procedimento (ou item livre) do orçamento com dente/região, quantidade e valores.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via budget_save (tela BUDGETS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `budget.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `budget.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_budget` | `bigint` | PK3, FK → `budget.nr_budget` | NOT NULL |  | Orçamento. |
+| `nr_item` | `smallint` | PK4 | NOT NULL |  | Ordem do item no orçamento. |
+| `nr_procedure` | `bigint` | FK → `procedure.nr_procedure` | NULL |  | Procedimento da precificação (nulo = item livre). |
+| `vc_description` | `varchar(120)` |  | NOT NULL |  | Descrição (padrão: nome do procedimento). |
+| `vc_tooth` | `varchar(40)` |  | NULL |  | Dente ou região. |
+| `qt_quantity` | `numeric(7,2)` |  | NOT NULL | `1` | Quantidade. |
+| `vl_unit` | `numeric(12,2)` |  | NOT NULL | `0` | Valor unitário (padrão: valor cobrado hoje do procedimento). |
+| `vl_total` | `numeric(14,2)` |  | NOT NULL | `0` | Quantidade × valor unitário. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -1722,6 +1824,8 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `pc_late_interest` | `numeric(5,2)` |  | NOT NULL | `0` | Juros de mora ao mês nas contas a receber (%, pro rata por dia, 0 a 10). |
 | `vc_receipt_prefix` | `varchar(10)` |  | NOT NULL | `''` | Prefixo do número impresso dos recibos (ex. REC-; letras, números, - / .). |
 | `nr_next_receipt` | `bigint` |  | NOT NULL | `1` | Próximo número de recibo da filial (números já usados são pulados). |
+| `pc_budget_max_discount` | `numeric(5,2)` |  | NOT NULL | `10` | Desconto máximo do orçamento sem aprovação (%, 0 a 100); acima disso só o administrador da empresa aprova. |
+| `qt_budget_valid_days` | `smallint` |  | NOT NULL | `30` | Validade padrão do orçamento em dias (1 a 365). |
 | `pc_dre_revenue_tax` | `numeric(5,2)` |  | NOT NULL | `0` | DRE: impostos sobre a receita bruta para a estimativa (Simples, ISS, PIS/COFINS; % 0 a 50; zero não estima). |
 | `pc_dre_income_tax` | `numeric(5,2)` |  | NOT NULL | `0` | DRE: IRPJ sobre o resultado antes dos impostos (% 0 a 50; zero não estima). |
 | `pc_dre_csll` | `numeric(5,2)` |  | NOT NULL | `0` | DRE: CSLL sobre o resultado antes dos impostos (% 0 a 50; zero não estima). |
@@ -1904,12 +2008,16 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_receipt_issue(p_json jsonb)` | authenticated | Emite o recibo de uma conta a receber paga (criar na tela FINANCE) com o próximo número da filial; se já existe recibo ativo devolve o mesmo (id_existing). Pagador padrão: o paciente (nome e CPF); descrição padrão: a da conta. Devolve recibo e emitente. Grava event_log. |
 | `ad.fin_receipt_get(p_json jsonb)` | authenticated | Um recibo (por número ou o ativo da conta) com os dados da clínica emitente (razão social, CNPJ, endereço, responsável técnico) para o PDF. Exige ler na tela FINANCE. |
 | `ad.fin_receipt_cancel(p_json jsonb)` | authenticated | Cancela um recibo emitido com o motivo (alterar na tela FINANCE); o número não é reaproveitado. Grava event_log. |
+| `ad.budget_list(p_json jsonb)` | authenticated | Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS. |
+| `ad.budget_get(p_json jsonb)` | authenticated | Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. |
+| `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. |
+| `ad.budget_status(p_json jsonb)` | authenticated | Situação do orçamento (alterar na tela BUDGETS): APPROVE_DISCOUNT (só o administrador), ACCEPT (paciente aprovou dentro da validade: gera as contas a receber parceladas na categoria Tratamentos), REFUSE, CANCEL (aprovado só sem pagamento; cancela as contas em aberto) e REOPEN. Grava event_log. |
 | `ad.fin_attachment_save(p_json jsonb)` | authenticated | Registro dos anexos de uma conta, chamado pela Edge Function fin-attachment com o JWT do usuário antes da URL assinada: I reserva o caminho no Storage (PDF ou imagem, até 10 MB; conta não cancelada); DELETE exclui (lógico) e devolve o caminho para apagar o arquivo. Permissão de alterar na tela FINANCE. Grava event_log. |
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. |
 | `ad.trash_restore(p_json jsonb)` | authenticated | Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS. |
@@ -2022,6 +2130,25 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `BRANCH_UPDATE_PHONE_INVALID` | `branch_update` |  |
 | `BRANCH_UPDATE_STATE_INVALID` | `branch_update` |  |
 | `BRANCH_UPDATE_TIMEZONE_INVALID` | `branch_update` | Timezone |
+| `BUDGET_ACTION_INVALID` | `budget_save`, `budget_status` |  |
+| `BUDGET_BRANCH_REQUIRED` | `budget_list`, `budget_get`, `budget_save`, `budget_status` |  |
+| `BUDGET_DATE_INVALID` | `budget_save` |  |
+| `BUDGET_DISCOUNT_FORBIDDEN` | `budget_status` |  |
+| `BUDGET_DISCOUNT_INVALID` | `budget_save` |  |
+| `BUDGET_EMPTY` | `budget_status` |  |
+| `BUDGET_EXPIRED` | `budget_status` |  |
+| `BUDGET_FILTER_INVALID` | `budget_list` |  |
+| `BUDGET_FORBIDDEN` | `budget_list`, `budget_get`, `budget_save`, `budget_status` |  |
+| `BUDGET_HAS_PAYMENTS` | `budget_status` |  |
+| `BUDGET_ITEM_INVALID` | `budget_save` |  |
+| `BUDGET_ITEMS_REQUIRED` | `budget_save` |  |
+| `BUDGET_NOT_FOUND` | `budget_get`, `budget_save`, `budget_status` |  |
+| `BUDGET_PATIENT_INVALID` | `budget_save` |  |
+| `BUDGET_PROCEDURE_INVALID` | `budget_save` |  |
+| `BUDGET_PROFESSIONAL_INVALID` | `budget_save` |  |
+| `BUDGET_REQUIRED` | `budget_save`, `budget_status` |  |
+| `BUDGET_STATUS_INVALID` | `budget_save`, `budget_status` |  |
+| `BUDGET_VALUE_INVALID` | `budget_save`, `budget_status` |  |
 | `CHECKOUT_ALREADY_DONE` | `appointment_checkout` |  |
 | `CHECKOUT_APPOINTMENT_INVALID` | `appointment_checkout` |  |
 | `CHECKOUT_APPOINTMENT_NOT_FOUND` | `appointment_checkout_get`, `appointment_checkout` |  |
@@ -2312,6 +2439,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SESSION_USER_NOT_FOUND` | `session_context` |  |
 | `SESSION_WITHOUT_PROFILE` | `session_context` |  |
 | `SETTINGS_BRANCH_REQUIRED` | `settings_get`, `settings_save` |  |
+| `SETTINGS_BUDGET_INVALID` | `settings_save` |  |
 | `SETTINGS_DEBT_INVALID` | `settings_save` |  |
 | `SETTINGS_DRE_INVALID` | `settings_save` |  |
 | `SETTINGS_FORBIDDEN` | `settings_get`, `settings_save` |  |
@@ -2346,5 +2474,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 
