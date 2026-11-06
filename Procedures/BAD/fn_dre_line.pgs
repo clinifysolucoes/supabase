@@ -1,0 +1,45 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (helper interno, sem grant)               ::
+  ::  Object      : ad.fn_dre_line(text, text, integer, integer, ...)             ::
+  ::  UsedBy      : ad.fin_dre                                                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Uma linha do DRE como array jsonb de um elemento (para concatenar):
+    valores por mes arredondados, total e percentual sobre a receita bruta.
+    Helper interno (sem grant).
+  Input:
+    p_key, p_label, p_level (1 total, 2 grupo, 3 categoria), p_sign
+    (1 soma, -1 subtrai, 0 informativo), p_estimated, p_values (por mes),
+    p_gross (receita bruta do periodo)
+  Output: jsonb [{"vc_key", "vc_label", "it_level", "it_sign", "id_estimated",
+                  "values", "vl_total", "pc_revenue"}]
+*/
+create or replace function ad.fn_dre_line(
+  p_key       text,
+  p_label     text,
+  p_level     integer,
+  p_sign      integer,
+  p_estimated boolean,
+  p_values    numeric[],
+  p_gross     numeric)
+returns jsonb
+language sql
+immutable
+set search_path = ''
+as $$
+  select jsonb_build_array(jsonb_build_object(
+    'vc_key', p_key, 'vc_label', p_label, 'it_level', p_level, 'it_sign', p_sign,
+    'id_estimated', p_estimated,
+    'values', (select coalesce(jsonb_agg(round(coalesce(v, 0), 2) order by o), '[]'::jsonb)
+                 from unnest(p_values) with ordinality t(v, o)),
+    'vl_total', round(coalesce((select sum(v) from unnest(p_values) v), 0), 2),
+    'pc_revenue', case when coalesce(p_gross, 0) = 0 then null
+                       else round(coalesce((select sum(v) from unnest(p_values) v), 0) / p_gross * 100, 1) end));
+$$;
+
+revoke all on function ad.fn_dre_line(text, text, integer, integer, boolean, numeric[], numeric) from public, anon, authenticated;

@@ -1,0 +1,210 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_dre(jsonb)                                             ::
+  ::  UsedBy      : Flutter -> rpc('fin_dre') (Financeiro > DRE)                  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    DRE gerencial da filial mes a mes, pelo plano de contas:
+      Receita bruta                  receitas por categoria
+      (-) Impostos sobre a receita   estimado: pc_dre_revenue_tax da receita bruta
+      = Receita liquida
+      (-) Custos variaveis           despesas it_cost_type 2, por categoria
+      = Margem de contribuicao
+      (-) Custos fixos               despesas it_cost_type 1, por categoria
+      (-) Outras despesas            despesas it_cost_type 4 (ou sem tipo)
+      = Resultado antes dos impostos
+      (-) IRPJ e CSLL                estimado: (pc_dre_income_tax + pc_dre_csll)
+                                     do resultado antes dos impostos, se positivo
+      = Resultado liquido
+      Investimentos                  despesas it_cost_type 3: fora do resultado,
+                                     so informativo
+    vc_basis 'competence' (padrao): contas nao canceladas pelo mes de
+    competencia (ou do vencimento) e pelo valor; 'cash': contas pagas pelo mes
+    do pagamento e pelo valor pago. Exige LER na tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    dt_from     date     obrigatorio (mes inicial; vale o mes da data)
+    dt_to       date     obrigatorio (mes final; ate 24 meses)
+    vc_basis    text     opcional competence | cash
+
+  Output jsonb:
+    {"months": ["YYYY-MM", ...], "vc_basis",
+     "rates": {"pc_dre_revenue_tax", "pc_dre_income_tax", "pc_dre_csll"},
+     "lines": [{"vc_key", "vc_label", "it_level" (1 total, 2 grupo, 3 categoria),
+                "it_sign" (1 soma, -1 subtrai, 0 informativo), "id_estimated",
+                "values": [n, ...], "vl_total", "pc_revenue"}]}
+    pc_revenue = vl_total / receita bruta x 100 (null sem receita).
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_DRE_PERIOD_INVALID
+*/
+create or replace function ad.fin_dre(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _from       date;
+  _to         date;
+  _basis      text := lower(coalesce(nullif(trim(p_json ->> 'vc_basis'), ''), 'competence'));
+  _months     date[];
+  _n          integer;
+  _s          od.branch_setting%rowtype;
+  _pc_rev     numeric;
+  _pc_profit  numeric;
+  _lines      jsonb := '[]'::jsonb;
+  _gross      numeric[];
+  _rev_tax    numeric[];
+  _net        numeric[];
+  _var        numeric[];
+  _margin     numeric[];
+  _fixed      numeric[];
+  _other      numeric[];
+  _before     numeric[];
+  _inc_tax    numeric[];
+  _result     numeric[];
+  _invest     numeric[];
+  _gross_tot  numeric;
+  _i          integer;
+  _cats       jsonb;
+  _c          jsonb;
+  _vals       numeric[];
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_dre');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+  begin
+    _from := date_trunc('month', (p_json ->> 'dt_from')::date)::date;
+    _to   := date_trunc('month', (p_json ->> 'dt_to')::date)::date;
+  exception when others then
+    raise exception '%', ad.fn_message('FIN_DRE_PERIOD_INVALID');
+  end;
+  if _from is null or _to is null or _to < _from or _to > (_from + interval '23 months')::date
+     or _basis not in ('competence', 'cash') then
+    raise exception '%', ad.fn_message('FIN_DRE_PERIOD_INVALID');
+  end if;
+
+  select array_agg(m::date order by m) into _months
+    from generate_series(_from, _to, interval '1 month') m;
+  _n := array_length(_months, 1);
+
+  select * into _s from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+  _pc_rev    := coalesce(_s.pc_dre_revenue_tax, 0);
+  _pc_profit := coalesce(_s.pc_dre_income_tax, 0) + coalesce(_s.pc_dre_csll, 0);
+
+  -- valores por categoria e mes (vals[i] = mes i)
+  with base as (
+    select x.nr_category, array_position(_months, date_trunc('month', x.dt)::date) as idx, sum(x.vl) as vl
+      from (select e.nr_category,
+                   case when _basis = 'cash' then e.dt_paid else coalesce(e.dt_competence, e.dt_due) end as dt,
+                   case when _basis = 'cash' then e.vl_paid else e.vl_amount end as vl
+              from od.fin_entry e
+             where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+               and case when _basis = 'cash' then e.it_status = 2 else e.it_status in (1, 2) end) x
+     where x.dt >= _from and x.dt < (_to + interval '1 month')::date
+     group by 1, 2
+  ), cats as (
+    select c.nr_category, c.it_kind, c.it_cost_type, c.vc_name,
+           (select array_agg(coalesce(b.vl, 0) order by i)
+              from generate_series(1, _n) i
+              left join base b on b.nr_category = c.nr_category and b.idx = i) as vals
+      from od.fin_category c
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+       and c.nr_category in (select b.nr_category from base b)
+  )
+  select coalesce(jsonb_agg(jsonb_build_object('nr', c.nr_category, 'kind', c.it_kind, 'type', coalesce(c.it_cost_type, 4),
+                                               'name', c.vc_name, 'vals', to_jsonb(c.vals)) order by c.vc_name), '[]'::jsonb)
+    into _cats
+    from cats c;
+
+  _gross  := array_fill(0::numeric, array[_n]);
+  _var    := array_fill(0::numeric, array[_n]);
+  _fixed  := array_fill(0::numeric, array[_n]);
+  _other  := array_fill(0::numeric, array[_n]);
+  _invest := array_fill(0::numeric, array[_n]);
+  for _c in select * from jsonb_array_elements(_cats) loop
+    _vals := array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v);
+    for _i in 1 .. _n loop
+      if (_c ->> 'kind')::int = 1 then _gross[_i] := _gross[_i] + _vals[_i];
+      elsif (_c ->> 'type')::int = 2 then _var[_i] := _var[_i] + _vals[_i];
+      elsif (_c ->> 'type')::int = 1 then _fixed[_i] := _fixed[_i] + _vals[_i];
+      elsif (_c ->> 'type')::int = 3 then _invest[_i] := _invest[_i] + _vals[_i];
+      else _other[_i] := _other[_i] + _vals[_i];
+      end if;
+    end loop;
+  end loop;
+  select array_agg(round(g * _pc_rev / 100, 2) order by o) into _rev_tax from unnest(_gross) with ordinality t(g, o);
+  select array_agg(g - r order by o) into _net from unnest(_gross, _rev_tax) with ordinality t(g, r, o);
+  select array_agg(a - b order by o) into _margin from unnest(_net, _var) with ordinality t(a, b, o);
+  select array_agg(a - b - c order by o) into _before from unnest(_margin, _fixed, _other) with ordinality t(a, b, c, o);
+  select array_agg(round(greatest(a, 0) * _pc_profit / 100, 2) order by o) into _inc_tax
+    from unnest(_before) with ordinality t(a, o);
+  select array_agg(a - b order by o) into _result from unnest(_before, _inc_tax) with ordinality t(a, b, o);
+  _gross_tot := (select sum(x) from unnest(_gross) x);
+
+  -- monta as linhas
+  _lines := _lines || ad.fn_dre_line('gross', 'Receita bruta', 1, 1, false, _gross, _gross_tot);
+  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 1 loop
+    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, 1, false,
+                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
+  end loop;
+  if _pc_rev > 0 then
+    _lines := _lines || ad.fn_dre_line('revenue_tax', format('(-) Impostos sobre a receita (%s%%)', _pc_rev), 2, -1, true,
+                _rev_tax, _gross_tot);
+  end if;
+  _lines := _lines || ad.fn_dre_line('net', 'Receita líquida', 1, 1, false, _net, _gross_tot);
+  _lines := _lines || ad.fn_dre_line('variable', '(-) Custos variáveis', 2, -1, false, _var, _gross_tot);
+  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 2 and (x ->> 'type')::int = 2 loop
+    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, -1, false,
+                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
+  end loop;
+  _lines := _lines || ad.fn_dre_line('margin', 'Margem de contribuição', 1, 1, false, _margin, _gross_tot);
+  _lines := _lines || ad.fn_dre_line('fixed', '(-) Custos fixos', 2, -1, false, _fixed, _gross_tot);
+  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 2 and (x ->> 'type')::int = 1 loop
+    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, -1, false,
+                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
+  end loop;
+  _lines := _lines || ad.fn_dre_line('other', '(-) Outras despesas', 2, -1, false, _other, _gross_tot);
+  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 2 and (x ->> 'type')::int = 4 loop
+    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, -1, false,
+                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
+  end loop;
+  _lines := _lines || ad.fn_dre_line('before_tax', 'Resultado antes dos impostos', 1, 1, false, _before, _gross_tot);
+  if _pc_profit > 0 then
+    _lines := _lines || ad.fn_dre_line('income_tax', format('(-) IRPJ e CSLL (%s%%)', _pc_profit), 2, -1, true,
+                _inc_tax, _gross_tot);
+  end if;
+  _lines := _lines || ad.fn_dre_line('result', 'Resultado líquido', 1, 1, false, _result, _gross_tot);
+  _lines := _lines || ad.fn_dre_line('investment', 'Investimentos (fora do resultado)', 2, 0, false, _invest, _gross_tot);
+
+  return jsonb_build_object(
+    'months', (select jsonb_agg(to_char(m, 'YYYY-MM') order by m) from unnest(_months) m),
+    'vc_basis', _basis,
+    'rates', jsonb_build_object('pc_dre_revenue_tax', coalesce(_s.pc_dre_revenue_tax, 0),
+                                'pc_dre_income_tax', coalesce(_s.pc_dre_income_tax, 0),
+                                'pc_dre_csll', coalesce(_s.pc_dre_csll, 0)),
+    'lines', _lines);
+end;
+$$;
+
+revoke all on function ad.fin_dre(jsonb) from public, anon;
+grant execute on function ad.fin_dre(jsonb) to authenticated;
