@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - inadimplentes, caixa, formas, multa e juros      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava as preferencias da filial (od.branch_setting, criada na primeira
@@ -25,11 +25,19 @@
     nr_next_record          bigint   opcional >= 1 (proximo numero)
     id_require_cpf, id_require_mobile  boolean  opcionais (obrigatorios no cadastro do paciente)
     hours                   array    opcional [{"it_weekday": 0..6, "qt_minute_start", "qt_minute_end"}]
+    it_debt_rule            integer  opcional 1 nao bloquear | 2 avisar | 3 administrador libera | 4 bloquear
+                                     (paciente com conta a receber vencida ao agendar)
+    qt_debt_days            integer  opcional 0..365 (tolerancia depois do vencimento)
+    id_cash_enabled         boolean  opcional (usa o caixa do dia)
+    it_payment_methods      array    opcional formas aceitas ao receber (1..7, 9; ao menos uma)
+    pc_late_fee             numeric  opcional 0..10 (multa por atraso, % do valor)
+    pc_late_interest        numeric  opcional 0..10 (juros de mora ao mes, pro rata dia)
 
   Output jsonb: o mesmo de ad.settings_get
 
   Errors: VERSION_MISMATCH, SETTINGS_BRANCH_REQUIRED, SETTINGS_FORBIDDEN, SETTINGS_VALUE_INVALID,
-    SETTINGS_SLOT_INVALID, SETTINGS_PARALLEL_INVALID, SETTINGS_RECORD_INVALID, SETTINGS_HOURS_INVALID
+    SETTINGS_SLOT_INVALID, SETTINGS_PARALLEL_INVALID, SETTINGS_RECORD_INVALID, SETTINGS_HOURS_INVALID,
+    SETTINGS_DEBT_INVALID, SETTINGS_METHODS_INVALID, SETTINGS_LATE_INVALID
 */
 create or replace function ad.settings_save(p_json jsonb)
 returns jsonb
@@ -69,6 +77,12 @@ begin
     _cur.nr_next_record := 1;
     _cur.id_require_cpf := false;
     _cur.id_require_mobile := false;
+    _cur.it_debt_rule := 1;
+    _cur.qt_debt_days := 0;
+    _cur.id_cash_enabled := true;
+    _cur.it_payment_methods := '{1,2,3,4,5,6,7,9}';
+    _cur.pc_late_fee := 0;
+    _cur.pc_late_interest := 0;
   end if;
 
   begin
@@ -79,7 +93,24 @@ begin
     _new.nr_next_record         := case when p_json ? 'nr_next_record'         then (p_json ->> 'nr_next_record')::bigint          else _cur.nr_next_record end;
     _new.id_require_cpf         := case when p_json ? 'id_require_cpf'         then (p_json ->> 'id_require_cpf')::boolean         else _cur.id_require_cpf end;
     _new.id_require_mobile      := case when p_json ? 'id_require_mobile'      then (p_json ->> 'id_require_mobile')::boolean      else _cur.id_require_mobile end;
-  exception when others then
+    _new.it_debt_rule           := case when p_json ? 'it_debt_rule'           then (p_json ->> 'it_debt_rule')::smallint          else _cur.it_debt_rule end;
+    _new.qt_debt_days           := case when p_json ? 'qt_debt_days'           then (p_json ->> 'qt_debt_days')::smallint          else _cur.qt_debt_days end;
+    _new.id_cash_enabled        := case when p_json ? 'id_cash_enabled'        then (p_json ->> 'id_cash_enabled')::boolean        else _cur.id_cash_enabled end;
+    _new.pc_late_fee            := case when p_json ? 'pc_late_fee'            then round((p_json ->> 'pc_late_fee')::numeric, 2)  else _cur.pc_late_fee end;
+    _new.pc_late_interest       := case when p_json ? 'pc_late_interest'       then round((p_json ->> 'pc_late_interest')::numeric, 2) else _cur.pc_late_interest end;
+    if p_json ? 'it_payment_methods' then
+      if jsonb_typeof(p_json -> 'it_payment_methods') <> 'array' then
+        raise exception '%', ad.fn_message('SETTINGS_METHODS_INVALID');
+      end if;
+      select coalesce(array_agg(distinct m.value::smallint order by m.value::smallint), '{}')
+        into _new.it_payment_methods
+        from jsonb_array_elements_text(p_json -> 'it_payment_methods') m;
+    else
+      _new.it_payment_methods := _cur.it_payment_methods;
+    end if;
+  exception
+    when raise_exception then raise;
+    when others then
     raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
   end;
   if _new.qt_slot_minutes is null or _new.qt_slot_minutes not in (5, 15, 20, 30) then
@@ -91,15 +122,31 @@ begin
   if _new.nr_next_record is null or _new.nr_next_record < 1 then
     raise exception '%', ad.fn_message('SETTINGS_RECORD_INVALID');
   end if;
+  if _new.it_debt_rule is null or _new.it_debt_rule not in (1, 2, 3, 4)
+     or _new.qt_debt_days is null or _new.qt_debt_days not between 0 and 365 then
+    raise exception '%', ad.fn_message('SETTINGS_DEBT_INVALID');
+  end if;
+  if cardinality(_new.it_payment_methods) = 0
+     or not _new.it_payment_methods <@ '{1,2,3,4,5,6,7,9}'::smallint[] then
+    raise exception '%', ad.fn_message('SETTINGS_METHODS_INVALID');
+  end if;
+  if _new.pc_late_fee is null or _new.pc_late_fee not between 0 and 10
+     or _new.pc_late_interest is null or _new.pc_late_interest not between 0 and 10 then
+    raise exception '%', ad.fn_message('SETTINGS_LATE_INVALID');
+  end if;
   if _new.id_allow_outside_hours is null or _new.id_auto_record_number is null
-     or _new.id_require_cpf is null or _new.id_require_mobile is null then
+     or _new.id_require_cpf is null or _new.id_require_mobile is null or _new.id_cash_enabled is null then
     raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
   end if;
 
   insert into od.branch_setting (nr_company, nr_branch, qt_slot_minutes, qt_max_parallel, id_allow_outside_hours,
-                                 id_auto_record_number, nr_next_record, id_require_cpf, id_require_mobile, nr_operator)
+                                 id_auto_record_number, nr_next_record, id_require_cpf, id_require_mobile,
+                                 it_debt_rule, qt_debt_days, id_cash_enabled, it_payment_methods, pc_late_fee,
+                                 pc_late_interest, nr_operator)
   values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
-          _new.id_auto_record_number, _new.nr_next_record, _new.id_require_cpf, _new.id_require_mobile, _nr_user)
+          _new.id_auto_record_number, _new.nr_next_record, _new.id_require_cpf, _new.id_require_mobile,
+          _new.it_debt_rule, _new.qt_debt_days, _new.id_cash_enabled, _new.it_payment_methods, _new.pc_late_fee,
+          _new.pc_late_interest, _nr_user)
   on conflict (nr_company, nr_branch) do update set
     qt_slot_minutes        = excluded.qt_slot_minutes,
     qt_max_parallel        = excluded.qt_max_parallel,
@@ -107,7 +154,13 @@ begin
     id_auto_record_number  = excluded.id_auto_record_number,
     nr_next_record         = excluded.nr_next_record,
     id_require_cpf         = excluded.id_require_cpf,
-    id_require_mobile      = excluded.id_require_mobile;
+    id_require_mobile      = excluded.id_require_mobile,
+    it_debt_rule           = excluded.it_debt_rule,
+    qt_debt_days           = excluded.qt_debt_days,
+    id_cash_enabled        = excluded.id_cash_enabled,
+    it_payment_methods     = excluded.it_payment_methods,
+    pc_late_fee            = excluded.pc_late_fee,
+    pc_late_interest       = excluded.pc_late_interest;
 
   if p_json ? 'hours' then
     if jsonb_typeof(p_json -> 'hours') <> 'array' then

@@ -1,6 +1,6 @@
 # Dicionário de dados — Supabase multi-company login
 
-> Base multi-empresa / multi-filial do futuro sistema de odontologia. Schemas: **`ad`** (AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)), **`od`** (OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)), **`private`** (helpers de RLS, fora da API). Atualizado em 2026-11-05.
+> Base multi-empresa / multi-filial do futuro sistema de odontologia. Schemas: **`ad`** (AD - Administrative (empresas, filiais, usuários, perfis, telas, logs)), **`od`** (OD - Odontologia (precificação e pacientes: tabelas e helpers; RPCs expostas ficam em ad)), **`private`** (helpers de RLS, fora da API). Atualizado em 2026-11-06.
 >
 > **Gerado** por `node tools/gen-dictionary.mjs` a partir de [`docs/dictionary/schema.json`](dictionary/schema.json). Não edite este arquivo à mão.
 > Viewer interativo: abra [`docs/dictionary/index.html`](dictionary/index.html) no navegador.
@@ -71,7 +71,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.fin_bank_line`](#odfinbankline) | Linha do extrato bancário | Transação importada do arquivo OFX do banco para uma conta: id do banco (FITID, único por conta), data, valor com sinal e histórico; conciliada com um lançamento pago ou uma transferência da conta, ou ignorada. nr_line é sequencial por filial. |
 | [`od.fin_recurrence`](#odfinrecurrence) | Conta recorrente | Regra de conta que se repete todo mês no mesmo dia (aluguel, salário, internet...), sem data final ou até uma data. Os lançamentos são gerados a partir dela (od.fn_fin_recurrence_fill) até 12 meses à frente; alterar a regra muda os futuros em aberto e encerrar cancela os futuros. nr_recurrence é sequencial por filial. |
 | [`od.fin_attachment`](#odfinattachment) | Anexo de conta | Arquivo anexado a uma conta a pagar/receber: documento (nota, boleto) ou comprovante de pagamento. O arquivo fica no Storage (bucket privado finance, caminho empresa/filial/conta/uuid.ext); upload e download só por URL assinada da Edge Function fin-attachment. Excluir é lógico. nr_attachment é sequencial por filial. |
-| [`od.branch_setting`](#odbranchsetting) | Configurações da filial | Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento) e cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios). |
+| [`od.branch_setting`](#odbranchsetting) | Configurações da filial | Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento), cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios) e financeiro (bloqueio de pacientes com conta vencida, caixa do dia, formas de pagamento aceitas, multa e juros por atraso). |
 | [`od.branch_hour`](#odbranchhour) | Horário de funcionamento | Horário de funcionamento da clínica por dia da semana (um ou mais intervalos por dia, sem sobreposição). nr_hour é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
@@ -644,6 +644,12 @@ erDiagram
     bigint nr_next_record
     boolean id_require_cpf
     boolean id_require_mobile
+    smallint it_debt_rule
+    smallint qt_debt_days
+    boolean id_cash_enabled
+    smallint[] it_payment_methods
+    numeric pc_late_fee
+    numeric pc_late_interest
   }
   branch_hour {
     bigint nr_company PK, FK
@@ -1642,7 +1648,7 @@ Arquivo anexado a uma conta a pagar/receber: documento (nota, boleto) ou comprov
 
 **Configurações da filial**
 
-Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento) e cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios).
+Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento), cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios) e financeiro (bloqueio de pacientes com conta vencida, caixa do dia, formas de pagamento aceitas, multa e juros por atraso).
 
 **RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via settings_save (permissão de alterar na tela SETTINGS).
 
@@ -1657,6 +1663,12 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `nr_next_record` | `bigint` |  | NOT NULL | `1` | Próximo número de prontuário. |
 | `id_require_cpf` | `boolean` |  | NOT NULL | `false` | CPF obrigatório no cadastro do paciente. |
 | `id_require_mobile` | `boolean` |  | NOT NULL | `false` | Celular obrigatório no cadastro do paciente. |
+| `it_debt_rule` | `smallint` |  | NOT NULL | `1` | O que a agenda faz ao marcar consulta de paciente com conta a receber vencida (além da tolerância). Valores: 1 = Não bloquear; 2 = Avisar; 3 = Só o administrador da empresa libera; 4 = Bloquear. |
+| `qt_debt_days` | `smallint` |  | NOT NULL | `0` | Dias de tolerância depois do vencimento antes de valer o bloqueio de inadimplentes (0 a 365). |
+| `id_cash_enabled` | `boolean` |  | NOT NULL | `true` | Usa o caixa do dia (abrir e fechar caixa). Desligado, não abre caixa novo. |
+| `it_payment_methods` | `smallint[]` |  | NOT NULL | `'{1,2,3,4,5,6,7,9}'` | Formas de pagamento aceitas ao receber (baixa de conta a receber e fechamento da consulta); ao menos uma. Valores: 1 = Dinheiro; 2 = Pix; 3 = Cartão de crédito; 4 = Cartão de débito; 5 = Transferência; 6 = Boleto; 7 = Cheque; 9 = Outro. |
+| `pc_late_fee` | `numeric(5,2)` |  | NOT NULL | `0` | Multa por atraso nas contas a receber (% do valor, 0 a 10). |
+| `pc_late_interest` | `numeric(5,2)` |  | NOT NULL | `0` | Juros de mora ao mês nas contas a receber (%, pro rata por dia, 0 a 10). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -1796,7 +1808,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
 | `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING. |
 | `ad.appointment_list(p_json jsonb)` | authenticated | Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. |
-| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. Segue as configurações da filial: consultas do mesmo profissional no mesmo horário até o limite e, sem permissão de agendar fora do horário, a consulta precisa caber no horário de atendimento do profissional (encaixe passa por cima). |
+| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. Segue as configurações da filial: consultas do mesmo profissional no mesmo horário até o limite e, sem permissão de agendar fora do horário, a consulta precisa caber no horário de atendimento do profissional (encaixe passa por cima). Paciente com conta a receber vencida (od.fn_patient_overdue), conforme it_debt_rule da filial: avisa (devolve debt), só o administrador agenda confirmando com id_debt_override (fica no log) ou bloqueia; encaixe não libera. |
 | `ad.professional_list(p_json jsonb)` | authenticated | Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA. |
 | `ad.professional_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
@@ -1807,16 +1819,16 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_category_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) uma categoria do plano de contas: nome, receita/despesa (só na criação), tipo de custo da despesa e situação. Grava event_log. |
 | `ad.fin_supplier_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um fornecedor: nome, CPF/CNPJ, telefone, e-mail, observações e situação (documentos e telefone só com dígitos). Grava event_log sem documento e contato. |
 | `ad.fin_entry_save(p_json jsonb)` | authenticated | Cria contas a receber/pagar (I: única, parcelada em N meses ou recorrente por N meses; pode nascer paga, entrando no caixa aberto ou, em cartão/boleto/cheque com taxa, gerando recebíveis) ou altera parcialmente um lançamento (U; pago só muda descrição, categoria e observações; cancelado não muda). Aceita o profissional (comissão). Grava event_log sem dados pessoais. Já paga, aceita os dados do cartão/cheque para os recebíveis. |
-| `ad.fin_entry_settle(p_json jsonb)` | authenticated | Baixa e situação de um lançamento (permissão alterar): PAY (conta, data, valor e forma; entra no caixa aberto da conta; em cartão/boleto/cheque com taxa vai para Recebíveis e gera os recebíveis, com parcelas do cartão e referência), UNDO (desfaz o pagamento, se o caixa não foi fechado e nenhum recebível foi confirmado), CANCEL (com id_following cancela também as próximas parcelas em aberto) e REOPEN. Grava event_log. No PAY aceita os dados do cartão/cheque, que vão para os recebíveis. |
-| `ad.fin_entry_list(p_json jsonb)` | authenticated | Contas a receber ou a pagar num período (até 400 dias) por situação (em aberto, vencidas, pagas, canceladas, todas), conta, categoria, fornecedor, paciente, profissional e busca; com profissional e atendimento de cada lançamento e totais (em aberto, vencido, pago, por tipo de custo). Exige leitura na tela FINANCE. Filtro pelo vencimento ou pela competência (vc_date) e só parceladas; devolve a regra recorrente de origem e a quantidade de anexos; antes gera as contas recorrentes do período. |
+| `ad.fin_entry_settle(p_json jsonb)` | authenticated | Baixa e situação de um lançamento (permissão alterar): PAY (conta, data, valor e forma; entra no caixa aberto da conta; em cartão/boleto/cheque com taxa vai para Recebíveis e gera os recebíveis, com parcelas do cartão e referência), UNDO (desfaz o pagamento, se o caixa não foi fechado e nenhum recebível foi confirmado), CANCEL (com id_following cancela também as próximas parcelas em aberto) e REOPEN. Grava event_log. No PAY aceita os dados do cartão/cheque, que vão para os recebíveis. Conta a receber: a forma de pagamento precisa estar entre as aceitas da filial; paga com atraso, o valor padrão inclui multa e juros (od.fn_fin_late_charge), devolvidos em late. |
+| `ad.fin_entry_list(p_json jsonb)` | authenticated | Contas a receber ou a pagar num período (até 400 dias) por situação (em aberto, vencidas, pagas, canceladas, todas), conta, categoria, fornecedor, paciente, profissional e busca; com profissional e atendimento de cada lançamento e totais (em aberto, vencido, pago, por tipo de custo). Exige leitura na tela FINANCE. Filtro pelo vencimento ou pela competência (vc_date) e só parceladas; devolve a regra recorrente de origem e a quantidade de anexos; antes gera as contas recorrentes do período. Contas a receber vencidas em aberto trazem multa e juros até hoje (vl_late_fee, vl_late_interest). |
 | `ad.fin_overview(p_json jsonb)` | authenticated | Visão geral do financeiro no dia: saldo por conta, a receber e a pagar no dia, vencidos, o mês (recebido, pago, a receber, a pagar), próximos vencimentos e se a filial já foi configurada. Exige leitura na tela FINANCE. Antes gera as contas recorrentes até 12 meses à frente. |
 | `ad.fin_cashflow(p_json jsonb)` | authenticated | Fluxo de caixa de um mês, dia a dia: realizado (pago) e previsto (em aberto; vencidos antes do mês entram no dia 1), saldo acumulado realizado e projetado a partir do saldo anterior. Exige leitura na tela FINANCE. Antes gera as contas recorrentes do mês consultado. |
 | `ad.fin_statement(p_json jsonb)` | authenticated | Extrato de uma conta (ou de todas as ativas) no período: saldo inicial, movimentos pagos e transferências entre contas com o saldo após cada um, entradas, saídas e saldo final. Exige leitura na tela FINANCE. |
 | `ad.appointment_checkout_get(p_json jsonb)` | authenticated | Dados do fechamento financeiro de uma consulta (leitura na tela FINANCE): paciente, profissional, procedimento com o valor cobrado e a comissão efetiva, lançamentos já gerados pelo atendimento, receita padrão, contas ativas e a conta do caixa aberto do usuário. |
-| `ad.appointment_checkout(p_json jsonb)` | authenticated | Fecha financeiramente a consulta (criar na tela FINANCE): conta a receber do paciente em 1 a 24 parcelas (a 1ª pode ser recebida na hora, no caixa aberto ou em cartão/boleto/cheque gerando recebíveis), comissão do profissional a pagar no dia 10 do mês seguinte (categoria Comissões) e marca a consulta como atendida. Um fechamento ativo por atendimento. Grava event_log sem dados pessoais. Aceita os dados do cartão/cheque para os recebíveis. |
-| `ad.fin_cash_open(p_json jsonb)` | authenticated | Abre o caixa do dia do usuário numa conta do tipo caixa (criar na tela FINANCE), com o valor contado (padrão: saldo atual). Uma sessão aberta por conta e por usuário. Grava event_log. |
+| `ad.appointment_checkout(p_json jsonb)` | authenticated | Fecha financeiramente a consulta (criar na tela FINANCE): conta a receber do paciente em 1 a 24 parcelas (a 1ª pode ser recebida na hora, no caixa aberto ou em cartão/boleto/cheque gerando recebíveis), comissão do profissional a pagar no dia 10 do mês seguinte (categoria Comissões) e marca a consulta como atendida. Um fechamento ativo por atendimento. Grava event_log sem dados pessoais. Aceita os dados do cartão/cheque para os recebíveis. A forma de pagamento precisa estar entre as aceitas da filial. |
+| `ad.fin_cash_open(p_json jsonb)` | authenticated | Abre o caixa do dia do usuário numa conta do tipo caixa (criar na tela FINANCE), com o valor contado (padrão: saldo atual). Uma sessão aberta por conta e por usuário. Grava event_log. Não abre com o caixa desligado nas configurações. |
 | `ad.fin_cash_close(p_json jsonb)` | authenticated | Fecha uma sessão de caixa com o valor contado; grava o esperado (saldo da conta) e a diferença. O dono fecha com criar; fechar o caixa de outra pessoa exige alterar. Grava event_log. |
-| `ad.fin_cash_status(p_json jsonb)` | authenticated | Caixa do dia (leitura na tela FINANCE): o caixa aberto do usuário, as contas caixa com quem está com cada uma e as últimas sessões, cada uma com abertura, entradas por forma de pagamento, saídas, sangrias/suprimentos, esperado, contado e diferença. |
+| `ad.fin_cash_status(p_json jsonb)` | authenticated | Caixa do dia (leitura na tela FINANCE): o caixa aberto do usuário, as contas caixa com quem está com cada uma e as últimas sessões, cada uma com abertura, entradas por forma de pagamento, saídas, sangrias/suprimentos, esperado, contado e diferença. Devolve id_enabled (caixa ligado nas configurações). |
 | `ad.fin_transfer_save(p_json jsonb)` | authenticated | Transferência entre contas, sangria ou suprimento (I, criar) e cancelamento (CANCEL, alterar; não vale com o caixa da sessão fechado). Entra no caixa aberto da conta caixa envolvida. Grava event_log. |
 | `ad.fin_rate_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) uma taxa de recebimento: nome, forma (crédito, débito, boleto, cheque), faixa de parcelas, percentual, tarifa fixa, prazo e conta destino. Grava event_log. |
 | `ad.fin_receivable_settle(p_json jsonb)` | authenticated | Confirma (CONFIRM: data e valor que caiu; transfere de Recebíveis para a conta destino e lança a taxa real como despesa) ou desfaz (UNDO) um recebível. Permissão alterar na tela FINANCE. Grava event_log. |
@@ -1836,8 +1848,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
 | `ad.patient_get(p_json jsonb)` | authenticated | Ficha completa de um paciente (todas as colunas, mais qt_age) e as notas gerais ativas, da mais recente para a mais antiga, com o nome do autor. Exige leitura na tela PATIENTS. |
 | `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). Segue as configurações da filial: número de prontuário automático e CPF/celular obrigatórios. |
@@ -1863,6 +1875,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fn_email_is_valid(p_vc_email text)` | interna | Validação sintática mínima de e-mail de contato. |
 | `od.fn_fin_balance(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint, p_dt_before date)` | interna | Saldo realizado de uma conta (ou de todas as ativas, com p_nr_account nulo) antes de p_dt_before: saldo inicial + receitas pagas − despesas pagas + transferências recebidas − enviadas (sem data = tudo até agora). |
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
+| `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
+| `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
 | `od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)` | interna | Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento. |
 | `od.fn_fin_receivable_make(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_qt_installments integer, p_vc_reference text, p_nr_user bigint)` | interna | Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada. |
 | `od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)` | interna | Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados. |
@@ -1907,6 +1921,9 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `AGENDA_FORBIDDEN` | `appointment_list`, `professional_list` |  |
 | `APPOINTMENT_ACTION_INVALID` | `appointment_save` |  |
 | `APPOINTMENT_CONFLICT` | `appointment_save` |  |
+| `APPOINTMENT_DEBT_APPROVAL` | `appointment_save` |  |
+| `APPOINTMENT_DEBT_BLOCKED` | `appointment_save` |  |
+| `APPOINTMENT_DEBT_CONFIRM` | `appointment_save` |  |
 | `APPOINTMENT_FORBIDDEN` | `appointment_save` |  |
 | `APPOINTMENT_LIST_PERIOD_INVALID` | `appointment_list` |  |
 | `APPOINTMENT_NOT_FOUND` | `appointment_save` |  |
@@ -2010,6 +2027,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_BANK_STATUS_INVALID` | `fin_bank_reconcile` |  |
 | `FIN_CASH_ACCOUNT_IN_USE` | `fin_cash_open` |  |
 | `FIN_CASH_ACCOUNT_INVALID` | `fin_cash_open` |  |
+| `FIN_CASH_DISABLED` | `fin_cash_open` |  |
 | `FIN_CASH_FORBIDDEN` | `fin_cash_open`, `fin_cash_close` |  |
 | `FIN_CASH_SESSION_CLOSED` | `fin_entry_settle`, `fin_cash_close`, `fin_transfer_save`, `health_guide_settle` |  |
 | `FIN_CASH_SESSION_NOT_FOUND` | `fin_cash_close` |  |
@@ -2035,6 +2053,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_ENTRY_INSTALLMENTS_INVALID` | `fin_entry_save`, `appointment_checkout` |  |
 | `FIN_ENTRY_KIND_INVALID` | `fin_entry_save`, `fin_recurrence_save` |  |
 | `FIN_ENTRY_METHOD_INVALID` | `fin_entry_save`, `fin_entry_settle`, `appointment_checkout`, `fin_recurrence_save` |  |
+| `FIN_ENTRY_METHOD_NOT_ACCEPTED` | `fin_entry_settle`, `appointment_checkout` |  |
 | `FIN_ENTRY_NOT_FOUND` | `fin_entry_save`, `fin_entry_settle`, `fin_attachment_save` |  |
 | `FIN_ENTRY_PAID_ACCOUNT_REQUIRED` | `fin_entry_save`, `appointment_checkout` |  |
 | `FIN_ENTRY_PAID_LOCKED` | `fin_entry_save` |  |
@@ -2216,8 +2235,11 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SESSION_USER_NOT_FOUND` | `session_context` |  |
 | `SESSION_WITHOUT_PROFILE` | `session_context` |  |
 | `SETTINGS_BRANCH_REQUIRED` | `settings_get`, `settings_save` |  |
+| `SETTINGS_DEBT_INVALID` | `settings_save` |  |
 | `SETTINGS_FORBIDDEN` | `settings_get`, `settings_save` |  |
 | `SETTINGS_HOURS_INVALID` | `settings_save` |  |
+| `SETTINGS_LATE_INVALID` | `settings_save` |  |
+| `SETTINGS_METHODS_INVALID` | `settings_save` |  |
 | `SETTINGS_PARALLEL_INVALID` | `settings_save` |  |
 | `SETTINGS_RECORD_INVALID` | `settings_save` |  |
 | `SETTINGS_SLOT_INVALID` | `settings_save` |  |

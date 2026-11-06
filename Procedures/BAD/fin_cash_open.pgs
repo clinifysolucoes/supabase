@@ -6,14 +6,15 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - caixa desligado nas configuracoes                ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Abre o caixa do dia do usuario numa conta do tipo caixa (permissao CRIAR na
     tela FINANCE). Uma sessao aberta por conta e por usuario. O valor de
     abertura e o que foi contado na gaveta (padrao: o saldo atual da conta).
     Recebimentos e pagamentos feitos nessa conta enquanto o caixa estiver
-    aberto entram no fechamento. Grava ad.event_log.
+    aberto entram no fechamento. Com o caixa desligado nas configuracoes da
+    filial (od.branch_setting.id_cash_enabled) nao abre. Grava ad.event_log.
 
   Input p_json:
     nr_version  integer  obrigatorio = 1
@@ -26,7 +27,7 @@
   Output jsonb: {"nr_session", "nr_account", "vl_open"}
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_CASH_FORBIDDEN, FIN_CASH_VALUE_INVALID,
-    FIN_CASH_ACCOUNT_INVALID, FIN_CASH_ACCOUNT_IN_USE, FIN_CASH_USER_HAS_OPEN
+    FIN_CASH_ACCOUNT_INVALID, FIN_CASH_ACCOUNT_IN_USE, FIN_CASH_USER_HAS_OPEN, FIN_CASH_DISABLED
 */
 create or replace function ad.fin_cash_open(p_json jsonb)
 returns jsonb
@@ -63,6 +64,11 @@ begin
   exception when others then
     raise exception '%', ad.fn_message('FIN_CASH_VALUE_INVALID');
   end;
+
+  if exists (select 1 from od.branch_setting s
+              where s.nr_company = _nr_company and s.nr_branch = _nr_branch and not s.id_cash_enabled) then
+    raise exception '%', ad.fn_message('FIN_CASH_DISABLED');
+  end if;
 
   perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
   select a.vc_name into _name from od.fin_account a

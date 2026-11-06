@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 05/11/2026 - dados do cartao e do cheque                      ::
+  ::  Change      : 06/11/2026 - formas de pagamento aceitas da filial            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Fechamento financeiro da consulta (permissao CRIAR na tela FINANCE):
@@ -47,7 +47,9 @@
     CHECKOUT_APPOINTMENT_NOT_FOUND, CHECKOUT_APPOINTMENT_INVALID, CHECKOUT_ALREADY_DONE,
     CHECKOUT_NOT_CONFIGURED, FIN_ENTRY_VALUE_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_CATEGORY_INVALID,
     FIN_ENTRY_INSTALLMENTS_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_ENTRY_PAID_ACCOUNT_REQUIRED,
-    CHECKOUT_COMMISSION_INVALID
+    CHECKOUT_COMMISSION_INVALID, FIN_ENTRY_METHOD_NOT_ACCEPTED
+    A forma de pagamento precisa estar entre as aceitas da filial
+    (od.branch_setting.it_payment_methods).
 */
 create or replace function ad.appointment_checkout(p_json jsonb)
 returns jsonb
@@ -152,6 +154,12 @@ begin
   end if;
   if _method is not null and _method not in (1, 2, 3, 4, 5, 6, 7, 9) then
     raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_INVALID');
+  end if;
+  if _method is not null and not exists (
+       select 1 from (select 1) x
+         left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch
+        where _method = any (coalesce(s.it_payment_methods, '{1,2,3,4,5,6,7,9}'::smallint[]))) then
+    raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_NOT_ACCEPTED');
   end if;
   if _category is null then
     select c.nr_category into _category from od.fin_category c

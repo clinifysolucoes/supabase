@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 05/11/2026 - limite no mesmo horario e fora do expediente     ::
+  ::  Change      : 06/11/2026 - bloqueio de paciente com conta vencida           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda: cria ou altera uma consulta ou um compromisso.
@@ -40,17 +40,26 @@
     dh_end           timestamptz  obrigatorio em 'I' (maior que dh_start)
     id_all_day       boolean      opcional
     id_fit_in        boolean      opcional (encaixe: ignora conflito de horario)
+    id_debt_override boolean      opcional (administrador confirma agendar paciente com conta vencida)
     it_status        integer      1 agendado | 2 confirmado | 3 em espera | 4 em atendimento |
                                   5 atendido | 6 atrasado | 7 faltou | 90 cancelado
 
-  Output jsonb: {"nr_company", "nr_branch", "nr_appointment"}
+  Output jsonb: {"nr_company", "nr_branch", "nr_appointment", "debt": {"qt_entries", "vl_total"} | null}
+    "debt" vem preenchido quando o paciente tem conta vencida e a regra deixou
+    agendar (avisar, ou liberado pelo administrador).
 
   Errors: VERSION_MISMATCH, APPOINTMENT_ACTION_INVALID, AGENDA_BRANCH_REQUIRED, APPOINTMENT_FORBIDDEN,
     APPOINTMENT_REQUIRED, APPOINTMENT_NOT_FOUND, APPOINTMENT_VALUE_INVALID, APPOINTMENT_TYPE_INVALID,
     APPOINTMENT_PATIENT_REQUIRED, APPOINTMENT_PATIENT_INVALID, APPOINTMENT_PROFESSIONAL_REQUIRED,
     APPOINTMENT_PROFESSIONAL_INVALID, APPOINTMENT_PROCEDURE_INVALID, APPOINTMENT_TITLE_REQUIRED,
     APPOINTMENT_PERIOD_INVALID, APPOINTMENT_STATUS_INVALID, APPOINTMENT_CONFLICT {Time},
-    APPOINTMENT_OUTSIDE_HOURS
+    APPOINTMENT_OUTSIDE_HOURS, APPOINTMENT_DEBT_BLOCKED {Amount}, APPOINTMENT_DEBT_APPROVAL {Amount},
+    APPOINTMENT_DEBT_CONFIRM {Amount}
+    Inadimplentes (od.branch_setting.it_debt_rule): consulta nova, ou que
+    trocou de paciente, de paciente com conta a receber vencida ha mais que
+    qt_debt_days (od.fn_patient_overdue): 2 avisa (agenda e devolve "debt"),
+    3 so o administrador da empresa agenda, confirmando com id_debt_override
+    (fica no log), 4 bloqueia. Encaixe nao libera.
     Configuracoes da filial (od.branch_setting): qt_max_parallel consultas do
     mesmo profissional podem ocupar o mesmo horario (padrao 1); sem
     id_allow_outside_hours, a consulta do profissional precisa caber num
@@ -78,6 +87,9 @@ declare
   _outside_ok     boolean;
   _local_start    timestamp;
   _local_end      timestamp;
+  _debt_rule      smallint;
+  _debt           jsonb;
+  _debt_override  boolean := false;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_save');
 
@@ -248,6 +260,33 @@ begin
     end if;
   end if;
 
+  /* paciente com conta a receber vencida                                   */
+  if _new.it_type = 1 and _new.nr_patient is not null and _new.it_status not in (7, 90)
+     and (_vc_action = 'I' or _new.nr_patient is distinct from _cur.nr_patient) then
+    select coalesce(s.it_debt_rule, 1) into _debt_rule
+      from (select 1) x
+      left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+    if _debt_rule > 1 then
+      _debt := od.fn_patient_overdue(_nr_company, _nr_branch, _new.nr_patient);
+      if (_debt ->> 'qt_entries')::integer = 0 then
+        _debt := null;
+      elsif _debt_rule = 4 then
+        raise exception '%', ad.fn_message('APPOINTMENT_DEBT_BLOCKED',
+          jsonb_build_object('Amount', _debt -> 'vl_total'));
+      elsif _debt_rule = 3 then
+        if not private.fn_is_company_admin(_nr_company) then
+          raise exception '%', ad.fn_message('APPOINTMENT_DEBT_APPROVAL',
+            jsonb_build_object('Amount', _debt -> 'vl_total'));
+        end if;
+        if not coalesce((p_json ->> 'id_debt_override')::boolean, false) then
+          raise exception '%', ad.fn_message('APPOINTMENT_DEBT_CONFIRM',
+            jsonb_build_object('Amount', _debt -> 'vl_total'));
+        end if;
+        _debt_override := true;
+      end if;
+    end if;
+  end if;
+
   /*------------------------------------------------------------------------*/
   if _vc_action = 'I' then
     perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
@@ -296,11 +335,13 @@ begin
       'dh_start',        _new.dh_start,
       'dh_end',          _new.dh_end,
       'it_status',       _new.it_status,
+      'debt_override',   _debt_override,
       'changed',         (select coalesce(jsonb_agg(k order by k), '[]'::jsonb)
                             from jsonb_object_keys(p_json - array['nr_version', 'vc_action', 'nr_company',
                                                                   'nr_branch', 'nr_appointment']) k)));
 
-  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_appointment', _nr_appointment);
+  return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch, 'nr_appointment', _nr_appointment,
+                            'debt', _debt);
 end;
 $$;
 

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 05/11/2026 - recorrentes, competencia e parceladas            ::
+  ::  Change      : 06/11/2026 - multa e juros das contas vencidas                ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Contas a receber (it_kind 1) ou a pagar (it_kind 2) da filial num periodo:
@@ -38,7 +38,10 @@
                   "nr_account", "vc_account", "nr_supplier", "vc_supplier", "nr_patient", "vc_patient", "nr_professional", "vc_professional", "nr_appointment",
                   "vc_description", "vl_amount", "dt_due", "dt_competence", "it_payment_method",
                   "dt_paid", "vl_paid", "it_status", "id_overdue", "uu_group", "nr_installment",
-                  "qt_installments", "id_recurring", "nr_recurrence", "qt_attachments", "vc_notes"}],
+                  "qt_installments", "id_recurring", "nr_recurrence", "qt_attachments", "vc_notes",
+                  "vl_late_fee", "vl_late_interest"}],
+    vl_late_fee / vl_late_interest: multa e juros ate hoje da conta a receber
+    vencida em aberto (od.fn_fin_late_charge); zero nas demais.
      "totals": {"vl_open", "vl_overdue", "vl_paid", "vl_cancelled", "qt_total",
                 "by_cost_type": {"1": n, "2": n, "3": n, "4": n}},
      "dt_today": "YYYY-MM-DD"}
@@ -108,7 +111,9 @@ begin
 
   with base as (
     select e.*,
-           (e.it_status = 1 and e.dt_due < _today) as id_overdue
+           (e.it_status = 1 and e.dt_due < _today) as id_overdue,
+           case when e.it_kind = 1 and e.it_status = 1 and e.dt_due < _today
+                then od.fn_fin_late_charge(e.nr_company, e.nr_branch, e.vl_amount, e.dt_due, _today) end as late
       from od.fin_entry e
      where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_kind = _kind
        and case
@@ -172,7 +177,9 @@ begin
                           'qt_attachments',    (select count(*) from od.fin_attachment t
                                                  where t.nr_company = b.nr_company and t.nr_branch = b.nr_branch
                                                    and t.nr_entry = b.nr_entry and t.it_status = 1),
-                          'vc_notes',          b.vc_notes)
+                          'vc_notes',          b.vc_notes,
+                          'vl_late_fee',       coalesce((b.late ->> 'vl_fine')::numeric, 0),
+                          'vl_late_interest',  coalesce((b.late ->> 'vl_interest')::numeric, 0))
                         order by b.dt_due, b.nr_entry), '[]'::jsonb),
            'totals', jsonb_build_object(
                         'vl_open',      coalesce(sum(b.vl_amount) filter (where b.it_status = 1), 0),
