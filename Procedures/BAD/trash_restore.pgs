@@ -1,0 +1,111 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.trash_restore(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> rpc('trash_restore') (Configuracoes > Lixeira)     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Restaura um registro da lixeira (ad.trash_list) chamando a RPC da propria
+    tela, que confere a permissao de ALTERAR, as regras e grava o log:
+      patient       ad.patient_save       U it_status = 1
+      patient_note  ad.patient_note_save  R (nr_parent = paciente)
+      appointment   ad.appointment_save   U it_status = 1 (agendado; confere conflito de horario)
+      fin_entry     ad.fin_entry_settle   REOPEN
+      procedure     ad.procedure_save     U it_status = 1
+      material      ad.material_save      U it_status = 1
+    Exige LER na tela SETTINGS. O registro precisa estar na lixeira
+    (it_status 90); os erros das RPCs de cada tela passam adiante.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    vc_kind     text     obrigatorio (tipo da lixeira)
+    nr_key      bigint   obrigatorio (numero do registro)
+    nr_parent   bigint   patient_note (numero do paciente)
+
+  Output jsonb: {"vc_kind", "nr_key"}
+
+  Errors: VERSION_MISMATCH, TRASH_BRANCH_REQUIRED, TRASH_FORBIDDEN, TRASH_KIND_INVALID, TRASH_NOT_FOUND
+    (mais os erros da RPC da tela do registro)
+*/
+create or replace function ad.trash_restore(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       text := lower(coalesce(p_json ->> 'vc_kind', ''));
+  _key        bigint;
+  _parent     bigint;
+  _base       jsonb;
+  _found      boolean;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'trash_restore');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('TRASH_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('TRASH_FORBIDDEN');
+  end if;
+  if _kind not in ('patient', 'patient_note', 'appointment', 'fin_entry', 'procedure', 'material') then
+    raise exception '%', ad.fn_message('TRASH_KIND_INVALID');
+  end if;
+  begin
+    _key    := (p_json ->> 'nr_key')::bigint;
+    _parent := (p_json ->> 'nr_parent')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('TRASH_NOT_FOUND');
+  end;
+
+  _found := case _kind
+    when 'patient' then exists (select 1 from od.patient x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                                  and x.nr_patient = _key and x.it_status = 90)
+    when 'patient_note' then exists (select 1 from od.patient_note x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                                  and x.nr_patient = _parent and x.nr_note = _key and x.it_status = 90)
+    when 'appointment' then exists (select 1 from od.appointment x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                                  and x.nr_appointment = _key and x.it_status = 90)
+    when 'fin_entry' then exists (select 1 from od.fin_entry x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                                  and x.nr_entry = _key and x.it_status = 90)
+    when 'procedure' then exists (select 1 from od.procedure x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                                  and x.nr_procedure = _key and x.it_status = 90)
+    else exists (select 1 from od.material x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                   and x.nr_material = _key and x.it_status = 90)
+  end;
+  if _key is null or not coalesce(_found, false) then
+    raise exception '%', ad.fn_message('TRASH_NOT_FOUND');
+  end if;
+
+  _base := jsonb_build_object('nr_version', 1, 'nr_company', _nr_company, 'nr_branch', _nr_branch);
+  case _kind
+    when 'patient' then
+      perform ad.patient_save(_base || jsonb_build_object('vc_action', 'U', 'nr_patient', _key, 'it_status', 1));
+    when 'patient_note' then
+      perform ad.patient_note_save(_base || jsonb_build_object('vc_action', 'R', 'nr_patient', _parent, 'nr_note', _key));
+    when 'appointment' then
+      perform ad.appointment_save(_base || jsonb_build_object('vc_action', 'U', 'nr_appointment', _key, 'it_status', 1));
+    when 'fin_entry' then
+      perform ad.fin_entry_settle(_base || jsonb_build_object('vc_action', 'REOPEN', 'nr_entry', _key));
+    when 'procedure' then
+      perform ad.procedure_save(_base || jsonb_build_object('vc_action', 'U', 'nr_procedure', _key, 'it_status', 1));
+    else
+      perform ad.material_save(_base || jsonb_build_object('vc_action', 'U', 'nr_material', _key, 'it_status', 1));
+  end case;
+
+  return jsonb_build_object('vc_kind', _kind, 'nr_key', _key);
+end;
+$$;
+
+revoke all on function ad.trash_restore(jsonb) from public, anon;
+grant execute on function ad.trash_restore(jsonb) to authenticated;

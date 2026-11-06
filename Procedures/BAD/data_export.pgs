@@ -1,0 +1,200 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.data_export(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> rpc('data_export') (Configuracoes > Exportar)      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Exportacao de planilhas da filial: a RPC devolve as colunas (titulos em
+    portugues) e as linhas; o app monta o arquivo Excel. Exige permissao de
+    ALTERAR na tela SETTINGS e de LER na tela dos dados:
+      patients    PATIENTS  cadastro dos pacientes (sem notas)
+      finance     FINANCE   contas a receber e a pagar por vencimento
+      procedures  PRICING   procedimentos com custo e precos calculados
+      agenda      AGENDA    consultas e compromissos por data (fuso da filial)
+    Ate 20000 linhas. Grava ad.event_log (tela SETTINGS) so com o tipo, o
+    periodo e a quantidade de linhas, sem dados pessoais.
+
+  Input p_json:
+    nr_version           integer  obrigatorio = 1
+    nr_company           bigint   obrigatorio
+    nr_branch            bigint   obrigatorio
+    vc_kind              text     obrigatorio patients | finance | procedures | agenda
+    dt_from, dt_to       date     finance e agenda (periodo de ate 400 dias)
+    it_kind              integer  finance opcional 1 receber | 2 pagar (padrao: as duas)
+    id_include_inactive  boolean  patients e procedures (padrao false)
+
+  Output jsonb: {"vc_kind", "columns": ["Titulo", ...], "rows": [[valor, ...]], "qt_rows"}
+
+  Errors: VERSION_MISMATCH, EXPORT_BRANCH_REQUIRED, EXPORT_FORBIDDEN, EXPORT_KIND_INVALID,
+    EXPORT_PERIOD_INVALID
+*/
+create or replace function ad.data_export(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       text := lower(coalesce(p_json ->> 'vc_kind', ''));
+  _screen     text;
+  _from       date;
+  _to         date;
+  _fin_kind   smallint;
+  _inactive   boolean;
+  _tz         text;
+  _columns    jsonb;
+  _rows       jsonb;
+  _limit      constant integer := 20000;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'data_export');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('EXPORT_BRANCH_REQUIRED');
+  end if;
+  _screen := case _kind when 'patients' then 'PATIENTS' when 'finance' then 'FINANCE'
+                        when 'procedures' then 'PRICING' when 'agenda' then 'AGENDA' end;
+  if _screen is null then
+    raise exception '%', ad.fn_message('EXPORT_KIND_INVALID');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false)
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, _screen) ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('EXPORT_FORBIDDEN');
+  end if;
+
+  begin
+    _from     := (p_json ->> 'dt_from')::date;
+    _to       := (p_json ->> 'dt_to')::date;
+    _fin_kind := (p_json ->> 'it_kind')::smallint;
+    _inactive := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  exception when others then
+    raise exception '%', ad.fn_message('EXPORT_PERIOD_INVALID');
+  end;
+  if _kind in ('finance', 'agenda')
+     and (_from is null or _to is null or _to < _from or _to - _from > 400
+          or (_fin_kind is not null and _fin_kind not in (1, 2))) then
+    raise exception '%', ad.fn_message('EXPORT_PERIOD_INVALID');
+  end if;
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  /*------------------------------------------------------------------------*/
+  if _kind = 'patients' then
+    _columns := '["Prontuário", "Nome", "Apelido", "CPF", "RG", "Nascimento", "Celular", "Telefone",
+                  "E-mail", "CEP", "Endereço", "Número", "Complemento", "Bairro", "Cidade", "UF",
+                  "Convênio", "Nº do convênio", "Profissão", "Responsável", "CPF do responsável",
+                  "Retorno", "Situação", "Cadastrado em"]'::jsonb;
+    select coalesce(jsonb_agg(jsonb_build_array(
+             p.vc_record_number, p.vc_name, p.vc_nickname, p.vc_cpf, p.vc_rg, p.dt_birth, p.vc_mobile, p.vc_phone,
+             p.vc_email, p.vc_zip, p.vc_address, p.vc_address_number, p.vc_address_complement, p.vc_district,
+             p.vc_city, p.vc_state, p.vc_plan_name, p.vc_plan_number, p.vc_profession, p.vc_guardian_name,
+             p.vc_guardian_cpf, p.dt_return_alert,
+             case when p.it_status = 1 then 'Ativo' else 'Inativo' end,
+             (p.dh_created at time zone _tz)::date) order by p.vc_name, p.nr_patient), '[]'::jsonb)
+      into _rows
+      from (select * from od.patient x
+             where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+               and (_inactive or x.it_status = 1)
+             order by x.vc_name, x.nr_patient limit _limit) p;
+
+  /*------------------------------------------------------------------------*/
+  elsif _kind = 'finance' then
+    _columns := '["Tipo", "Descrição", "Categoria", "Conta", "Paciente", "Fornecedor", "Profissional",
+                  "Vencimento", "Competência", "Valor", "Situação", "Pago em", "Valor pago",
+                  "Forma de pagamento", "Parcela", "Observações"]'::jsonb;
+    select coalesce(jsonb_agg(jsonb_build_array(
+             case when e.it_kind = 1 then 'A receber' else 'A pagar' end,
+             e.vc_description, c.vc_name, a.vc_name, p.vc_name, s.vc_name, pr.vc_name,
+             e.dt_due, e.dt_competence, e.vl_amount,
+             case when e.it_status = 2 then 'Pago' when e.it_status = 90 then 'Cancelado'
+                  when e.dt_due < (now() at time zone _tz)::date then 'Vencido' else 'Em aberto' end,
+             e.dt_paid, e.vl_paid,
+             case e.it_payment_method when 1 then 'Dinheiro' when 2 then 'Pix' when 3 then 'Cartão de crédito'
+                                      when 4 then 'Cartão de débito' when 5 then 'Transferência' when 6 then 'Boleto'
+                                      when 7 then 'Cheque' when 9 then 'Outro' end,
+             case when e.qt_installments > 1 then e.nr_installment || '/' || e.qt_installments end,
+             e.vc_notes) order by e.dt_due, e.nr_entry), '[]'::jsonb)
+      into _rows
+      from (select * from od.fin_entry x
+             where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+               and x.dt_due between _from and _to
+               and (_fin_kind is null or x.it_kind = _fin_kind)
+             order by x.dt_due, x.nr_entry limit _limit) e
+      join od.fin_category c on c.nr_company = e.nr_company and c.nr_branch = e.nr_branch and c.nr_category = e.nr_category
+      left join od.fin_account a on a.nr_company = e.nr_company and a.nr_branch = e.nr_branch and a.nr_account = e.nr_account
+      left join od.patient p on p.nr_company = e.nr_company and p.nr_branch = e.nr_branch and p.nr_patient = e.nr_patient
+      left join od.fin_supplier s on s.nr_company = e.nr_company and s.nr_branch = e.nr_branch and s.nr_supplier = e.nr_supplier
+      left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
+                                  and pr.nr_professional = e.nr_professional;
+
+  /*------------------------------------------------------------------------*/
+  elsif _kind = 'procedures' then
+    _columns := '["Código", "Procedimento", "Especialidade", "Minutos", "Laboratório", "Outros materiais",
+                  "Custo direto", "Preço mínimo", "Preço sugerido", "Valor cobrado", "Situação"]'::jsonb;
+    select coalesce(jsonb_agg(jsonb_build_array(
+             x ->> 'vc_code', x ->> 'vc_name', x ->> 'vc_specialty', (x ->> 'qt_minutes')::numeric,
+             (x ->> 'vl_lab_cost')::numeric, (x ->> 'vl_material_other')::numeric,
+             (x -> 'pricing' ->> 'vl_direct_cost')::numeric, (x -> 'pricing' ->> 'vl_price_min')::numeric,
+             (x -> 'pricing' ->> 'vl_price')::numeric, (x ->> 'vl_current_price')::numeric,
+             case when (x ->> 'it_status')::int = 1 then 'Ativo' else 'Inativo' end)
+             order by x ->> 'vc_specialty', x ->> 'vc_name'), '[]'::jsonb)
+      into _rows
+      from jsonb_array_elements(ad.procedure_list(jsonb_build_object(
+             'nr_version', 1, 'nr_company', _nr_company, 'nr_branch', _nr_branch,
+             'id_include_inactive', _inactive)) -> 'procedures') x;
+
+  /*------------------------------------------------------------------------*/
+  else /* agenda */
+    _columns := '["Data", "Início", "Fim", "Tipo", "Paciente", "Profissional", "Procedimento", "Título",
+                  "Situação", "Encaixe", "Observações"]'::jsonb;
+    select coalesce(jsonb_agg(jsonb_build_array(
+             (a.dh_start at time zone _tz)::date,
+             case when a.id_all_day then null else to_char(a.dh_start at time zone _tz, 'HH24:MI') end,
+             case when a.id_all_day then null else to_char(a.dh_end at time zone _tz, 'HH24:MI') end,
+             case when a.it_type = 1 then 'Consulta' else 'Compromisso' end,
+             p.vc_name, coalesce(pr.vc_name, case when a.it_type = 2 then 'Clínica toda' end), pc.vc_name, a.vc_title,
+             case a.it_status when 1 then 'Agendado' when 2 then 'Confirmado' when 3 then 'Em espera'
+                              when 4 then 'Em atendimento' when 5 then 'Atendido' when 6 then 'Atrasado'
+                              when 7 then 'Faltou' when 90 then 'Cancelado' end,
+             case when a.id_fit_in then 'Sim' else 'Não' end,
+             a.vc_notes) order by a.dh_start, a.nr_appointment), '[]'::jsonb)
+      into _rows
+      from (select * from od.appointment x
+             where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+               and (x.dh_start at time zone _tz)::date between _from and _to
+             order by x.dh_start, x.nr_appointment limit _limit) a
+      left join od.patient p on p.nr_company = a.nr_company and p.nr_branch = a.nr_branch and p.nr_patient = a.nr_patient
+      left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                  and pr.nr_professional = a.nr_professional
+      left join od.procedure pc on pc.nr_company = a.nr_company and pc.nr_branch = a.nr_branch
+                               and pc.nr_procedure = a.nr_procedure;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', 'OTHER',
+    'data_export', _kind,
+    format('Exportação: %s (%s linhas)',
+           case _kind when 'patients' then 'pacientes' when 'finance' then 'financeiro'
+                      when 'procedures' then 'procedimentos' else 'agenda' end,
+           jsonb_array_length(_rows)),
+    jsonb_build_object('vc_kind', _kind, 'dt_from', _from, 'dt_to', _to, 'it_kind', _fin_kind,
+                       'id_include_inactive', _inactive, 'qt_rows', jsonb_array_length(_rows)));
+
+  return jsonb_build_object('vc_kind', _kind, 'columns', _columns, 'rows', _rows,
+                            'qt_rows', jsonb_array_length(_rows));
+end;
+$$;
+
+revoke all on function ad.data_export(jsonb) from public, anon;
+grant execute on function ad.data_export(jsonb) to authenticated;

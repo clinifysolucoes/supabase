@@ -6559,6 +6559,47 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "data_export",
+      "signature": "ad.data_export(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "EXPORT_BRANCH_REQUIRED",
+        "EXPORT_FORBIDDEN",
+        "EXPORT_KIND_INVALID",
+        "EXPORT_PERIOD_INVALID"
+      ]
+    },
+    {
+      "name": "trash_list",
+      "signature": "ad.trash_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "TRASH_BRANCH_REQUIRED",
+        "TRASH_FORBIDDEN",
+        "TRASH_KIND_INVALID"
+      ]
+    },
+    {
+      "name": "trash_restore",
+      "signature": "ad.trash_restore(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "TRASH_BRANCH_REQUIRED",
+        "TRASH_FORBIDDEN",
+        "TRASH_KIND_INVALID",
+        "TRASH_NOT_FOUND"
+      ]
+    },
+    {
       "name": "fn_pricing_calc",
       "signature": "od.fn_pricing_calc(p_json jsonb)",
       "kind": "helper",
@@ -6638,7 +6679,7 @@ window.DICTIONARY = {
       "signature": "ad.patient_note_save(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Notas gerais do paciente: I adiciona (permissão criar ou alterar; autor = usuário da sessão), D exclui logicamente (permissão alterar). Grava event_log.",
+      "description": "Notas gerais do paciente: I adiciona (permissão criar ou alterar; autor = usuário da sessão), D exclui logicamente (permissão alterar). Grava event_log. vc_action R restaura uma nota excluída (lixeira, permissão alterar).",
       "errors": [
         "VERSION_MISMATCH",
         "PATIENT_NOTE_ACTION_INVALID",

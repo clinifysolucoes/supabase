@@ -6,17 +6,18 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 14/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - restaurar nota (R, lixeira)                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Notas gerais do paciente (card "Notas gerais" da ficha).
       vc_action = 'I'  adiciona uma nota (autor = usuario da sessao)  -> permissao CRIAR ou ALTERAR
       vc_action = 'D'  exclui (it_status 90, a nota some da ficha)    -> permissao ALTERAR
+      vc_action = 'R'  restaura uma nota excluida (lixeira)          -> permissao ALTERAR
     Grava ad.event_log.
 
   Input p_json:
     nr_version  integer  obrigatorio = 1
-    vc_action   text     obrigatorio 'I' | 'D'
+    vc_action   text     obrigatorio 'I' | 'D' | 'R'
     nr_company  bigint   obrigatorio
     nr_branch   bigint   obrigatorio
     nr_patient  bigint   obrigatorio
@@ -48,7 +49,7 @@ begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_note_save');
 
   _vc_action := upper(coalesce(p_json ->> 'vc_action', ''));
-  if _vc_action not in ('I', 'D') then
+  if _vc_action not in ('I', 'D', 'R') then
     raise exception '%', ad.fn_message('PATIENT_NOTE_ACTION_INVALID');
   end if;
 
@@ -62,7 +63,7 @@ begin
   _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
   if _nr_user is null
      or (_vc_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
-     or (_vc_action = 'D' and not (_perm ->> 'id_update')::boolean) then
+     or (_vc_action in ('D', 'R') and not (_perm ->> 'id_update')::boolean) then
     raise exception '%', ad.fn_message('PATIENT_NOTE_FORBIDDEN');
   end if;
 
@@ -95,13 +96,14 @@ begin
     values (_nr_company, _nr_branch, _nr_patient, _nr_note, _vc_note, _nr_user, now(), 1, _nr_user);
 
   /*------------------------------------------------------------------------*/
-  else /* 'D' */
+  else /* 'D' exclui | 'R' restaura */
   /*------------------------------------------------------------------------*/
     _nr_note := (p_json ->> 'nr_note')::bigint;
     update od.patient_note n
-       set it_status = 90
+       set it_status = case when _vc_action = 'D' then 90 else 1 end
      where n.nr_company = _nr_company and n.nr_branch = _nr_branch
-       and n.nr_patient = _nr_patient and n.nr_note = _nr_note and n.it_status = 1;
+       and n.nr_patient = _nr_patient and n.nr_note = _nr_note
+       and n.it_status = case when _vc_action = 'D' then 1 else 90 end;
     if not found then
       raise exception '%', ad.fn_message('PATIENT_NOTE_NOT_FOUND');
     end if;
@@ -109,10 +111,10 @@ begin
 
   perform ad.fn_event_log(
     _nr_user, _nr_company, _nr_branch, 'PATIENTS',
-    case when _vc_action = 'I' then 'CREATE' else 'DELETE' end,
+    case _vc_action when 'I' then 'CREATE' when 'D' then 'DELETE' else 'UPDATE' end,
     'patient_note',
     _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_note::text,
-    format('Nota %s no paciente %s', case when _vc_action = 'I' then 'adicionada' else 'excluída' end, _vc_name),
+    format('Nota %s no paciente %s', case _vc_action when 'I' then 'adicionada' when 'D' then 'excluída' else 'restaurada' end, _vc_name),
     jsonb_build_object('nr_patient', _nr_patient, 'nr_note', _nr_note));
 
   return jsonb_build_object('nr_company', _nr_company, 'nr_branch', _nr_branch,

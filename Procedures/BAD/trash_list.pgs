@@ -1,0 +1,156 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.trash_list(jsonb)                                          ::
+  ::  UsedBy      : Flutter -> rpc('trash_list') (Configuracoes > Lixeira)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lixeira da filial: registros excluidos logicamente (it_status 90), mais
+    recentes primeiro, que podem voltar por ad.trash_restore. Exige LER na
+    tela SETTINGS; cada tipo so aparece para quem le a tela dele:
+      patient       PATIENTS  paciente inativado
+      patient_note  PATIENTS  nota excluida da ficha
+      appointment   AGENDA    consulta ou compromisso cancelado
+      fin_entry     FINANCE   conta a receber ou a pagar cancelada
+      procedure     PRICING   procedimento inativado
+      material      PRICING   material inativado
+    dh_deleted = ultima alteracao (a exclusao); vc_user = quem alterou.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    vc_kind     text     opcional (um dos tipos acima)
+    vc_search   text     opcional (titulo ou detalhe, contem)
+    qt_limit    integer  opcional 1..500 (padrao 200)
+
+  Output jsonb:
+    {"items": [{"vc_kind", "nr_key", "nr_parent", "vc_title", "vc_detail", "dh_deleted", "vc_user",
+                "id_restore"}],   (id_restore: o usuario pode restaurar = ALTERAR na tela do tipo)
+     "kinds": ["patient", ...]}   (tipos que o usuario pode ver)
+
+  Errors: VERSION_MISMATCH, TRASH_BRANCH_REQUIRED, TRASH_FORBIDDEN, TRASH_KIND_INVALID
+*/
+create or replace function ad.trash_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       text := nullif(lower(trim(p_json ->> 'vc_kind')), '');
+  _search     text := nullif(trim(p_json ->> 'vc_search'), '');
+  _limit      integer;
+  _tz         text;
+  _pat        jsonb;
+  _agd        jsonb;
+  _fin        jsonb;
+  _prc        jsonb;
+  _kinds      text[] := '{}';
+  _items      jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'trash_list');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('TRASH_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('TRASH_FORBIDDEN');
+  end if;
+  if _kind is not null and _kind not in ('patient', 'patient_note', 'appointment', 'fin_entry', 'procedure', 'material') then
+    raise exception '%', ad.fn_message('TRASH_KIND_INVALID');
+  end if;
+  begin
+    _limit := least(greatest(coalesce((p_json ->> 'qt_limit')::integer, 200), 1), 500);
+  exception when others then
+    _limit := 200;
+  end;
+
+  _pat := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  _agd := ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA');
+  _fin := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  _prc := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
+  if (_pat ->> 'id_read')::boolean then _kinds := _kinds || array['patient', 'patient_note']; end if;
+  if (_agd ->> 'id_read')::boolean then _kinds := _kinds || array['appointment']; end if;
+  if (_fin ->> 'id_read')::boolean then _kinds := _kinds || array['fin_entry']; end if;
+  if (_prc ->> 'id_read')::boolean then _kinds := _kinds || array['procedure', 'material']; end if;
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  with t as (
+    select 'patient'::text as vc_kind, p.nr_patient as nr_key, null::bigint as nr_parent,
+           p.vc_name::text as vc_title,
+           ('Nascimento ' || to_char(p.dt_birth, 'DD/MM/YYYY'))::text as vc_detail,
+           p.dh_updated, p.nr_operator, (_pat ->> 'id_update')::boolean as id_restore
+      from od.patient p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.it_status = 90
+    union all
+    select 'patient_note', n.nr_note, n.nr_patient, p.vc_name, left(n.vc_note, 120), n.dh_updated, n.nr_operator,
+           (_pat ->> 'id_update')::boolean
+      from od.patient_note n
+      join od.patient p on p.nr_company = n.nr_company and p.nr_branch = n.nr_branch and p.nr_patient = n.nr_patient
+     where n.nr_company = _nr_company and n.nr_branch = _nr_branch and n.it_status = 90
+    union all
+    select 'appointment', a.nr_appointment, null,
+           coalesce(p.vc_name, a.vc_title, 'Compromisso'),
+           (case when a.it_type = 1 then 'Consulta ' else 'Compromisso ' end)
+             || to_char(a.dh_start at time zone _tz, 'DD/MM/YYYY HH24:MI')
+             || coalesce(' · ' || pr.vc_name, ''),
+           a.dh_updated, a.nr_operator, (_agd ->> 'id_update')::boolean
+      from od.appointment a
+      left join od.patient p on p.nr_company = a.nr_company and p.nr_branch = a.nr_branch and p.nr_patient = a.nr_patient
+      left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                  and pr.nr_professional = a.nr_professional
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_status = 90
+    union all
+    select 'fin_entry', e.nr_entry, null, e.vc_description,
+           (case when e.it_kind = 1 then 'A receber ' else 'A pagar ' end)
+             || 'R$ ' || replace(to_char(e.vl_amount, 'FM999999990.00'), '.', ',')
+             || ' · venc. ' || to_char(e.dt_due, 'DD/MM/YYYY'),
+           e.dh_updated, e.nr_operator, (_fin ->> 'id_update')::boolean
+      from od.fin_entry e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_status = 90
+    union all
+    select 'procedure', x.nr_procedure, null, x.vc_name, coalesce(s.vc_name, 'Sem especialidade'),
+           x.dh_updated, x.nr_operator, (_prc ->> 'id_update')::boolean
+      from od.procedure x
+      left join od.specialty s on s.nr_company = x.nr_company and s.nr_branch = x.nr_branch and s.nr_specialty = x.nr_specialty
+     where x.nr_company = _nr_company and x.nr_branch = _nr_branch and x.it_status = 90
+    union all
+    select 'material', m.nr_material, null, m.vc_name, coalesce(m.vc_package, ''),
+           m.dh_updated, m.nr_operator, (_prc ->> 'id_update')::boolean
+      from od.material m
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.it_status = 90
+  ), f as (
+    select t.* from t
+     where t.vc_kind = any (_kinds)
+       and (_kind is null or t.vc_kind = _kind)
+       and (_search is null or t.vc_title ilike '%' || _search || '%' or t.vc_detail ilike '%' || _search || '%')
+     order by t.dh_updated desc, t.vc_kind, t.nr_key
+     limit _limit
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'vc_kind', f.vc_kind, 'nr_key', f.nr_key, 'nr_parent', f.nr_parent, 'vc_title', f.vc_title,
+           'vc_detail', f.vc_detail, 'dh_deleted', f.dh_updated, 'vc_user', u.vc_name,
+           'id_restore', coalesce(f.id_restore, false))
+           order by f.dh_updated desc, f.vc_kind, f.nr_key), '[]'::jsonb)
+    into _items
+    from f
+    left join ad.app_user u on u.nr_user = f.nr_operator;
+
+  return jsonb_build_object('items', _items, 'kinds', to_jsonb(_kinds));
+end;
+$$;
+
+revoke all on function ad.trash_list(jsonb) from public, anon;
+grant execute on function ad.trash_list(jsonb) to authenticated;
