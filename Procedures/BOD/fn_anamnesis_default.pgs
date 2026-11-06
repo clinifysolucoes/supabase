@@ -1,0 +1,60 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_anamnesis_default(bigint, bigint, bigint)               ::
+  ::  UsedBy      : ad.anamnesis_model_list                                       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria o modelo de anamnese "Geral" com as perguntas usuais da odontologia
+    quando a filial ainda nao tem nenhum modelo. Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_user (operador)
+  Output: integer (modelos criados: 0 ou 1)
+*/
+create or replace function od.fn_anamnesis_default(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_user    bigint)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if exists (select 1 from od.anamnesis_model m where m.nr_company = p_nr_company and m.nr_branch = p_nr_branch) then
+    return 0;
+  end if;
+  perform 1 from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch for update;
+  if exists (select 1 from od.anamnesis_model m where m.nr_company = p_nr_company and m.nr_branch = p_nr_branch) then
+    return 0;
+  end if;
+  insert into od.anamnesis_model (nr_company, nr_branch, nr_model, vc_name, nr_operator)
+  values (p_nr_company, p_nr_branch, 1, 'Geral', p_nr_user);
+  insert into od.anamnesis_question (nr_company, nr_branch, nr_model, nr_question, vc_question, it_type, id_alert, nr_operator)
+  select p_nr_company, p_nr_branch, 1, q.ord, q.txt, q.tp, q.al, p_nr_user
+    from (values
+      (1,  'Queixa principal (o que trouxe o paciente)', 2, false),
+      (2,  'Está em tratamento médico?', 3, true),
+      (3,  'Toma algum medicamento? Qual?', 3, true),
+      (4,  'Tem alergia a medicamento ou material (penicilina, látex, anestésico)?', 3, true),
+      (5,  'Já teve reação à anestesia odontológica?', 3, true),
+      (6,  'Tem hipertensão (pressão alta)?', 1, true),
+      (7,  'Tem diabetes?', 1, true),
+      (8,  'Tem problema cardíaco ou usa marcapasso?', 1, true),
+      (9,  'Já teve hemorragia ou dificuldade de cicatrização?', 1, true),
+      (10, 'Tem hepatite, HIV ou outra doença infecciosa?', 3, true),
+      (11, 'Está grávida ou amamentando?', 1, true),
+      (12, 'Fuma?', 1, false),
+      (13, 'Sente dor ou sensibilidade nos dentes?', 3, false),
+      (14, 'Range ou aperta os dentes?', 1, false),
+      (15, 'Tem sangramento na gengiva?', 1, false),
+      (16, 'Observações', 2, false)
+    ) q(ord, txt, tp, al);
+  return 1;
+end;
+$$;
+
+revoke all on function od.fn_anamnesis_default(bigint, bigint, bigint) from public, anon, authenticated;

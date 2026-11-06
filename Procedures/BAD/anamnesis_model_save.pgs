@@ -1,0 +1,144 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.anamnesis_model_save(jsonb)                                ::
+  ::  UsedBy      : Flutter -> rpc('anamnesis_model_save') (Configuracoes)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I) ou altera (U) um modelo de anamnese (permissao ALTERAR na tela
+    SETTINGS): nome, especialidade, situacao e, com "questions", substitui as
+    perguntas (as anamneses ja preenchidas guardam a propria copia).
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     obrigatorio 'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_model     bigint   obrigatorio em 'U'
+    vc_name      text     obrigatorio em 'I' (ate 80)
+    nr_specialty bigint   opcional
+    it_status    integer  opcional 1 | 90 (so em 'U')
+    questions    array    obrigatorio em 'I': [{"vc_question", "it_type" (1 sim/nao, 2 texto,
+                          3 sim/nao com detalhe), "id_alert"}]
+
+  Output jsonb: {"nr_model"}
+
+  Errors: VERSION_MISMATCH, ANAMNESIS_MODEL_ACTION_INVALID, RECORD_BRANCH_REQUIRED,
+    ANAMNESIS_MODEL_FORBIDDEN, ANAMNESIS_MODEL_NOT_FOUND, ANAMNESIS_MODEL_NAME_REQUIRED,
+    ANAMNESIS_MODEL_SPECIALTY_INVALID, ANAMNESIS_MODEL_QUESTIONS_REQUIRED, ANAMNESIS_QUESTION_INVALID {Item},
+    ANAMNESIS_MODEL_VALUE_INVALID
+*/
+create or replace function ad.anamnesis_model_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_model   bigint;
+  _name       text := left(nullif(trim(p_json ->> 'vc_name'), ''), 80);
+  _specialty  bigint;
+  _status     smallint;
+  _q          jsonb;
+  _i          integer := 0;
+  _type       smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'anamnesis_model_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('ANAMNESIS_MODEL_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('ANAMNESIS_MODEL_FORBIDDEN');
+  end if;
+  begin
+    _specialty := (p_json ->> 'nr_specialty')::bigint;
+    _status    := (p_json ->> 'it_status')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('ANAMNESIS_MODEL_VALUE_INVALID');
+  end;
+  if _status is not null and _status not in (1, 90) then
+    raise exception '%', ad.fn_message('ANAMNESIS_MODEL_VALUE_INVALID');
+  end if;
+  if _specialty is not null and not exists (
+       select 1 from od.specialty s where s.nr_company = _nr_company and s.nr_branch = _nr_branch
+                                      and s.nr_specialty = _specialty) then
+    raise exception '%', ad.fn_message('ANAMNESIS_MODEL_SPECIALTY_INVALID');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  if _action = 'I' then
+    if _name is null then
+      raise exception '%', ad.fn_message('ANAMNESIS_MODEL_NAME_REQUIRED');
+    end if;
+    if not (p_json ? 'questions') then
+      raise exception '%', ad.fn_message('ANAMNESIS_MODEL_QUESTIONS_REQUIRED');
+    end if;
+    select coalesce(max(m.nr_model), 0) + 1 into _nr_model
+      from od.anamnesis_model m where m.nr_company = _nr_company and m.nr_branch = _nr_branch;
+    insert into od.anamnesis_model (nr_company, nr_branch, nr_model, vc_name, nr_specialty, nr_operator)
+    values (_nr_company, _nr_branch, _nr_model, _name, _specialty, _nr_user);
+  else
+    _nr_model := (p_json ->> 'nr_model')::bigint;
+    if p_json ? 'vc_name' and _name is null then
+      raise exception '%', ad.fn_message('ANAMNESIS_MODEL_NAME_REQUIRED');
+    end if;
+    update od.anamnesis_model m set
+      vc_name      = case when p_json ? 'vc_name' then _name else m.vc_name end,
+      nr_specialty = case when p_json ? 'nr_specialty' then _specialty else m.nr_specialty end,
+      it_status    = case when p_json ? 'it_status' then _status else m.it_status end
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_model = _nr_model;
+    if not found then
+      raise exception '%', ad.fn_message('ANAMNESIS_MODEL_NOT_FOUND');
+    end if;
+  end if;
+
+  if p_json ? 'questions' then
+    if jsonb_typeof(p_json -> 'questions') <> 'array' or jsonb_array_length(p_json -> 'questions') = 0 then
+      raise exception '%', ad.fn_message('ANAMNESIS_MODEL_QUESTIONS_REQUIRED');
+    end if;
+    delete from od.anamnesis_question q
+     where q.nr_company = _nr_company and q.nr_branch = _nr_branch and q.nr_model = _nr_model;
+    for _q in select * from jsonb_array_elements(p_json -> 'questions') loop
+      _i := _i + 1;
+      begin
+        _type := coalesce((_q ->> 'it_type')::smallint, 1);
+      exception when others then
+        raise exception '%', ad.fn_message('ANAMNESIS_QUESTION_INVALID', jsonb_build_object('Item', _i));
+      end;
+      if nullif(trim(_q ->> 'vc_question'), '') is null or _type not in (1, 2, 3) then
+        raise exception '%', ad.fn_message('ANAMNESIS_QUESTION_INVALID', jsonb_build_object('Item', _i));
+      end if;
+      insert into od.anamnesis_question (nr_company, nr_branch, nr_model, nr_question, vc_question, it_type, id_alert, nr_operator)
+      values (_nr_company, _nr_branch, _nr_model, _i, left(trim(_q ->> 'vc_question'), 200), _type,
+              coalesce((_q ->> 'id_alert')::boolean, false) and _type <> 2, _nr_user);
+    end loop;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'anamnesis_model', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_model::text,
+    format('Modelo de anamnese %s %s', coalesce(_name, _nr_model::text),
+           case when _action = 'I' then 'criado' else 'alterado' end),
+    jsonb_build_object('qt_questions', _i));
+
+  return jsonb_build_object('nr_model', _nr_model);
+end;
+$$;
+
+revoke all on function ad.anamnesis_model_save(jsonb) from public, anon;
+grant execute on function ad.anamnesis_model_save(jsonb) to authenticated;

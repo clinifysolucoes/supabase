@@ -145,3 +145,27 @@ create or replace trigger budget_audit
 create or replace trigger budget_item_audit
   before insert or update on od.budget_item
   for each row execute function ad.trg_audit();
+
+create or replace trigger anamnesis_model_audit
+  before insert or update on od.anamnesis_model
+  for each row execute function ad.trg_audit();
+
+create or replace trigger anamnesis_question_audit
+  before insert or update on od.anamnesis_question
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_anamnesis_audit
+  before insert or update on od.patient_anamnesis
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_anamnesis_answer_audit
+  before insert or update on od.patient_anamnesis_answer
+  for each row execute function ad.trg_audit();
+
+create or replace trigger clinical_evolution_audit
+  before insert or update on od.clinical_evolution
+  for each row execute function ad.trg_audit();
+
+create or replace trigger tooth_mark_audit
+  before insert or update on od.tooth_mark
+  for each row execute function ad.trg_audit();

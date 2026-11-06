@@ -1,0 +1,162 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.tooth_mark_save(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('tooth_mark_save') (prontuario, odontograma)   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Marcacao do odontograma (tela PATIENTS): dente FDI (11..48 permanentes,
+    51..85 deciduos), condicao, faces e situacao.
+      vc_action = 'I'  marca                  -> CRIAR ou ALTERAR
+      vc_action = 'U'  altera (parcial)       -> ALTERAR
+      vc_action = 'D'  remove (it_status 90)  -> ALTERAR
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version    integer  obrigatorio = 1
+    vc_action     text     obrigatorio 'I' | 'U' | 'D'
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_mark       bigint   obrigatorio em 'U' e 'D'
+    vc_tooth      text     obrigatorio em 'I'
+    it_condition  integer  obrigatorio em 'I': 1 carie, 2 restauracao, 3 ausente, 4 implante,
+                           5 coroa/protese, 6 canal, 7 extracao indicada, 8 fratura, 9 selante, 10 outro
+    vc_faces      text     opcional: letras M D O V L I P (sem repetir)
+    it_situation  integer  opcional 1 existente | 2 a tratar | 3 realizado (padrao 1)
+    vc_notes      text     opcional (ate 300)
+    dt_mark       date     opcional (padrao hoje)
+
+  Output jsonb: {"nr_mark"}
+
+  Errors: VERSION_MISMATCH, TOOTH_MARK_ACTION_INVALID, RECORD_BRANCH_REQUIRED, TOOTH_MARK_FORBIDDEN,
+    PATIENT_REQUIRED, PATIENT_NOT_FOUND, TOOTH_MARK_TOOTH_INVALID, TOOTH_MARK_VALUE_INVALID, TOOTH_MARK_NOT_FOUND
+*/
+create or replace function ad.tooth_mark_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_mark    bigint;
+  _perm       jsonb;
+  _vc_name    text;
+  _tooth      text := nullif(trim(p_json ->> 'vc_tooth'), '');
+  _cond       smallint;
+  _sit        smallint;
+  _dt         date;
+  _faces      text;
+  _f          text;
+  _old        od.tooth_mark;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'tooth_mark_save');
+  if _action not in ('I', 'U', 'D') then
+    raise exception '%', ad.fn_message('TOOTH_MARK_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
+     or (_action in ('U', 'D') and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('TOOTH_MARK_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _vc_name
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  if _action in ('U', 'D') then
+    _nr_mark := (p_json ->> 'nr_mark')::bigint;
+    select * into _old from od.tooth_mark t
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient
+       and t.nr_mark = _nr_mark and t.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('TOOTH_MARK_NOT_FOUND');
+    end if;
+  end if;
+
+  if _action = 'D' then
+    update od.tooth_mark t set it_status = 90
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient and t.nr_mark = _nr_mark;
+    _tooth := _old.vc_tooth;
+  else
+    if _action = 'U' and not (p_json ? 'vc_tooth') then
+      _tooth := _old.vc_tooth;
+    end if;
+    if _tooth is null or _tooth !~ '^([1-4][1-8]|[5-8][1-5])$' then
+      raise exception '%', ad.fn_message('TOOTH_MARK_TOOTH_INVALID');
+    end if;
+    begin
+      _cond := case when p_json ? 'it_condition' then (p_json ->> 'it_condition')::smallint else _old.it_condition end;
+      _sit  := case when p_json ? 'it_situation' then coalesce((p_json ->> 'it_situation')::smallint, 1)
+                    else coalesce(_old.it_situation, 1) end;
+      _dt   := case when p_json ? 'dt_mark' then coalesce((p_json ->> 'dt_mark')::date, current_date)
+                    else coalesce(_old.dt_mark, current_date) end;
+    exception when others then
+      raise exception '%', ad.fn_message('TOOTH_MARK_VALUE_INVALID');
+    end;
+    if p_json ? 'vc_faces' then
+      _faces := '';
+      foreach _f in array regexp_split_to_array(upper(coalesce(p_json ->> 'vc_faces', '')), '') loop
+        if _f <> '' and position(_f in _faces) = 0 then
+          _faces := _faces || _f;
+        end if;
+      end loop;
+      _faces := nullif(_faces, '');
+    else
+      _faces := _old.vc_faces;
+    end if;
+    if _cond is null or _cond not between 1 and 10 or _sit not in (1, 2, 3) or _dt > current_date
+       or (_faces is not null and _faces !~ '^[MDOVLIP]{1,5}$') then
+      raise exception '%', ad.fn_message('TOOTH_MARK_VALUE_INVALID');
+    end if;
+    if _action = 'I' then
+      select coalesce(max(t.nr_mark), 0) + 1 into _nr_mark
+        from od.tooth_mark t
+       where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient;
+      insert into od.tooth_mark (nr_company, nr_branch, nr_patient, nr_mark, vc_tooth, it_condition, vc_faces,
+                                 it_situation, vc_notes, dt_mark, nr_user, nr_operator)
+      values (_nr_company, _nr_branch, _nr_patient, _nr_mark, _tooth, _cond, _faces, _sit,
+              left(nullif(trim(p_json ->> 'vc_notes'), ''), 300), _dt, _nr_user, _nr_user);
+    else
+      update od.tooth_mark t set
+        vc_tooth = _tooth, it_condition = _cond, vc_faces = _faces, it_situation = _sit, dt_mark = _dt,
+        vc_notes = case when p_json ? 'vc_notes' then left(nullif(trim(p_json ->> 'vc_notes'), ''), 300) else t.vc_notes end
+       where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient and t.nr_mark = _nr_mark;
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS',
+    case _action when 'I' then 'CREATE' when 'U' then 'UPDATE' else 'DELETE' end,
+    'tooth_mark', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_mark::text,
+    format('Odontograma do paciente %s: dente %s %s', _vc_name, _tooth,
+           case _action when 'I' then 'marcado' when 'U' then 'alterado' else 'desmarcado' end),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_mark', _nr_mark, 'vc_tooth', _tooth));
+
+  return jsonb_build_object('nr_mark', _nr_mark);
+end;
+$$;
+
+revoke all on function ad.tooth_mark_save(jsonb) from public, anon;
+grant execute on function ad.tooth_mark_save(jsonb) to authenticated;
