@@ -107,7 +107,7 @@ begin
 
   _r := ad.trash_list(_base);
   assert jsonb_array_length(_r -> 'items') = 5, 'lixeira com 5 itens, veio ' || (_r -> 'items')::text;
-  assert jsonb_array_length(_r -> 'kinds') = 6, 'admin ve todos os tipos';
+  assert jsonb_array_length(_r -> 'kinds') = 7, 'admin ve todos os tipos';
   assert (select bool_and((x ->> 'id_restore')::boolean) from jsonb_array_elements(_r -> 'items') x), 'admin restaura';
   assert (select x ->> 'vc_user' from jsonb_array_elements(_r -> 'items') x where x ->> 'vc_kind' = 'patient') = 'Mel ConfigC',
     'quem excluiu';
@@ -156,7 +156,7 @@ begin
   -- exportar exige alterar Configuracoes
   perform pg_temp.expect_error('data_export', _base || '{"vc_kind": "patients"}'::jsonb, 'EXPORT_FORBIDDEN');
   _r := ad.trash_list(_base);
-  assert _r -> 'kinds' = '["patient", "patient_note", "appointment"]'::jsonb, 'tipos do Ivo, veio ' || (_r -> 'kinds')::text;
+  assert _r -> 'kinds' = '["patient", "patient_note", "appointment", "professional"]'::jsonb, 'tipos do Ivo, veio ' || (_r -> 'kinds')::text;
   assert jsonb_array_length(_r -> 'items') = 1 and _r -> 'items' -> 0 ->> 'vc_kind' = 'patient', 'Ivo nao ve o financeiro';
   -- a conta cancelada: a RPC do financeiro barra
   perform pg_temp.expect_error('trash_restore', _base || jsonb_build_object('vc_kind', 'fin_entry',

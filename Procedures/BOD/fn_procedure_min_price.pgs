@@ -1,0 +1,70 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_procedure_min_price(bigint, bigint, bigint)             ::
+  ::  UsedBy      : ad.budget_save                                                ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Preco minimo de um procedimento (lucro zero), com a mesma formula de
+    ad.procedure_list (od.fn_pricing_calc e os parametros da filial de
+    od.fn_pricing_context), sem exigir a tela PRICING. Null quando os
+    percentuais tornam o preco impossivel. Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_procedure
+  Output: numeric (vl_price_min) ou null
+*/
+create or replace function od.fn_procedure_min_price(
+  p_nr_company   bigint,
+  p_nr_branch    bigint,
+  p_nr_procedure bigint)
+returns numeric
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _ctx      jsonb;
+  _params   jsonb;
+  _summary  jsonb;
+  _proc     od.procedure%rowtype;
+  _material numeric;
+  _regime   smallint;
+  _calc     jsonb;
+begin
+  select * into _proc from od.procedure p
+   where p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.nr_procedure = p_nr_procedure;
+  if not found then
+    return null;
+  end if;
+  _ctx     := od.fn_pricing_context(p_nr_company, p_nr_branch);
+  _params  := _ctx -> 'params';
+  _summary := _ctx -> 'summary';
+  _regime  := (_params ->> 'it_tax_regime')::smallint;
+
+  select coalesce(sum(round(pm.qt_used * round(m.vl_package_price / (m.qt_yield * (1 - m.pc_waste / 100)), 4), 2)), 0)
+    into _material
+    from od.procedure_material pm
+    join od.material m on m.nr_company = pm.nr_company and m.nr_branch = pm.nr_branch and m.nr_material = pm.nr_material
+   where pm.nr_company = p_nr_company and pm.nr_branch = p_nr_branch and pm.nr_procedure = p_nr_procedure;
+
+  _calc := od.fn_pricing_calc(jsonb_build_object(
+    'vl_material',          _material + _proc.vl_material_other,
+    'vl_lab',               _proc.vl_lab_cost,
+    'qt_minutes',           _proc.qt_minutes,
+    'vl_structure_hour',    _summary ->> 'vl_structure_hour',
+    'vl_professional_hour', _params ->> 'vl_professional_hour',
+    'pc_card',              _params ->> 'pc_card',
+    'pc_commission',        coalesce(_proc.pc_commission, (_params ->> 'pc_commission')::numeric),
+    'pc_fees',              _summary ->> 'pc_fees',
+    'it_tax_regime',        _regime,
+    'pc_tax',               case when _regime = 2 then _params ->> 'pc_tax_pj' else _params ->> 'pc_tax_pf' end,
+    'pc_profit',            0));
+  return (_calc ->> 'vl_price_min')::numeric;
+end;
+$$;
+
+revoke all on function od.fn_procedure_min_price(bigint, bigint, bigint) from public, anon, authenticated;

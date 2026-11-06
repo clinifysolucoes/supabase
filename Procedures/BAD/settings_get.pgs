@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - desconto maximo e validade dos orcamentos        ::
+  ::  Change      : 07/11/2026 - orcamento, conta em aberto, multa e juros        ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracoes da filial: dados da clinica (ad.branch), preferencias da
@@ -30,7 +30,9 @@
                   "id_auto_record_number", "nr_next_record", "vc_patient_required",
                   "it_debt_rule", "qt_debt_days", "id_cash_enabled", "it_payment_methods",
                   "pc_late_fee", "pc_late_interest", "pc_dre_revenue_tax", "pc_dre_income_tax", "pc_dre_csll",
-                  "vc_receipt_prefix", "nr_next_receipt", "pc_budget_max_discount", "qt_budget_valid_days"},
+                  "vc_receipt_prefix", "nr_next_receipt", "pc_budget_max_discount", "qt_budget_valid_days",
+                  "id_budget_request_approval", "id_budget_admin_below_min", "id_budget_reduction_as_discount",
+                  "it_open_rule", "it_late_edit"},
      "hours": [{"it_weekday", "qt_minute_start", "qt_minute_end"}],
      "security": {"it_mfa_policy"},          (2FA da empresa: 0 nao | 1 admins | 2 todos)
      "permission": {"id_update", "id_clinic"}}
@@ -93,7 +95,12 @@ begin
       'vc_receipt_prefix',      coalesce(_s.vc_receipt_prefix, ''),
       'nr_next_receipt',        coalesce(_s.nr_next_receipt, 1),
       'pc_budget_max_discount', coalesce(_s.pc_budget_max_discount, 10),
-      'qt_budget_valid_days',   coalesce(_s.qt_budget_valid_days, 30)),
+      'qt_budget_valid_days',   coalesce(_s.qt_budget_valid_days, 30),
+      'id_budget_request_approval',      coalesce(_s.id_budget_request_approval, true),
+      'id_budget_admin_below_min',       coalesce(_s.id_budget_admin_below_min, true),
+      'id_budget_reduction_as_discount', coalesce(_s.id_budget_reduction_as_discount, false),
+      'it_open_rule',           coalesce(_s.it_open_rule, 1),
+      'it_late_edit',           coalesce(_s.it_late_edit, 0)),
     'hours', coalesce((
       select jsonb_agg(jsonb_build_object('it_weekday', h.it_weekday, 'qt_minute_start', h.qt_minute_start,
                                           'qt_minute_end', h.qt_minute_end)

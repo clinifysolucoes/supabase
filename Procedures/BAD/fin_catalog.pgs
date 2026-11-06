@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 05/11/2026 - banco, agencia e conta                          ::
+  ::  Change      : 07/11/2026 - grupo no DRE (it_dre_group)                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastros do financeiro da filial: contas (com o saldo de hoje), plano de
@@ -22,7 +22,7 @@
   Output jsonb:
     {"accounts":   [{"nr_account", "vc_name", "it_type", "vl_opening", "vl_balance", "it_status",
                      "vc_bank_code", "vc_bank_name", "vc_agency", "vc_account_number"}],
-     "categories": [{"nr_category", "vc_name", "it_kind", "it_cost_type", "it_status", "qt_entries"}],
+     "categories": [{"nr_category", "vc_name", "it_kind", "it_cost_type", "it_dre_group", "it_status", "qt_entries"}],
      "suppliers":  [{"nr_supplier", "vc_name", "vc_document", "vc_phone", "vc_email", "vc_notes", "it_status"}],
      "rates":      [{"nr_rate", "vc_name", "it_payment_method", "qt_installments_min", "qt_installments_max",
                      "pc_fee", "vl_fee_fixed", "qt_days", "nr_account", "it_status"}],
@@ -78,6 +78,7 @@ begin
                               'vc_name',      c.vc_name,
                               'it_kind',      c.it_kind,
                               'it_cost_type', c.it_cost_type,
+                              'it_dre_group', c.it_dre_group,
                               'it_status',    c.it_status,
                               'qt_entries',   (select count(*) from od.fin_entry e
                                                 where e.nr_company = c.nr_company and e.nr_branch = c.nr_branch

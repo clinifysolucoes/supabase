@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - grupo no DRE (it_dre_group)                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Plano de contas: categorias de receita (it_kind 1) e de despesa (it_kind 2).
@@ -25,12 +25,16 @@
     it_kind       integer  obrigatorio em 'I': 1 receita | 2 despesa
     it_cost_type  integer  despesa: 1..4 (default 4 outros); receita: ignorado
     it_status     integer  1 ativa | 90 inativa (so em 'U')
+    it_dre_group  integer  opcional grupo no DRE (null = automatico): 1 receita operacional,
+                           2 deducao da receita, 3 custo variavel, 4 custo fixo, 5 despesa
+                           operacional, 6 receita nao operacional, 7 despesa nao operacional,
+                           8 investimento (fora do resultado)
 
   Output jsonb: {"nr_company", "nr_branch", "nr_category"}
 
   Errors: VERSION_MISMATCH, FIN_CATEGORY_ACTION_INVALID, FINANCE_BRANCH_REQUIRED, FIN_CATEGORY_FORBIDDEN,
     FIN_CATEGORY_NAME_REQUIRED, FIN_CATEGORY_NAME_IN_USE {Name}, FIN_CATEGORY_KIND_INVALID,
-    FIN_CATEGORY_COST_TYPE_INVALID, FIN_CATEGORY_STATUS_INVALID, FIN_CATEGORY_REQUIRED, FIN_CATEGORY_NOT_FOUND
+    FIN_CATEGORY_COST_TYPE_INVALID, FIN_CATEGORY_STATUS_INVALID, FIN_CATEGORY_REQUIRED, FIN_CATEGORY_NOT_FOUND, FIN_CATEGORY_DRE_GROUP_INVALID
 */
 create or replace function ad.fin_category_save(p_json jsonb)
 returns jsonb
@@ -103,6 +107,11 @@ begin
     end if;
   end if;
 
+  if p_json ? 'it_dre_group' and (p_json ->> 'it_dre_group') is not null
+     and (p_json ->> 'it_dre_group') !~ '^[1-8]$' then
+    raise exception '%', ad.fn_message('FIN_CATEGORY_DRE_GROUP_INVALID');
+  end if;
+
   if _vc_name is not null and exists (
        select 1 from od.fin_category c
         where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.it_kind = _kind
@@ -114,13 +123,14 @@ begin
     perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
     select coalesce(max(c.nr_category), 0) + 1 into _nr_category
       from od.fin_category c where c.nr_company = _nr_company and c.nr_branch = _nr_branch;
-    insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, it_cost_type, nr_operator)
-    values (_nr_company, _nr_branch, _nr_category, _vc_name, _kind, _cost, _nr_user)
+    insert into od.fin_category (nr_company, nr_branch, nr_category, vc_name, it_kind, it_cost_type, it_dre_group, nr_operator)
+    values (_nr_company, _nr_branch, _nr_category, _vc_name, _kind, _cost, (p_json ->> 'it_dre_group')::smallint, _nr_user)
     returning * into _row;
   else
     update od.fin_category c set
       vc_name      = case when p_json ? 'vc_name'   then _vc_name                           else c.vc_name end,
       it_cost_type = case when _cost is not null    then _cost                              else c.it_cost_type end,
+      it_dre_group = case when p_json ? 'it_dre_group' then (p_json ->> 'it_dre_group')::smallint else c.it_dre_group end,
       it_status    = case when p_json ? 'it_status' then (p_json ->> 'it_status')::smallint else c.it_status end
     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_category = _nr_category
     returning c.* into _row;

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - profissionais inativados                         ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Lixeira da filial: registros excluidos logicamente (it_status 90), mais
@@ -18,6 +18,7 @@
       fin_entry     FINANCE   conta a receber ou a pagar cancelada
       procedure     PRICING   procedimento inativado
       material      PRICING   material inativado
+      professional  AGENDA    profissional inativado
     dh_deleted = ultima alteracao (a exclusao); vc_user = quem alterou.
 
   Input p_json:
@@ -67,7 +68,8 @@ begin
      or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_read')::boolean, false) then
     raise exception '%', ad.fn_message('TRASH_FORBIDDEN');
   end if;
-  if _kind is not null and _kind not in ('patient', 'patient_note', 'appointment', 'fin_entry', 'procedure', 'material') then
+  if _kind is not null and _kind not in ('patient', 'patient_note', 'appointment', 'fin_entry', 'procedure', 'material',
+                                          'professional') then
     raise exception '%', ad.fn_message('TRASH_KIND_INVALID');
   end if;
   begin
@@ -81,7 +83,7 @@ begin
   _fin := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
   _prc := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
   if (_pat ->> 'id_read')::boolean then _kinds := _kinds || array['patient', 'patient_note']; end if;
-  if (_agd ->> 'id_read')::boolean then _kinds := _kinds || array['appointment']; end if;
+  if (_agd ->> 'id_read')::boolean then _kinds := _kinds || array['appointment', 'professional']; end if;
   if (_fin ->> 'id_read')::boolean then _kinds := _kinds || array['fin_entry']; end if;
   if (_prc ->> 'id_read')::boolean then _kinds := _kinds || array['procedure', 'material']; end if;
 
@@ -131,6 +133,11 @@ begin
            m.dh_updated, m.nr_operator, (_prc ->> 'id_update')::boolean
       from od.material m
      where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.it_status = 90
+    union all
+    select 'professional', p.nr_professional, null, p.vc_name, 'Profissional da agenda',
+           p.dh_updated, p.nr_operator, (_agd ->> 'id_update')::boolean
+      from od.professional p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.it_status = 90
   ), f as (
     select t.* from t
      where t.vc_kind = any (_kinds)

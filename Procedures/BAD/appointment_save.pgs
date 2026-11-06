@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - bloqueio de paciente com conta vencida           ::
+  ::  Change      : 07/11/2026 - bloqueio de conta em aberto                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda: cria ou altera uma consulta ou um compromisso.
@@ -54,7 +54,10 @@
     APPOINTMENT_PROFESSIONAL_INVALID, APPOINTMENT_PROCEDURE_INVALID, APPOINTMENT_TITLE_REQUIRED,
     APPOINTMENT_PERIOD_INVALID, APPOINTMENT_STATUS_INVALID, APPOINTMENT_CONFLICT {Time},
     APPOINTMENT_OUTSIDE_HOURS, APPOINTMENT_DEBT_BLOCKED {Amount}, APPOINTMENT_DEBT_APPROVAL {Amount},
-    APPOINTMENT_DEBT_CONFIRM {Amount}
+    APPOINTMENT_DEBT_CONFIRM {Amount}, APPOINTMENT_OPEN_BLOCKED {Amount},
+    APPOINTMENT_OPEN_APPROVAL {Amount}, APPOINTMENT_OPEN_CONFIRM {Amount}
+    Contas em aberto (od.branch_setting.it_open_rule): o mesmo, para quem tem
+    conta a receber em aberto ainda nao vencida; vale a regra mais forte.
     Inadimplentes (od.branch_setting.it_debt_rule): consulta nova, ou que
     trocou de paciente, de paciente com conta a receber vencida ha mais que
     qt_debt_days (od.fn_patient_overdue): 2 avisa (agenda e devolve "debt"),
@@ -90,6 +93,10 @@ declare
   _debt_rule      smallint;
   _debt           jsonb;
   _debt_override  boolean := false;
+  _open_rule      smallint;
+  _open           jsonb;
+  _rule           smallint := 1;
+  _kind           text;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_save');
 
@@ -263,26 +270,44 @@ begin
   /* paciente com conta a receber vencida                                   */
   if _new.it_type = 1 and _new.nr_patient is not null and _new.it_status not in (7, 90)
      and (_vc_action = 'I' or _new.nr_patient is distinct from _cur.nr_patient) then
-    select coalesce(s.it_debt_rule, 1) into _debt_rule
+    select coalesce(s.it_debt_rule, 1), coalesce(s.it_open_rule, 1) into _debt_rule, _open_rule
       from (select 1) x
       left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
     if _debt_rule > 1 then
       _debt := od.fn_patient_overdue(_nr_company, _nr_branch, _new.nr_patient);
-      if (_debt ->> 'qt_entries')::integer = 0 then
-        _debt := null;
-      elsif _debt_rule = 4 then
-        raise exception '%', ad.fn_message('APPOINTMENT_DEBT_BLOCKED',
+      if (_debt ->> 'qt_entries')::integer > 0 then
+        _rule := _debt_rule; _kind := 'DEBT';
+      end if;
+    end if;
+    -- contas em aberto ainda nao vencidas (vale a regra mais forte)
+    if _open_rule > _rule then
+      select jsonb_build_object('qt_entries', count(*), 'vl_total', coalesce(sum(e.vl_amount), 0)) into _open
+        from od.fin_entry e
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _new.nr_patient
+         and e.it_kind = 1 and e.it_status = 1;
+      if (_open ->> 'qt_entries')::integer > 0 then
+        _rule := _open_rule; _kind := 'OPEN'; _debt := _open;
+      end if;
+    end if;
+    if _kind is null then
+      _debt := null;
+    else
+      _debt := _debt || jsonb_build_object('vc_kind', lower(_kind));
+      if _rule = 4 then
+        raise exception '%', ad.fn_message('APPOINTMENT_' || _kind || '_BLOCKED',
           jsonb_build_object('Amount', _debt -> 'vl_total'));
-      elsif _debt_rule = 3 then
+      elsif _rule = 3 then
         if not private.fn_is_company_admin(_nr_company) then
-          raise exception '%', ad.fn_message('APPOINTMENT_DEBT_APPROVAL',
+          raise exception '%', ad.fn_message('APPOINTMENT_' || _kind || '_APPROVAL',
             jsonb_build_object('Amount', _debt -> 'vl_total'));
         end if;
         if not coalesce((p_json ->> 'id_debt_override')::boolean, false) then
-          raise exception '%', ad.fn_message('APPOINTMENT_DEBT_CONFIRM',
+          raise exception '%', ad.fn_message('APPOINTMENT_' || _kind || '_CONFIRM',
             jsonb_build_object('Amount', _debt -> 'vl_total'));
         end if;
         _debt_override := true;
+      elsif _rule = 1 then
+        _debt := null;
       end if;
     end if;
   end if;

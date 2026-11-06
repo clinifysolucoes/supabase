@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - aprovacao abaixo do preco minimo                 ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Situacao do orcamento (permissao ALTERAR na tela BUDGETS):
@@ -36,7 +36,7 @@
 
   Errors: VERSION_MISMATCH, BUDGET_BRANCH_REQUIRED, BUDGET_FORBIDDEN, BUDGET_REQUIRED, BUDGET_NOT_FOUND,
     BUDGET_ACTION_INVALID, BUDGET_STATUS_INVALID, BUDGET_DISCOUNT_FORBIDDEN, BUDGET_EXPIRED,
-    BUDGET_VALUE_INVALID, BUDGET_EMPTY, BUDGET_HAS_PAYMENTS
+    BUDGET_VALUE_INVALID, BUDGET_EMPTY, BUDGET_HAS_PAYMENTS, BUDGET_BELOW_MIN {Item}
 */
 create or replace function ad.budget_status(p_json jsonb)
 returns jsonb
@@ -97,6 +97,10 @@ begin
     end if;
     if _b.it_status <> 2 then
       raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+    if _b.id_below_min and not coalesce((select s.id_budget_admin_below_min from od.branch_setting s
+                                          where s.nr_company = _nr_company and s.nr_branch = _nr_branch), true) then
+      raise exception '%', ad.fn_message('BUDGET_BELOW_MIN', jsonb_build_object('Item', 0));
     end if;
     update od.budget b set it_status = 1, id_discount_approved = true, nr_user_discount = _nr_user, dh_discount = now()
      where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;
@@ -177,7 +181,7 @@ begin
     select coalesce(s.pc_budget_max_discount, 10) into _max
       from (select 1) x
       left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
-    _status := case when _b.vl_gross > 0 and _b.vl_discount / _b.vl_gross * 100 > _max + 0.005
+    _status := case when (_b.id_below_min or (_b.vl_gross > 0 and _b.vl_discount / _b.vl_gross * 100 > _max + 0.005))
                          and not _b.id_discount_approved then 2 else 1 end;
     update od.budget b set it_status = _status, dh_accepted = null
      where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;

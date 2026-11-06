@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - formas aceitas, multa e juros por atraso         ::
+  ::  Change      : 07/11/2026 - edicao de multa e juros (it_late_edit)           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
@@ -42,6 +42,8 @@
     cria os recebiveis (od.fn_fin_receivable_make). UNDO cancela os
     recebiveis ainda nao confirmados (com algum confirmado, bloqueia).
 
+    Multa e juros (od.branch_setting.it_late_edit): pagar menos que valor +
+    acrescimos so o administrador (1) ou ninguem (2).
     Conta a receber: a forma de pagamento precisa estar entre as aceitas da
     filial (od.branch_setting.it_payment_methods).
 
@@ -51,7 +53,8 @@
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, FIN_ENTRY_REQUIRED,
     FIN_ENTRY_NOT_FOUND, FIN_SETTLE_ACTION_INVALID, FIN_SETTLE_STATUS_INVALID, FIN_ENTRY_VALUE_INVALID,
     FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_CASH_SESSION_CLOSED,
-    FIN_RECEIVABLE_CONFIRMED, FIN_BANK_RECONCILED, FIN_ENTRY_METHOD_NOT_ACCEPTED
+    FIN_RECEIVABLE_CONFIRMED, FIN_BANK_RECONCILED, FIN_ENTRY_METHOD_NOT_ACCEPTED, FIN_LATE_EDIT_FORBIDDEN,
+    FIN_LATE_EDIT_ADMIN
 */
 create or replace function ad.fin_entry_settle(p_json jsonb)
 returns jsonb
@@ -142,6 +145,18 @@ begin
       if (_late ->> 'vl_total')::numeric = 0 then
         _late := null;
       end if;
+    end if;
+    if _late is not null and _vl_paid is not null
+       and _vl_paid < _cur.vl_amount + (_late ->> 'vl_total')::numeric - 0.005 then
+      case coalesce((select s.it_late_edit from od.branch_setting s
+                      where s.nr_company = _nr_company and s.nr_branch = _nr_branch), 0)
+        when 2 then raise exception '%', ad.fn_message('FIN_LATE_EDIT_FORBIDDEN');
+        when 1 then
+          if not private.fn_is_company_admin(_nr_company) then
+            raise exception '%', ad.fn_message('FIN_LATE_EDIT_ADMIN');
+          end if;
+        else null;
+      end case;
     end if;
     _vl_paid := coalesce(_vl_paid, _cur.vl_amount + coalesce((_late ->> 'vl_total')::numeric, 0));
     if _vl_paid <= 0 then

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - preco minimo e reducao como desconto             ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cria (I, permissao CRIAR) ou altera parcialmente (U, permissao ALTERAR)
@@ -16,7 +16,13 @@
     desconto em valor (vl_discount) ou percentual (pc_discount), total.
     Desconto acima do maximo da filial (od.branch_setting.pc_budget_max_discount,
     padrao 10%): quem e administrador da empresa ja aprova; os demais deixam
-    o orcamento "aguardando aprovacao do desconto" (situacao 2). Validade
+    o orcamento "aguardando aprovacao do desconto" (situacao 2) ou, sem
+    id_budget_request_approval, recebem BUDGET_DISCOUNT_OVER_MAX. Com
+    id_budget_reduction_as_discount, o valor abaixo do cobrado hoje de cada
+    procedimento conta como desconto. Item abaixo do preco minimo da
+    precificacao (od.fn_procedure_min_price, ja com o desconto rateado):
+    so o administrador aprova, se id_budget_admin_below_min; senao
+    BUDGET_BELOW_MIN {Item}. Validade
     padrao: data do orcamento + qt_budget_valid_days (padrao 30).
     Grava ad.event_log sem dados pessoais.
 
@@ -42,7 +48,8 @@
   Errors: VERSION_MISMATCH, BUDGET_ACTION_INVALID, BUDGET_BRANCH_REQUIRED, BUDGET_FORBIDDEN,
     BUDGET_REQUIRED, BUDGET_NOT_FOUND, BUDGET_STATUS_INVALID, BUDGET_VALUE_INVALID,
     BUDGET_PATIENT_INVALID, BUDGET_PROFESSIONAL_INVALID, BUDGET_DATE_INVALID, BUDGET_ITEMS_REQUIRED,
-    BUDGET_ITEM_INVALID {Item}, BUDGET_PROCEDURE_INVALID {Item}, BUDGET_DISCOUNT_INVALID
+    BUDGET_ITEM_INVALID {Item}, BUDGET_PROCEDURE_INVALID {Item}, BUDGET_DISCOUNT_INVALID,
+    BUDGET_DISCOUNT_OVER_MAX, BUDGET_BELOW_MIN {Item}
 */
 create or replace function ad.budget_save(p_json jsonb)
 returns jsonb
@@ -70,6 +77,12 @@ declare
   _unit       numeric;
   _desc       text;
   _admin      boolean;
+  _request    boolean;
+  _below_ok   boolean;
+  _reduction  boolean;
+  _standard   numeric;
+  _below      integer;
+  _needs      boolean;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'budget_save');
   if _action not in ('I', 'U') then
@@ -90,7 +103,10 @@ begin
   _admin := private.fn_is_company_admin(_nr_company);
 
   select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
-  select coalesce(s.pc_budget_max_discount, 10), coalesce(s.qt_budget_valid_days, 30) into _max, _days
+  select coalesce(s.pc_budget_max_discount, 10), coalesce(s.qt_budget_valid_days, 30),
+         coalesce(s.id_budget_request_approval, true), coalesce(s.id_budget_admin_below_min, true),
+         coalesce(s.id_budget_reduction_as_discount, false)
+    into _max, _days, _request, _below_ok, _reduction
     from (select 1) x
     left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
 
@@ -209,17 +225,42 @@ begin
   if _new.vl_discount < 0 or _new.vl_discount > _new.vl_gross then
     raise exception '%', ad.fn_message('BUDGET_DISCOUNT_INVALID');
   end if;
-  _pc := case when _new.vl_gross = 0 then 0 else _new.vl_discount / _new.vl_gross * 100 end;
+  -- desconto efetivo: so o desconto ou, com id_budget_reduction_as_discount,
+  -- tambem o que ficou abaixo do valor cobrado hoje de cada procedimento
+  select coalesce(sum(i.qt_quantity * case when p.vl_current_price > 0 and _reduction
+                                           then greatest(p.vl_current_price, i.vl_unit) else i.vl_unit end), 0)
+    into _standard
+    from od.budget_item i
+    left join od.procedure p on p.nr_company = i.nr_company and p.nr_branch = i.nr_branch and p.nr_procedure = i.nr_procedure
+   where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _nr_budget;
+  _pc := case when _standard = 0 then 0
+              else (_standard - (_new.vl_gross - _new.vl_discount)) / _standard * 100 end;
 
-  -- desconto acima do maximo: o administrador ja aprova; os demais aguardam
-  if _pc > _max + 0.005 then
+  -- itens abaixo do preco minimo (com o desconto rateado)
+  select min(i.nr_item) into _below
+    from od.budget_item i
+   where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _nr_budget
+     and i.nr_procedure is not null
+     and i.vl_unit * case when _new.vl_gross = 0 then 1 else 1 - _new.vl_discount / _new.vl_gross end
+         < coalesce(od.fn_procedure_min_price(_nr_company, _nr_branch, i.nr_procedure), 0) - 0.005;
+  _new.id_below_min := _below is not null;
+  if _new.id_below_min and not _below_ok then
+    raise exception '%', ad.fn_message('BUDGET_BELOW_MIN', jsonb_build_object('Item', _below));
+  end if;
+
+  -- acima do maximo ou abaixo do minimo: o administrador ja aprova; os demais
+  -- aguardam (ou sao barrados sem id_budget_request_approval)
+  _needs := _pc > _max + 0.005 or _new.id_below_min;
+  if _needs then
     if _admin then
       _new.it_status := 1; _new.id_discount_approved := true;
       _new.nr_user_discount := _nr_user; _new.dh_discount := now();
     elsif _action = 'U' and _cur.id_discount_approved and _new.vl_discount <= _cur.vl_discount
-          and _new.vl_gross = _cur.vl_gross then
+          and _new.vl_gross = _cur.vl_gross and (_cur.id_below_min or not _new.id_below_min) then
       _new.it_status := 1; _new.id_discount_approved := true;
       _new.nr_user_discount := _cur.nr_user_discount; _new.dh_discount := _cur.dh_discount;
+    elsif not _request and not _new.id_below_min then
+      raise exception '%', ad.fn_message('BUDGET_DISCOUNT_OVER_MAX');
     else
       _new.it_status := 2; _new.id_discount_approved := false;
     end if;
@@ -232,7 +273,7 @@ begin
     dt_budget = _new.dt_budget, dt_valid = _new.dt_valid, qt_installments = _new.qt_installments,
     it_payment_method = _new.it_payment_method, vc_notes = _new.vc_notes,
     vl_gross = _new.vl_gross, vl_discount = _new.vl_discount, vl_total = _new.vl_gross - _new.vl_discount,
-    it_status = _new.it_status, id_discount_approved = _new.id_discount_approved,
+    it_status = _new.it_status, id_discount_approved = _new.id_discount_approved, id_below_min = _new.id_below_min,
     nr_user_discount = case when _new.id_discount_approved then _new.nr_user_discount end,
     dh_discount = case when _new.id_discount_approved then _new.dh_discount end
   where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _nr_budget;

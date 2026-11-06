@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - desconto maximo e validade dos orcamentos        ::
+  ::  Change      : 07/11/2026 - orcamento, conta em aberto, multa e juros        ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava as preferencias da filial (od.branch_setting, criada na primeira
@@ -40,6 +40,9 @@
     nr_next_receipt         bigint   opcional >= 1 (proximo numero de recibo)
     pc_budget_max_discount  numeric  opcional 0..100 (desconto maximo do orcamento sem aprovacao)
     qt_budget_valid_days    integer  opcional 1..365 (validade padrao do orcamento)
+    id_budget_request_approval, id_budget_admin_below_min, id_budget_reduction_as_discount  boolean  opcionais
+    it_open_rule            integer  opcional 1..4 (paciente com conta em aberto ao agendar)
+    it_late_edit            integer  opcional 0 editaveis | 1 so administrador | 2 nao editaveis
 
   Output jsonb: o mesmo de ad.settings_get
 
@@ -98,6 +101,11 @@ begin
     _cur.nr_next_receipt := 1;
     _cur.pc_budget_max_discount := 10;
     _cur.qt_budget_valid_days := 30;
+    _cur.id_budget_request_approval := true;
+    _cur.id_budget_admin_below_min := true;
+    _cur.id_budget_reduction_as_discount := false;
+    _cur.it_open_rule := 1;
+    _cur.it_late_edit := 0;
   end if;
 
   begin
@@ -128,6 +136,11 @@ begin
     _new.nr_next_receipt        := case when p_json ? 'nr_next_receipt'        then (p_json ->> 'nr_next_receipt')::bigint         else _cur.nr_next_receipt end;
     _new.pc_budget_max_discount := case when p_json ? 'pc_budget_max_discount' then round((p_json ->> 'pc_budget_max_discount')::numeric, 2) else _cur.pc_budget_max_discount end;
     _new.qt_budget_valid_days   := case when p_json ? 'qt_budget_valid_days'   then (p_json ->> 'qt_budget_valid_days')::smallint else _cur.qt_budget_valid_days end;
+    _new.id_budget_request_approval      := case when p_json ? 'id_budget_request_approval' then (p_json ->> 'id_budget_request_approval')::boolean else _cur.id_budget_request_approval end;
+    _new.id_budget_admin_below_min       := case when p_json ? 'id_budget_admin_below_min' then (p_json ->> 'id_budget_admin_below_min')::boolean else _cur.id_budget_admin_below_min end;
+    _new.id_budget_reduction_as_discount := case when p_json ? 'id_budget_reduction_as_discount' then (p_json ->> 'id_budget_reduction_as_discount')::boolean else _cur.id_budget_reduction_as_discount end;
+    _new.it_open_rule := case when p_json ? 'it_open_rule' then (p_json ->> 'it_open_rule')::smallint else _cur.it_open_rule end;
+    _new.it_late_edit := case when p_json ? 'it_late_edit' then (p_json ->> 'it_late_edit')::smallint else _cur.it_late_edit end;
     if p_json ? 'it_payment_methods' then
       if jsonb_typeof(p_json -> 'it_payment_methods') <> 'array' then
         raise exception '%', ad.fn_message('SETTINGS_METHODS_INVALID');
@@ -172,6 +185,16 @@ begin
      or _new.qt_budget_valid_days is null or _new.qt_budget_valid_days not between 1 and 365 then
     raise exception '%', ad.fn_message('SETTINGS_BUDGET_INVALID');
   end if;
+  if _new.it_open_rule is null or _new.it_open_rule not in (1, 2, 3, 4) then
+    raise exception '%', ad.fn_message('SETTINGS_DEBT_INVALID');
+  end if;
+  if _new.it_late_edit is null or _new.it_late_edit not in (0, 1, 2) then
+    raise exception '%', ad.fn_message('SETTINGS_LATE_INVALID');
+  end if;
+  if _new.id_budget_request_approval is null or _new.id_budget_admin_below_min is null
+     or _new.id_budget_reduction_as_discount is null then
+    raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
+  end if;
   if coalesce(_new.pc_dre_revenue_tax, -1) not between 0 and 50 or coalesce(_new.pc_dre_income_tax, -1) not between 0 and 50
      or coalesce(_new.pc_dre_csll, -1) not between 0 and 50 then
     raise exception '%', ad.fn_message('SETTINGS_DRE_INVALID');
@@ -187,13 +210,15 @@ begin
                                  it_debt_rule, qt_debt_days, id_cash_enabled, it_payment_methods, pc_late_fee,
                                  pc_late_interest, pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll,
                                  vc_receipt_prefix, nr_next_receipt, pc_budget_max_discount, qt_budget_valid_days,
-                                 nr_operator)
+                                 id_budget_request_approval, id_budget_admin_below_min, id_budget_reduction_as_discount,
+                                 it_open_rule, it_late_edit, nr_operator)
   values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
           _new.id_auto_record_number, _new.nr_next_record, _new.vc_patient_required,
           _new.it_debt_rule, _new.qt_debt_days, _new.id_cash_enabled, _new.it_payment_methods, _new.pc_late_fee,
           _new.pc_late_interest, _new.pc_dre_revenue_tax, _new.pc_dre_income_tax, _new.pc_dre_csll,
           _new.vc_receipt_prefix, _new.nr_next_receipt, _new.pc_budget_max_discount, _new.qt_budget_valid_days,
-          _nr_user)
+          _new.id_budget_request_approval, _new.id_budget_admin_below_min, _new.id_budget_reduction_as_discount,
+          _new.it_open_rule, _new.it_late_edit, _nr_user)
   on conflict (nr_company, nr_branch) do update set
     qt_slot_minutes        = excluded.qt_slot_minutes,
     qt_max_parallel        = excluded.qt_max_parallel,
@@ -213,7 +238,12 @@ begin
     vc_receipt_prefix      = excluded.vc_receipt_prefix,
     nr_next_receipt        = excluded.nr_next_receipt,
     pc_budget_max_discount = excluded.pc_budget_max_discount,
-    qt_budget_valid_days   = excluded.qt_budget_valid_days;
+    qt_budget_valid_days   = excluded.qt_budget_valid_days,
+    id_budget_request_approval      = excluded.id_budget_request_approval,
+    id_budget_admin_below_min       = excluded.id_budget_admin_below_min,
+    id_budget_reduction_as_discount = excluded.id_budget_reduction_as_discount,
+    it_open_rule           = excluded.it_open_rule,
+    it_late_edit           = excluded.it_late_edit;
 
   if p_json ? 'hours' then
     if jsonb_typeof(p_json -> 'hours') <> 'array' then
