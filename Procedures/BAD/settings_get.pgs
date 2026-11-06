@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - numeracao dos recibos                            ::
+  ::  Change      : 06/11/2026 - aliquotas do DRE e numeracao dos recibos         ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracoes da filial: dados da clinica (ad.branch), preferencias da
@@ -29,7 +29,8 @@
      "settings": {"qt_slot_minutes", "qt_max_parallel", "id_allow_outside_hours",
                   "id_auto_record_number", "nr_next_record", "vc_patient_required",
                   "it_debt_rule", "qt_debt_days", "id_cash_enabled", "it_payment_methods",
-                  "pc_late_fee", "pc_late_interest", "vc_receipt_prefix", "nr_next_receipt"},
+                  "pc_late_fee", "pc_late_interest", "pc_dre_revenue_tax", "pc_dre_income_tax", "pc_dre_csll",
+                  "vc_receipt_prefix", "nr_next_receipt"},
      "hours": [{"it_weekday", "qt_minute_start", "qt_minute_end"}],
      "permission": {"id_update", "id_clinic"}}
 
@@ -85,6 +86,9 @@ begin
       'it_payment_methods',     to_jsonb(coalesce(_s.it_payment_methods, '{1,2,3,4,5,6,7,9}'::smallint[])),
       'pc_late_fee',            coalesce(_s.pc_late_fee, 0),
       'pc_late_interest',       coalesce(_s.pc_late_interest, 0),
+      'pc_dre_revenue_tax',     coalesce(_s.pc_dre_revenue_tax, 0),
+      'pc_dre_income_tax',      coalesce(_s.pc_dre_income_tax, 0),
+      'pc_dre_csll',            coalesce(_s.pc_dre_csll, 0),
       'vc_receipt_prefix',      coalesce(_s.vc_receipt_prefix, ''),
       'nr_next_receipt',        coalesce(_s.nr_next_receipt, 1)),
     'hours', coalesce((
