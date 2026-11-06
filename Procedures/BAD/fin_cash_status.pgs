@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - id_enabled (caixa ligado nas configuracoes)      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Caixa do dia (permissao LER na tela FINANCE): o caixa aberto do usuario
@@ -26,7 +26,8 @@
     {"mine": <sessao>|null,
      "accounts": [{"nr_account", "vc_name", "vl_balance", "nr_session", "vc_user"}],
      "sessions": [<sessao>],
-     "permission": {...}}
+     "permission": {...},
+     "id_enabled": boolean}   (caixa ligado nas configuracoes da filial)
     <sessao> = {"nr_session", "nr_account", "vc_account", "nr_user", "vc_user", "dh_open", "dh_close",
                 "it_status", "vl_open", "vl_in", "vl_out", "vl_transfer_in", "vl_transfer_out",
                 "by_method": {"<it_payment_method|0>": valor}, "vl_expected", "vl_counted",
@@ -130,7 +131,9 @@ begin
                    left join ad.app_user u on u.nr_user = s.nr_user
                   where a.nr_company = _nr_company and a.nr_branch = _nr_branch
                     and a.it_status = 1 and a.it_type = 1),
-    'permission', _perm);
+    'permission', _perm,
+    'id_enabled', coalesce((select s.id_cash_enabled from od.branch_setting s
+                             where s.nr_company = _nr_company and s.nr_branch = _nr_branch), true));
 end;
 $$;
 

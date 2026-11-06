@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 05/11/2026 - dados do cartao e do cheque                      ::
+  ::  Change      : 06/11/2026 - formas aceitas, multa e juros por atraso         ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Baixa e situacao de um lancamento (permissao ALTERAR na tela FINANCE):
@@ -28,7 +28,8 @@
     vc_action          text     obrigatorio PAY | UNDO | CANCEL | REOPEN
     nr_account         bigint   PAY
     dt_paid            date     PAY (opcional)
-    vl_paid            numeric  PAY (opcional, > 0)
+    vl_paid            numeric  PAY (opcional, > 0; padrao: valor + multa e juros por atraso
+                                 da conta a receber, od.fn_fin_late_charge)
     it_payment_method  integer  PAY (opcional)
     id_following       boolean  CANCEL (opcional)
     qt_card_installments integer PAY (opcional, parcelas do cartao de credito, 1..24)
@@ -41,12 +42,16 @@
     cria os recebiveis (od.fn_fin_receivable_make). UNDO cancela os
     recebiveis ainda nao confirmados (com algum confirmado, bloqueia).
 
-  Output jsonb: {"nr_entry", "it_status", "qt_changed", "qt_receivables"}
+    Conta a receber: a forma de pagamento precisa estar entre as aceitas da
+    filial (od.branch_setting.it_payment_methods).
+
+  Output jsonb: {"nr_entry", "it_status", "qt_changed", "qt_receivables", "late": {"qt_days", "vl_fine",
+                 "vl_interest", "vl_total"} | null}
 
   Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_ENTRY_FORBIDDEN, FIN_ENTRY_REQUIRED,
     FIN_ENTRY_NOT_FOUND, FIN_SETTLE_ACTION_INVALID, FIN_SETTLE_STATUS_INVALID, FIN_ENTRY_VALUE_INVALID,
     FIN_ENTRY_ACCOUNT_INVALID, FIN_ENTRY_AMOUNT_INVALID, FIN_ENTRY_METHOD_INVALID, FIN_CASH_SESSION_CLOSED,
-    FIN_RECEIVABLE_CONFIRMED, FIN_BANK_RECONCILED
+    FIN_RECEIVABLE_CONFIRMED, FIN_BANK_RECONCILED, FIN_ENTRY_METHOD_NOT_ACCEPTED
 */
 create or replace function ad.fin_entry_settle(p_json jsonb)
 returns jsonb
@@ -69,6 +74,7 @@ declare
   _status     smallint;
   _n          integer := 1;
   _qt_rec     integer := 0;
+  _late       jsonb;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_entry_settle');
 
@@ -106,7 +112,7 @@ begin
     begin
       _account := coalesce((p_json ->> 'nr_account')::bigint, _cur.nr_account);
       _dt_paid := (p_json ->> 'dt_paid')::date;
-      _vl_paid := round(coalesce((p_json ->> 'vl_paid')::numeric, _cur.vl_amount), 2);
+      _vl_paid := round((p_json ->> 'vl_paid')::numeric, 2);
       _method  := coalesce((p_json ->> 'it_payment_method')::smallint, _cur.it_payment_method);
     exception when others then
       raise exception '%', ad.fn_message('FIN_ENTRY_VALUE_INVALID');
@@ -117,15 +123,29 @@ begin
             and a.it_status = 1) then
       raise exception '%', ad.fn_message('FIN_ENTRY_ACCOUNT_INVALID');
     end if;
-    if _vl_paid <= 0 then
-      raise exception '%', ad.fn_message('FIN_ENTRY_AMOUNT_INVALID');
-    end if;
     if _method is not null and _method not in (1, 2, 3, 4, 5, 6, 7, 9) then
       raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_INVALID');
+    end if;
+    if _cur.it_kind = 1 and _method is not null and not exists (
+         select 1 from (select 1) x
+           left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch
+          where _method = any (coalesce(s.it_payment_methods, '{1,2,3,4,5,6,7,9}'::smallint[]))) then
+      raise exception '%', ad.fn_message('FIN_ENTRY_METHOD_NOT_ACCEPTED');
     end if;
     if _dt_paid is null then
       select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
       _dt_paid := (now() at time zone _tz)::date;
+    end if;
+    /* conta a receber paga com atraso: multa e juros da filial */
+    if _cur.it_kind = 1 and _dt_paid > _cur.dt_due then
+      _late := od.fn_fin_late_charge(_nr_company, _nr_branch, _cur.vl_amount, _cur.dt_due, _dt_paid);
+      if (_late ->> 'vl_total')::numeric = 0 then
+        _late := null;
+      end if;
+    end if;
+    _vl_paid := coalesce(_vl_paid, _cur.vl_amount + coalesce((_late ->> 'vl_total')::numeric, 0));
+    if _vl_paid <= 0 then
+      raise exception '%', ad.fn_message('FIN_ENTRY_AMOUNT_INVALID');
     end if;
     update od.fin_entry e set
       it_status = 2, nr_account = _account, dt_paid = _dt_paid, vl_paid = _vl_paid, it_payment_method = _method,
@@ -185,7 +205,8 @@ begin
     jsonb_build_object('vc_action', _action, 'vl_paid', _vl_paid, 'dt_paid', _dt_paid,
                        'nr_account', _account, 'qt_changed', _n));
 
-  return jsonb_build_object('nr_entry', _nr_entry, 'it_status', _status, 'qt_changed', _n, 'qt_receivables', _qt_rec);
+  return jsonb_build_object('nr_entry', _nr_entry, 'it_status', _status, 'qt_changed', _n, 'qt_receivables', _qt_rec,
+                            'late', _late);
 end;
 $$;
 

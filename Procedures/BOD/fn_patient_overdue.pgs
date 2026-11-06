@@ -1,0 +1,49 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_patient_overdue(bigint, bigint, bigint)                 ::
+  ::  UsedBy      : ad.appointment_save                                           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Contas a receber do paciente em aberto e vencidas ha mais que a tolerancia
+    da filial (od.branch_setting.qt_debt_days; padrao 0), com "hoje" no fuso
+    da filial. Usado pela regra de bloqueio de inadimplentes da agenda.
+    Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_patient
+  Output: jsonb {"qt_entries", "vl_total"} (zeros quando nao ha)
+*/
+create or replace function od.fn_patient_overdue(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_patient bigint)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _limit date;
+  _qt    integer;
+  _vl    numeric;
+begin
+  select (now() at time zone b.vc_timezone)::date - coalesce(s.qt_debt_days, 0)
+    into _limit
+    from ad.branch b
+    left join od.branch_setting s on s.nr_company = b.nr_company and s.nr_branch = b.nr_branch
+   where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch;
+
+  select count(*), coalesce(sum(e.vl_amount), 0) into _qt, _vl
+    from od.fin_entry e
+   where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch
+     and e.nr_patient = p_nr_patient and e.it_kind = 1 and e.it_status = 1
+     and e.dt_due < _limit;
+  return jsonb_build_object('qt_entries', _qt, 'vl_total', _vl);
+end;
+$$;
+
+revoke all on function od.fn_patient_overdue(bigint, bigint, bigint) from public, anon, authenticated;
