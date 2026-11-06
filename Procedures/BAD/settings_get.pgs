@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - inadimplentes, caixa, formas, multa e juros      ::
+  ::  Change      : 06/11/2026 - obrigatorios do paciente (vc_patient_required)   ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracoes da filial: dados da clinica (ad.branch), preferencias da
@@ -27,7 +27,7 @@
                 "vc_city", "vc_state", "vc_timezone", "vc_technical_name", "vc_technical_cro",
                 "vc_technical_cro_state", "vc_forum_city"},
      "settings": {"qt_slot_minutes", "qt_max_parallel", "id_allow_outside_hours",
-                  "id_auto_record_number", "nr_next_record", "id_require_cpf", "id_require_mobile",
+                  "id_auto_record_number", "nr_next_record", "vc_patient_required",
                   "it_debt_rule", "qt_debt_days", "id_cash_enabled", "it_payment_methods",
                   "pc_late_fee", "pc_late_interest"},
      "hours": [{"it_weekday", "qt_minute_start", "qt_minute_end"}],
@@ -78,8 +78,7 @@ begin
       'id_allow_outside_hours', coalesce(_s.id_allow_outside_hours, true),
       'id_auto_record_number',  coalesce(_s.id_auto_record_number, false),
       'nr_next_record',         coalesce(_s.nr_next_record, 1),
-      'id_require_cpf',         coalesce(_s.id_require_cpf, false),
-      'id_require_mobile',      coalesce(_s.id_require_mobile, false),
+      'vc_patient_required',    to_jsonb(coalesce(_s.vc_patient_required, '{}'::text[])),
       'it_debt_rule',           coalesce(_s.it_debt_rule, 1),
       'qt_debt_days',           coalesce(_s.qt_debt_days, 0),
       'id_cash_enabled',        coalesce(_s.id_cash_enabled, true),

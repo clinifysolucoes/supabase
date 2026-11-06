@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - inadimplentes, caixa, formas, multa e juros      ::
+  ::  Change      : 06/11/2026 - obrigatorios do paciente (vc_patient_required)   ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava as preferencias da filial (od.branch_setting, criada na primeira
@@ -23,7 +23,10 @@
     id_allow_outside_hours  boolean  opcional (agendar fora do horario de atendimento)
     id_auto_record_number   boolean  opcional (numero de prontuario automatico)
     nr_next_record          bigint   opcional >= 1 (proximo numero)
-    id_require_cpf, id_require_mobile  boolean  opcionais (obrigatorios no cadastro do paciente)
+    vc_patient_required     array    opcional campos obrigatorios no cadastro do paciente (alem de
+                                     nome, nascimento e CPF, que sempre sao): rg, gender,
+                                     marital_status, education, source, referral, mobile, phone,
+                                     email, address, profession, plan
     hours                   array    opcional [{"it_weekday": 0..6, "qt_minute_start", "qt_minute_end"}]
     it_debt_rule            integer  opcional 1 nao bloquear | 2 avisar | 3 administrador libera | 4 bloquear
                                      (paciente com conta a receber vencida ao agendar)
@@ -75,8 +78,7 @@ begin
     _cur.id_allow_outside_hours := true;
     _cur.id_auto_record_number := false;
     _cur.nr_next_record := 1;
-    _cur.id_require_cpf := false;
-    _cur.id_require_mobile := false;
+    _cur.vc_patient_required := '{}';
     _cur.it_debt_rule := 1;
     _cur.qt_debt_days := 0;
     _cur.id_cash_enabled := true;
@@ -91,8 +93,16 @@ begin
     _new.id_allow_outside_hours := case when p_json ? 'id_allow_outside_hours' then (p_json ->> 'id_allow_outside_hours')::boolean else _cur.id_allow_outside_hours end;
     _new.id_auto_record_number  := case when p_json ? 'id_auto_record_number'  then (p_json ->> 'id_auto_record_number')::boolean  else _cur.id_auto_record_number end;
     _new.nr_next_record         := case when p_json ? 'nr_next_record'         then (p_json ->> 'nr_next_record')::bigint          else _cur.nr_next_record end;
-    _new.id_require_cpf         := case when p_json ? 'id_require_cpf'         then (p_json ->> 'id_require_cpf')::boolean         else _cur.id_require_cpf end;
-    _new.id_require_mobile      := case when p_json ? 'id_require_mobile'      then (p_json ->> 'id_require_mobile')::boolean      else _cur.id_require_mobile end;
+    if p_json ? 'vc_patient_required' then
+      if jsonb_typeof(p_json -> 'vc_patient_required') <> 'array' then
+        raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
+      end if;
+      select coalesce(array_agg(distinct f.value order by f.value), '{}')
+        into _new.vc_patient_required
+        from jsonb_array_elements_text(p_json -> 'vc_patient_required') f;
+    else
+      _new.vc_patient_required := _cur.vc_patient_required;
+    end if;
     _new.it_debt_rule           := case when p_json ? 'it_debt_rule'           then (p_json ->> 'it_debt_rule')::smallint          else _cur.it_debt_rule end;
     _new.qt_debt_days           := case when p_json ? 'qt_debt_days'           then (p_json ->> 'qt_debt_days')::smallint          else _cur.qt_debt_days end;
     _new.id_cash_enabled        := case when p_json ? 'id_cash_enabled'        then (p_json ->> 'id_cash_enabled')::boolean        else _cur.id_cash_enabled end;
@@ -135,16 +145,17 @@ begin
     raise exception '%', ad.fn_message('SETTINGS_LATE_INVALID');
   end if;
   if _new.id_allow_outside_hours is null or _new.id_auto_record_number is null
-     or _new.id_require_cpf is null or _new.id_require_mobile is null or _new.id_cash_enabled is null then
+     or _new.id_cash_enabled is null
+     or not _new.vc_patient_required <@ '{rg,gender,marital_status,education,source,referral,mobile,phone,email,address,profession,plan}'::text[] then
     raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
   end if;
 
   insert into od.branch_setting (nr_company, nr_branch, qt_slot_minutes, qt_max_parallel, id_allow_outside_hours,
-                                 id_auto_record_number, nr_next_record, id_require_cpf, id_require_mobile,
+                                 id_auto_record_number, nr_next_record, vc_patient_required,
                                  it_debt_rule, qt_debt_days, id_cash_enabled, it_payment_methods, pc_late_fee,
                                  pc_late_interest, nr_operator)
   values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
-          _new.id_auto_record_number, _new.nr_next_record, _new.id_require_cpf, _new.id_require_mobile,
+          _new.id_auto_record_number, _new.nr_next_record, _new.vc_patient_required,
           _new.it_debt_rule, _new.qt_debt_days, _new.id_cash_enabled, _new.it_payment_methods, _new.pc_late_fee,
           _new.pc_late_interest, _nr_user)
   on conflict (nr_company, nr_branch) do update set
@@ -153,8 +164,7 @@ begin
     id_allow_outside_hours = excluded.id_allow_outside_hours,
     id_auto_record_number  = excluded.id_auto_record_number,
     nr_next_record         = excluded.nr_next_record,
-    id_require_cpf         = excluded.id_require_cpf,
-    id_require_mobile      = excluded.id_require_mobile,
+    vc_patient_required    = excluded.vc_patient_required,
     it_debt_rule           = excluded.it_debt_rule,
     qt_debt_days           = excluded.qt_debt_days,
     id_cash_enabled        = excluded.id_cash_enabled,

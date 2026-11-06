@@ -110,7 +110,7 @@ begin
        = '11222333000181|4133334444|vendas@dentalsul.com', 'fornecedor normalizado';
   perform pg_temp.expect_error('fin_supplier_save', _base || jsonb_build_object('vc_action', 'I', 'vc_name', 'X', 'vc_document', '111.111.111-11'), 'FIN_SUPPLIER_DOCUMENT_INVALID');
 
-  _pa := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Paciente Fin', 'dt_birth', '1990-01-01')) ->> 'nr_patient')::bigint;
+  _pa := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Paciente Fin', 'dt_birth', '1990-01-01', 'vc_cpf', '12345678062')) ->> 'nr_patient')::bigint;
 
   -- lancamentos: parcelado (300 em 3 de 100), recorrente (aluguel 12x), unico ja pago
   _r := ad.fin_entry_save(_base || jsonb_build_object('vc_action', 'I', 'it_kind', 1, 'nr_category', _rec, 'nr_patient', _pa,

@@ -72,7 +72,7 @@ begin
   _proc := (ad.procedure_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Limpeza',
              'qt_minutes', 30, 'vl_current_price', 300)) ->> 'nr_procedure')::bigint;
   _pa := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I',
-           'vc_name', 'Paciente Caixa', 'dt_birth', '1990-01-01')) ->> 'nr_patient')::bigint;
+           'vc_name', 'Paciente Caixa', 'dt_birth', '1990-01-01', 'vc_cpf', '12345678062')) ->> 'nr_patient')::bigint;
   _ana := (ad.professional_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Dra. Ana'))
            ->> 'nr_professional')::bigint;
   _a1 := (ad.appointment_save(_base || jsonb_build_object('vc_action', 'I', 'nr_patient', _pa,

@@ -73,8 +73,8 @@ begin
   _cat := ad.fin_catalog(_base);
   _cx  := (select (x ->> 'nr_account')::bigint from jsonb_array_elements(_cat -> 'accounts') x where x ->> 'vc_name' = 'Caixa');
   _rec := (select (x ->> 'nr_category')::bigint from jsonb_array_elements(_cat -> 'categories') x where x ->> 'vc_name' = 'Tratamentos');
-  _pa := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Paciente Devedor", "dt_birth": "1990-01-01"}'::jsonb) ->> 'nr_patient')::bigint;
-  _pb := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Paciente Em Dia", "dt_birth": "1990-01-01"}'::jsonb) ->> 'nr_patient')::bigint;
+  _pa := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Paciente Devedor", "dt_birth": "1990-01-01", "vc_cpf": "12345678062"}'::jsonb) ->> 'nr_patient')::bigint;
+  _pb := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Paciente Em Dia", "dt_birth": "1990-01-01", "vc_cpf": "23456789173"}'::jsonb) ->> 'nr_patient')::bigint;
   _ana := (ad.professional_save(_base || '{"vc_action": "I", "vc_name": "Dra. Ana"}'::jsonb) ->> 'nr_professional')::bigint;
   perform set_config('test.nr_patient', _pa::text, false);
   perform set_config('test.nr_professional', _ana::text, false);
