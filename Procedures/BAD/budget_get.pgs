@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - id_below_min                                     ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Um orcamento com os itens, as contas a receber geradas, o paciente, o
@@ -21,7 +21,7 @@
     {"budget": {"nr_budget", "nr_patient", "vc_patient", "vc_patient_cpf", "vc_patient_mobile",
                 "nr_professional", "vc_professional", "vc_title", "dt_budget", "dt_valid", "id_expired",
                 "vl_gross", "vl_discount", "pc_discount", "vl_total", "qt_installments", "it_payment_method",
-                "vc_notes", "it_status", "id_discount_approved", "vc_user_discount", "dh_discount",
+                "vc_notes", "it_status", "id_discount_approved", "id_below_min", "vc_user_discount", "dh_discount",
                 "dh_accepted", "vc_user", "dh_created"},
      "items": [{"nr_item", "nr_procedure", "vc_description", "vc_tooth", "qt_quantity", "vl_unit", "vl_total"}],
      "entries": [{"nr_entry", "vc_description", "vl_amount", "dt_due", "it_status", "dt_paid"}],
@@ -74,6 +74,7 @@ begin
         'pc_discount', case when _b.vl_gross = 0 then 0 else round(_b.vl_discount / _b.vl_gross * 100, 2) end,
         'vl_total', _b.vl_total, 'qt_installments', _b.qt_installments, 'it_payment_method', _b.it_payment_method,
         'vc_notes', _b.vc_notes, 'it_status', _b.it_status, 'id_discount_approved', _b.id_discount_approved,
+        'id_below_min', _b.id_below_min,
         'vc_user_discount', ud.vc_name, 'dh_discount', _b.dh_discount, 'dh_accepted', _b.dh_accepted,
         'vc_user', uc.vc_name, 'dh_created', _b.dh_created)
       from od.patient p

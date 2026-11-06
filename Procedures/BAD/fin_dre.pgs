@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - grupo da categoria no DRE                        ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     DRE gerencial da filial mes a mes, pelo plano de contas:
@@ -17,11 +17,15 @@
       = Margem de contribuicao
       (-) Custos fixos               despesas it_cost_type 1, por categoria
       (-) Outras despesas            despesas it_cost_type 4 (ou sem tipo)
+      Receitas / (-) Despesas nao operacionais  (so por grupo escolhido)
       = Resultado antes dos impostos
       (-) IRPJ e CSLL                estimado: (pc_dre_income_tax + pc_dre_csll)
                                      do resultado antes dos impostos, se positivo
       = Resultado liquido
-      Investimentos                  despesas it_cost_type 3: fora do resultado,
+      Cada categoria pode ter o grupo escolhido (od.fin_category.it_dre_group);
+    sem grupo vale o automatico pelo tipo. Deducoes (grupo 2) saem da
+    receita bruta junto com os impostos estimados.
+    Investimentos                  despesas it_cost_type 3: fora do resultado,
                                      so informativo
     vc_basis 'competence' (padrao): contas nao canceladas pelo mes de
     competencia (ou do vencimento) e pelo valor; 'cash': contas pagas pelo mes
@@ -71,6 +75,9 @@ declare
   _margin     numeric[];
   _fixed      numeric[];
   _other      numeric[];
+  _deduct     numeric[];
+  _nonrev     numeric[];
+  _nonexp     numeric[];
   _before     numeric[];
   _inc_tax    numeric[];
   _result     numeric[];
@@ -131,70 +138,84 @@ begin
      where c.nr_company = _nr_company and c.nr_branch = _nr_branch
        and c.nr_category in (select b.nr_category from base b)
   )
-  select coalesce(jsonb_agg(jsonb_build_object('nr', c.nr_category, 'kind', c.it_kind, 'type', coalesce(c.it_cost_type, 4),
-                                               'name', c.vc_name, 'vals', to_jsonb(c.vals)) order by c.vc_name), '[]'::jsonb)
+  -- grupo de cada categoria: o escolhido (it_dre_group) ou automatico pelo tipo
+  --   1 receita operacional, 2 deducao, 3 custo variavel, 4 custo fixo,
+  --   5 despesa operacional, 6 receita nao operacional, 7 despesa nao operacional, 8 investimento
+  select coalesce(jsonb_agg(jsonb_build_object('nr', c.nr_category, 'name', c.vc_name, 'vals', to_jsonb(c.vals),
+           'grp', coalesce(fc.it_dre_group, case when c.it_kind = 1 then 1
+                                                 else case coalesce(c.it_cost_type, 4) when 2 then 3 when 1 then 4
+                                                                                       when 3 then 8 else 5 end end))
+           order by c.vc_name), '[]'::jsonb)
     into _cats
-    from cats c;
+    from cats c
+    join od.fin_category fc on fc.nr_company = _nr_company and fc.nr_branch = _nr_branch and fc.nr_category = c.nr_category;
 
   _gross  := array_fill(0::numeric, array[_n]);
+  _deduct := array_fill(0::numeric, array[_n]);
   _var    := array_fill(0::numeric, array[_n]);
   _fixed  := array_fill(0::numeric, array[_n]);
   _other  := array_fill(0::numeric, array[_n]);
+  _nonrev := array_fill(0::numeric, array[_n]);
+  _nonexp := array_fill(0::numeric, array[_n]);
   _invest := array_fill(0::numeric, array[_n]);
   for _c in select * from jsonb_array_elements(_cats) loop
     _vals := array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v);
     for _i in 1 .. _n loop
-      if (_c ->> 'kind')::int = 1 then _gross[_i] := _gross[_i] + _vals[_i];
-      elsif (_c ->> 'type')::int = 2 then _var[_i] := _var[_i] + _vals[_i];
-      elsif (_c ->> 'type')::int = 1 then _fixed[_i] := _fixed[_i] + _vals[_i];
-      elsif (_c ->> 'type')::int = 3 then _invest[_i] := _invest[_i] + _vals[_i];
-      else _other[_i] := _other[_i] + _vals[_i];
-      end if;
+      case (_c ->> 'grp')::int
+        when 1 then _gross[_i]  := _gross[_i]  + _vals[_i];
+        when 2 then _deduct[_i] := _deduct[_i] + _vals[_i];
+        when 3 then _var[_i]    := _var[_i]    + _vals[_i];
+        when 4 then _fixed[_i]  := _fixed[_i]  + _vals[_i];
+        when 6 then _nonrev[_i] := _nonrev[_i] + _vals[_i];
+        when 7 then _nonexp[_i] := _nonexp[_i] + _vals[_i];
+        when 8 then _invest[_i] := _invest[_i] + _vals[_i];
+        else _other[_i] := _other[_i] + _vals[_i];
+      end case;
     end loop;
   end loop;
   select array_agg(round(g * _pc_rev / 100, 2) order by o) into _rev_tax from unnest(_gross) with ordinality t(g, o);
-  select array_agg(g - r order by o) into _net from unnest(_gross, _rev_tax) with ordinality t(g, r, o);
+  select array_agg(g - r - d order by o) into _net from unnest(_gross, _rev_tax, _deduct) with ordinality t(g, r, d, o);
   select array_agg(a - b order by o) into _margin from unnest(_net, _var) with ordinality t(a, b, o);
   select array_agg(a - b - c order by o) into _before from unnest(_margin, _fixed, _other) with ordinality t(a, b, c, o);
+  select array_agg(a + b - c order by o) into _before from unnest(_before, _nonrev, _nonexp) with ordinality t(a, b, c, o);
   select array_agg(round(greatest(a, 0) * _pc_profit / 100, 2) order by o) into _inc_tax
     from unnest(_before) with ordinality t(a, o);
   select array_agg(a - b order by o) into _result from unnest(_before, _inc_tax) with ordinality t(a, b, o);
   _gross_tot := (select sum(x) from unnest(_gross) x);
 
   -- monta as linhas
-  _lines := _lines || ad.fn_dre_line('gross', 'Receita bruta', 1, 1, false, _gross, _gross_tot);
-  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 1 loop
-    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, 1, false,
-                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
-  end loop;
+  _lines := _lines || ad.fn_dre_line('gross', 'Receita bruta', 1, 1, false, _gross, _gross_tot)
+                   || ad.fn_dre_cat_lines(_cats, 1, 1, _gross_tot);
   if _pc_rev > 0 then
     _lines := _lines || ad.fn_dre_line('revenue_tax', format('(-) Impostos sobre a receita (%s%%)', _pc_rev), 2, -1, true,
                 _rev_tax, _gross_tot);
   end if;
-  _lines := _lines || ad.fn_dre_line('net', 'Receita líquida', 1, 1, false, _net, _gross_tot);
-  _lines := _lines || ad.fn_dre_line('variable', '(-) Custos variáveis', 2, -1, false, _var, _gross_tot);
-  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 2 and (x ->> 'type')::int = 2 loop
-    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, -1, false,
-                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
-  end loop;
-  _lines := _lines || ad.fn_dre_line('margin', 'Margem de contribuição', 1, 1, false, _margin, _gross_tot);
-  _lines := _lines || ad.fn_dre_line('fixed', '(-) Custos fixos', 2, -1, false, _fixed, _gross_tot);
-  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 2 and (x ->> 'type')::int = 1 loop
-    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, -1, false,
-                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
-  end loop;
-  _lines := _lines || ad.fn_dre_line('other', '(-) Outras despesas', 2, -1, false, _other, _gross_tot);
-  for _c in select * from jsonb_array_elements(_cats) x where (x ->> 'kind')::int = 2 and (x ->> 'type')::int = 4 loop
-    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, -1, false,
-                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), _gross_tot);
-  end loop;
+  if exists (select 1 from jsonb_array_elements(_cats) x where (x ->> 'grp')::int = 2) then
+    _lines := _lines || ad.fn_dre_line('deduction', '(-) Deduções da receita', 2, -1, false, _deduct, _gross_tot)
+                     || ad.fn_dre_cat_lines(_cats, 2, -1, _gross_tot);
+  end if;
+  _lines := _lines || ad.fn_dre_line('net', 'Receita líquida', 1, 1, false, _net, _gross_tot)
+                   || ad.fn_dre_line('variable', '(-) Custos variáveis', 2, -1, false, _var, _gross_tot)
+                   || ad.fn_dre_cat_lines(_cats, 3, -1, _gross_tot)
+                   || ad.fn_dre_line('margin', 'Margem de contribuição', 1, 1, false, _margin, _gross_tot)
+                   || ad.fn_dre_line('fixed', '(-) Custos fixos', 2, -1, false, _fixed, _gross_tot)
+                   || ad.fn_dre_cat_lines(_cats, 4, -1, _gross_tot)
+                   || ad.fn_dre_line('other', '(-) Outras despesas', 2, -1, false, _other, _gross_tot)
+                   || ad.fn_dre_cat_lines(_cats, 5, -1, _gross_tot);
+  if exists (select 1 from jsonb_array_elements(_cats) x where (x ->> 'grp')::int in (6, 7)) then
+    _lines := _lines || ad.fn_dre_line('non_op_revenue', 'Receitas não operacionais', 2, 1, false, _nonrev, _gross_tot)
+                     || ad.fn_dre_cat_lines(_cats, 6, 1, _gross_tot)
+                     || ad.fn_dre_line('non_op_expense', '(-) Despesas não operacionais', 2, -1, false, _nonexp, _gross_tot)
+                     || ad.fn_dre_cat_lines(_cats, 7, -1, _gross_tot);
+  end if;
   _lines := _lines || ad.fn_dre_line('before_tax', 'Resultado antes dos impostos', 1, 1, false, _before, _gross_tot);
   if _pc_profit > 0 then
     _lines := _lines || ad.fn_dre_line('income_tax', format('(-) IRPJ e CSLL (%s%%)', _pc_profit), 2, -1, true,
                 _inc_tax, _gross_tot);
   end if;
-  _lines := _lines || ad.fn_dre_line('result', 'Resultado líquido', 1, 1, false, _result, _gross_tot);
-  _lines := _lines || ad.fn_dre_line('investment', 'Investimentos (fora do resultado)', 2, 0, false, _invest, _gross_tot);
+  _lines := _lines || ad.fn_dre_line('result', 'Resultado líquido', 1, 1, false, _result, _gross_tot)
+                   || ad.fn_dre_line('investment', 'Investimentos (fora do resultado)', 2, 0, false, _invest, _gross_tot)
+                   || ad.fn_dre_cat_lines(_cats, 8, 0, _gross_tot);
 
   return jsonb_build_object(
     'months', (select jsonb_agg(to_char(m, 'YYYY-MM') order by m) from unnest(_months) m),

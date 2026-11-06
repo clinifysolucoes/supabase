@@ -1,0 +1,41 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (helper interno, sem grant)               ::
+  ::  Object      : ad.fn_dre_cat_lines(jsonb, integer, integer, numeric)         ::
+  ::  UsedBy      : ad.fin_dre                                                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Linhas de categoria (nivel 3) de um grupo do DRE, a partir da lista de
+    categorias montada em ad.fin_dre ({nr, name, vals, grp}). Helper interno
+    (sem grant).
+  Input:
+    p_cats (jsonb), p_group (1..8), p_sign (1, -1 ou 0), p_gross (receita bruta)
+  Output: jsonb (array de linhas, como ad.fn_dre_line)
+*/
+create or replace function ad.fn_dre_cat_lines(
+  p_cats  jsonb,
+  p_group integer,
+  p_sign  integer,
+  p_gross numeric)
+returns jsonb
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  _c     jsonb;
+  _lines jsonb := '[]'::jsonb;
+begin
+  for _c in select x from jsonb_array_elements(p_cats) x where (x ->> 'grp')::int = p_group loop
+    _lines := _lines || ad.fn_dre_line('cat:' || (_c ->> 'nr'), _c ->> 'name', 3, p_sign, false,
+                array(select v::numeric from jsonb_array_elements_text(_c -> 'vals') v), p_gross);
+  end loop;
+  return _lines;
+end;
+$$;
+
+revoke all on function ad.fn_dre_cat_lines(jsonb, integer, integer, numeric) from public, anon, authenticated;

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 07/11/2026 - profissionais inativados                         ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Restaura um registro da lixeira (ad.trash_list) chamando a RPC da propria
@@ -17,6 +17,7 @@
       fin_entry     ad.fin_entry_settle   REOPEN
       procedure     ad.procedure_save     U it_status = 1
       material      ad.material_save      U it_status = 1
+      professional  ad.professional_save  U it_status = 1
     Exige LER na tela SETTINGS. O registro precisa estar na lixeira
     (it_status 90); os erros das RPCs de cada tela passam adiante.
 
@@ -59,7 +60,7 @@ begin
      or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_read')::boolean, false) then
     raise exception '%', ad.fn_message('TRASH_FORBIDDEN');
   end if;
-  if _kind not in ('patient', 'patient_note', 'appointment', 'fin_entry', 'procedure', 'material') then
+  if _kind not in ('patient', 'patient_note', 'appointment', 'fin_entry', 'procedure', 'material', 'professional') then
     raise exception '%', ad.fn_message('TRASH_KIND_INVALID');
   end if;
   begin
@@ -80,8 +81,10 @@ begin
                                   and x.nr_entry = _key and x.it_status = 90)
     when 'procedure' then exists (select 1 from od.procedure x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
                                   and x.nr_procedure = _key and x.it_status = 90)
-    else exists (select 1 from od.material x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+    when 'material' then exists (select 1 from od.material x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
                    and x.nr_material = _key and x.it_status = 90)
+    else exists (select 1 from od.professional x where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                   and x.nr_professional = _key and x.it_status = 90)
   end;
   if _key is null or not coalesce(_found, false) then
     raise exception '%', ad.fn_message('TRASH_NOT_FOUND');
@@ -99,8 +102,10 @@ begin
       perform ad.fin_entry_settle(_base || jsonb_build_object('vc_action', 'REOPEN', 'nr_entry', _key));
     when 'procedure' then
       perform ad.procedure_save(_base || jsonb_build_object('vc_action', 'U', 'nr_procedure', _key, 'it_status', 1));
-    else
+    when 'material' then
       perform ad.material_save(_base || jsonb_build_object('vc_action', 'U', 'nr_material', _key, 'it_status', 1));
+    else
+      perform ad.professional_save(_base || jsonb_build_object('vc_action', 'U', 'nr_professional', _key, 'it_status', 1));
   end case;
 
   return jsonb_build_object('vc_kind', _kind, 'nr_key', _key);
