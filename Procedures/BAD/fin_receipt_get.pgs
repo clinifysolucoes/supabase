@@ -1,0 +1,91 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_receipt_get(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('fin_receipt_get') (PDF do recibo)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Um recibo com os dados da clinica (emitente) para o app montar o PDF.
+    Por nr_receipt ou pelo recibo ativo da conta (nr_entry). Exige LER na
+    tela FINANCE.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_receipt  bigint   um dos dois
+    nr_entry    bigint   um dos dois (recibo ativo da conta)
+
+  Output jsonb:
+    {"receipt": {"nr_receipt", "vc_number", "nr_entry", "vl_amount", "dt_paid", "it_payment_method",
+                 "vc_payer_name", "vc_payer_document", "vc_description", "it_status", "vc_cancel_reason",
+                 "dh_created", "vc_user"} | null,
+     "issuer": {"vc_name", "vc_legal_name", "vc_cnpj", "vc_phone", "vc_email", "vc_zip_code", "vc_address",
+                "vc_address_number", "vc_address_extra", "vc_district", "vc_city", "vc_state",
+                "vc_technical_name", "vc_technical_cro", "vc_technical_cro_state"}}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FINANCE_FORBIDDEN, FIN_RECEIPT_NOT_FOUND
+*/
+create or replace function ad.fin_receipt_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _r          od.fin_receipt%rowtype;
+  _b          ad.branch%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_receipt_get');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('FINANCE_FORBIDDEN');
+  end if;
+
+  if p_json ? 'nr_receipt' then
+    select * into _r from od.fin_receipt r
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+       and r.nr_receipt = (p_json ->> 'nr_receipt')::bigint;
+  else
+    select * into _r from od.fin_receipt r
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+       and r.nr_entry = (p_json ->> 'nr_entry')::bigint and r.it_status = 1;
+  end if;
+  if not found then
+    raise exception '%', ad.fn_message('FIN_RECEIPT_NOT_FOUND');
+  end if;
+  select * into _b from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  return jsonb_build_object(
+    'receipt', jsonb_build_object(
+      'nr_receipt', _r.nr_receipt, 'vc_number', _r.vc_number, 'nr_entry', _r.nr_entry,
+      'vl_amount', _r.vl_amount, 'dt_paid', _r.dt_paid, 'it_payment_method', _r.it_payment_method,
+      'vc_payer_name', _r.vc_payer_name, 'vc_payer_document', _r.vc_payer_document,
+      'vc_description', _r.vc_description, 'it_status', _r.it_status, 'vc_cancel_reason', _r.vc_cancel_reason,
+      'dh_created', _r.dh_created,
+      'vc_user', (select u.vc_name from ad.app_user u where u.nr_user = _r.nr_user_created)),
+    'issuer', jsonb_build_object(
+      'vc_name', _b.vc_name, 'vc_legal_name', _b.vc_legal_name, 'vc_cnpj', _b.vc_cnpj,
+      'vc_phone', _b.vc_phone, 'vc_email', _b.vc_email, 'vc_zip_code', _b.vc_zip_code,
+      'vc_address', _b.vc_address, 'vc_address_number', _b.vc_address_number,
+      'vc_address_extra', _b.vc_address_extra, 'vc_district', _b.vc_district, 'vc_city', _b.vc_city,
+      'vc_state', _b.vc_state, 'vc_technical_name', _b.vc_technical_name,
+      'vc_technical_cro', _b.vc_technical_cro, 'vc_technical_cro_state', _b.vc_technical_cro_state));
+end;
+$$;
+
+revoke all on function ad.fin_receipt_get(jsonb) from public, anon;
+grant execute on function ad.fin_receipt_get(jsonb) to authenticated;

@@ -71,6 +71,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.fin_bank_line`](#odfinbankline) | Linha do extrato bancário | Transação importada do arquivo OFX do banco para uma conta: id do banco (FITID, único por conta), data, valor com sinal e histórico; conciliada com um lançamento pago ou uma transferência da conta, ou ignorada. nr_line é sequencial por filial. |
 | [`od.fin_recurrence`](#odfinrecurrence) | Conta recorrente | Regra de conta que se repete todo mês no mesmo dia (aluguel, salário, internet...), sem data final ou até uma data. Os lançamentos são gerados a partir dela (od.fn_fin_recurrence_fill) até 12 meses à frente; alterar a regra muda os futuros em aberto e encerrar cancela os futuros. nr_recurrence é sequencial por filial. |
 | [`od.fin_attachment`](#odfinattachment) | Anexo de conta | Arquivo anexado a uma conta a pagar/receber: documento (nota, boleto) ou comprovante de pagamento. O arquivo fica no Storage (bucket privado finance, caminho empresa/filial/conta/uuid.ext); upload e download só por URL assinada da Edge Function fin-attachment. Excluir é lógico. nr_attachment é sequencial por filial. |
+| [`od.fin_receipt`](#odfinreceipt) | Recibo | Recibo numerado de uma conta a receber paga: número sequencial por filial com o prefixo das configurações, pagador, valor, data e forma do pagamento. Emitir de novo devolve o recibo ativo; cancelado não libera o número. |
 | [`od.branch_setting`](#odbranchsetting) | Configurações da filial | Preferências da filial (uma linha; sem linha valem os padrões): agenda (intervalo de visualização, consultas do mesmo profissional no mesmo horário, agendar fora do horário de atendimento), cadastro de pacientes (número de prontuário automático, CPF e celular obrigatórios) e financeiro (bloqueio de pacientes com conta vencida, caixa do dia, formas de pagamento aceitas, multa e juros por atraso). |
 | [`od.branch_hour`](#odbranchhour) | Horário de funcionamento | Horário de funcionamento da clínica por dia da semana (um ou mais intervalos por dia, sem sobreposição). nr_hour é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
@@ -130,6 +131,7 @@ erDiagram
   fin_category ||--o{ fin_recurrence : "classifica"
   fin_recurrence |o--o{ fin_entry : "gera"
   fin_entry ||--o{ fin_attachment : "anexa"
+  fin_entry ||--o{ fin_receipt : "recibos"
   fin_account ||--o{ fin_transfer : "transfere"
   fin_cash_session |o--o{ fin_transfer : "sangria / suprimento"
   appointment |o--o{ fin_entry : "fecha o atendimento"
@@ -634,6 +636,22 @@ erDiagram
     smallint it_status
     bigint nr_user_created FK
   }
+  fin_receipt {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_receipt PK
+    varchar vc_number
+    bigint nr_entry FK
+    numeric vl_amount
+    date dt_paid
+    smallint it_payment_method
+    varchar vc_payer_name
+    varchar vc_payer_document
+    varchar vc_description
+    smallint it_status
+    varchar vc_cancel_reason
+    bigint nr_user_created FK
+  }
   branch_setting {
     bigint nr_company PK, FK
     bigint nr_branch PK, FK
@@ -649,6 +667,8 @@ erDiagram
     smallint[] it_payment_methods
     numeric pc_late_fee
     numeric pc_late_interest
+    varchar vc_receipt_prefix
+    bigint nr_next_receipt
   }
   branch_hour {
     bigint nr_company PK, FK
@@ -1643,6 +1663,34 @@ Arquivo anexado a uma conta a pagar/receber: documento (nota, boleto) ou comprov
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.fin_receipt
+
+**Recibo**
+
+Recibo numerado de uma conta a receber paga: número sequencial por filial com o prefixo das configurações, pagador, valor, data e forma do pagamento. Emitir de novo devolve o recibo ativo; cancelado não libera o número.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via fin_receipt_issue (criar na tela FINANCE) e fin_receipt_cancel (alterar).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_receipt` | `bigint` | PK3 | NOT NULL |  | Número sequencial do recibo na filial. |
+| `vc_number` | `varchar(30)` |  | NOT NULL |  | Número impresso (prefixo + número com 6 dígitos); único na filial. |
+| `nr_entry` | `bigint` | FK → `fin_entry.nr_entry` | NOT NULL |  | Conta a receber paga do recibo (um recibo ativo por conta). |
+| `vl_amount` | `numeric(14,2)` |  | NOT NULL |  | Valor recebido (o pago da conta). |
+| `dt_paid` | `date` |  | NOT NULL |  | Data do pagamento. |
+| `it_payment_method` | `smallint` |  | NULL |  | Forma de pagamento. Valores: 1 = Dinheiro; 2 = Pix; 3 = Cartão de crédito; 4 = Cartão de débito; 5 = Transferência; 6 = Boleto; 7 = Cheque; 9 = Outro. |
+| `vc_payer_name` | `varchar(120)` |  | NOT NULL |  | Nome de quem pagou (padrão: o paciente da conta). |
+| `vc_payer_document` | `varchar(14)` |  | NULL |  | CPF ou CNPJ do pagador, só dígitos. |
+| `vc_description` | `varchar(200)` |  | NOT NULL |  | Referente a (padrão: a descrição da conta). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do recibo (cancelado não libera o número). Valores: 1 = Emitido; 90 = Cancelado. |
+| `vc_cancel_reason` | `varchar(200)` |  | NULL |  | Motivo do cancelamento. |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Usuário que emitiu. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.branch_setting
 
 **Configurações da filial**
@@ -1667,6 +1715,8 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `it_payment_methods` | `smallint[]` |  | NOT NULL | `'{1,2,3,4,5,6,7,9}'` | Formas de pagamento aceitas ao receber (baixa de conta a receber e fechamento da consulta); ao menos uma. Valores: 1 = Dinheiro; 2 = Pix; 3 = Cartão de crédito; 4 = Cartão de débito; 5 = Transferência; 6 = Boleto; 7 = Cheque; 9 = Outro. |
 | `pc_late_fee` | `numeric(5,2)` |  | NOT NULL | `0` | Multa por atraso nas contas a receber (% do valor, 0 a 10). |
 | `pc_late_interest` | `numeric(5,2)` |  | NOT NULL | `0` | Juros de mora ao mês nas contas a receber (%, pro rata por dia, 0 a 10). |
+| `vc_receipt_prefix` | `varchar(10)` |  | NOT NULL | `''` | Prefixo do número impresso dos recibos (ex. REC-; letras, números, - / .). |
+| `nr_next_receipt` | `bigint` |  | NOT NULL | `1` | Próximo número de recibo da filial (números já usados são pulados). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -1818,7 +1868,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_supplier_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um fornecedor: nome, CPF/CNPJ, telefone, e-mail, observações e situação (documentos e telefone só com dígitos). Grava event_log sem documento e contato. |
 | `ad.fin_entry_save(p_json jsonb)` | authenticated | Cria contas a receber/pagar (I: única, parcelada em N meses ou recorrente por N meses; pode nascer paga, entrando no caixa aberto ou, em cartão/boleto/cheque com taxa, gerando recebíveis) ou altera parcialmente um lançamento (U; pago só muda descrição, categoria e observações; cancelado não muda). Aceita o profissional (comissão). Grava event_log sem dados pessoais. Já paga, aceita os dados do cartão/cheque para os recebíveis. |
 | `ad.fin_entry_settle(p_json jsonb)` | authenticated | Baixa e situação de um lançamento (permissão alterar): PAY (conta, data, valor e forma; entra no caixa aberto da conta; em cartão/boleto/cheque com taxa vai para Recebíveis e gera os recebíveis, com parcelas do cartão e referência), UNDO (desfaz o pagamento, se o caixa não foi fechado e nenhum recebível foi confirmado), CANCEL (com id_following cancela também as próximas parcelas em aberto) e REOPEN. Grava event_log. No PAY aceita os dados do cartão/cheque, que vão para os recebíveis. Conta a receber: a forma de pagamento precisa estar entre as aceitas da filial; paga com atraso, o valor padrão inclui multa e juros (od.fn_fin_late_charge), devolvidos em late. |
-| `ad.fin_entry_list(p_json jsonb)` | authenticated | Contas a receber ou a pagar num período (até 400 dias) por situação (em aberto, vencidas, pagas, canceladas, todas), conta, categoria, fornecedor, paciente, profissional e busca; com profissional e atendimento de cada lançamento e totais (em aberto, vencido, pago, por tipo de custo). Exige leitura na tela FINANCE. Filtro pelo vencimento ou pela competência (vc_date) e só parceladas; devolve a regra recorrente de origem e a quantidade de anexos; antes gera as contas recorrentes do período. Contas a receber vencidas em aberto trazem multa e juros até hoje (vl_late_fee, vl_late_interest). |
+| `ad.fin_entry_list(p_json jsonb)` | authenticated | Contas a receber ou a pagar num período (até 400 dias) por situação (em aberto, vencidas, pagas, canceladas, todas), conta, categoria, fornecedor, paciente, profissional e busca; com profissional e atendimento de cada lançamento e totais (em aberto, vencido, pago, por tipo de custo). Exige leitura na tela FINANCE. Filtro pelo vencimento ou pela competência (vc_date) e só parceladas; devolve a regra recorrente de origem e a quantidade de anexos; antes gera as contas recorrentes do período. Contas a receber vencidas em aberto trazem multa e juros até hoje (vl_late_fee, vl_late_interest). Traz o recibo ativo de cada conta (nr_receipt, vc_receipt_number). |
 | `ad.fin_overview(p_json jsonb)` | authenticated | Visão geral do financeiro no dia: saldo por conta, a receber e a pagar no dia, vencidos, o mês (recebido, pago, a receber, a pagar), próximos vencimentos e se a filial já foi configurada. Exige leitura na tela FINANCE. Antes gera as contas recorrentes até 12 meses à frente. |
 | `ad.fin_cashflow(p_json jsonb)` | authenticated | Fluxo de caixa de um mês, dia a dia: realizado (pago) e previsto (em aberto; vencidos antes do mês entram no dia 1), saldo acumulado realizado e projetado a partir do saldo anterior. Exige leitura na tela FINANCE. Antes gera as contas recorrentes do mês consultado. |
 | `ad.fin_statement(p_json jsonb)` | authenticated | Extrato de uma conta (ou de todas as ativas) no período: saldo inicial, movimentos pagos e transferências entre contas com o saldo após cada um, entradas, saídas e saldo final. Exige leitura na tela FINANCE. |
@@ -1842,12 +1892,15 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_bank_reconcile(p_json jsonb)` | authenticated | Concilia uma linha do extrato: MATCH (alterar) liga a um lançamento pago ou transferência de mesmo valor na conta, CREATE (criar) lança receita/despesa paga a partir da linha, IGNORE e UNDO (alterar). Grava event_log. |
 | `ad.fin_recurrence_save(p_json jsonb)` | authenticated | Conta recorrente como regra (todo mês no dia X, sem data final ou até uma data): I cria e já gera 12 meses; U altera e os futuros em aberto acompanham (data final menor cancela os que passaram dela); CANCEL encerra e cancela os futuros em aberto. Permissão criar/alterar na tela FINANCE. Grava event_log. |
 | `ad.fin_recurrence_list(p_json jsonb)` | authenticated | Contas recorrentes da filial (a receber/a pagar), com o próximo vencimento em aberto e quantos já foram pagos; antes completa os lançamentos até 12 meses à frente. Exige leitura na tela FINANCE. |
+| `ad.fin_receipt_issue(p_json jsonb)` | authenticated | Emite o recibo de uma conta a receber paga (criar na tela FINANCE) com o próximo número da filial; se já existe recibo ativo devolve o mesmo (id_existing). Pagador padrão: o paciente (nome e CPF); descrição padrão: a da conta. Devolve recibo e emitente. Grava event_log. |
+| `ad.fin_receipt_get(p_json jsonb)` | authenticated | Um recibo (por número ou o ativo da conta) com os dados da clínica emitente (razão social, CNPJ, endereço, responsável técnico) para o PDF. Exige ler na tela FINANCE. |
+| `ad.fin_receipt_cancel(p_json jsonb)` | authenticated | Cancela um recibo emitido com o motivo (alterar na tela FINANCE); o número não é reaproveitado. Grava event_log. |
 | `ad.fin_attachment_save(p_json jsonb)` | authenticated | Registro dos anexos de uma conta, chamado pela Edge Function fin-attachment com o JWT do usuário antes da URL assinada: I reserva o caminho no Storage (PDF ou imagem, até 10 MB; conta não cancelada); DELETE exclui (lógico) e devolve o caminho para apagar o arquivo. Permissão de alterar na tela FINANCE. Grava event_log. |
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui o prefixo e o próximo número dos recibos. |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava o prefixo e o próximo número dos recibos. |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. |
 | `ad.trash_restore(p_json jsonb)` | authenticated | Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS. |
@@ -2059,12 +2112,12 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_ENTRY_KIND_INVALID` | `fin_entry_save`, `fin_recurrence_save` |  |
 | `FIN_ENTRY_METHOD_INVALID` | `fin_entry_save`, `fin_entry_settle`, `appointment_checkout`, `fin_recurrence_save` |  |
 | `FIN_ENTRY_METHOD_NOT_ACCEPTED` | `fin_entry_settle`, `appointment_checkout` |  |
-| `FIN_ENTRY_NOT_FOUND` | `fin_entry_save`, `fin_entry_settle`, `fin_attachment_save` |  |
+| `FIN_ENTRY_NOT_FOUND` | `fin_entry_save`, `fin_entry_settle`, `fin_receipt_issue`, `fin_attachment_save` |  |
 | `FIN_ENTRY_PAID_ACCOUNT_REQUIRED` | `fin_entry_save`, `appointment_checkout` |  |
 | `FIN_ENTRY_PAID_LOCKED` | `fin_entry_save` |  |
 | `FIN_ENTRY_PATIENT_INVALID` | `fin_entry_save`, `fin_recurrence_save` |  |
 | `FIN_ENTRY_PROFESSIONAL_INVALID` | `fin_entry_save` |  |
-| `FIN_ENTRY_REQUIRED` | `fin_entry_save`, `fin_entry_settle`, `fin_attachment_save` |  |
+| `FIN_ENTRY_REQUIRED` | `fin_entry_save`, `fin_entry_settle`, `fin_receipt_issue`, `fin_attachment_save` |  |
 | `FIN_ENTRY_SUPPLIER_INVALID` | `fin_entry_save`, `fin_bank_reconcile`, `fin_recurrence_save` |  |
 | `FIN_ENTRY_VALUE_INVALID` | `fin_entry_save`, `fin_entry_settle`, `appointment_checkout` |  |
 | `FIN_LIST_FILTER_INVALID` | `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `fin_receivable_list`, `fin_health_export`, `health_guide_list`, `fin_bank_list`, `fin_attachment_list`, `appointment_pending_checkout` |  |
@@ -2081,6 +2134,12 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_RATE_REQUIRED` | `fin_rate_save` |  |
 | `FIN_RATE_STATUS_INVALID` | `fin_rate_save` |  |
 | `FIN_RATE_VALUE_INVALID` | `fin_rate_save` |  |
+| `FIN_RECEIPT_DOCUMENT_INVALID` | `fin_receipt_issue` |  |
+| `FIN_RECEIPT_FORBIDDEN` | `fin_receipt_issue`, `fin_receipt_cancel` |  |
+| `FIN_RECEIPT_NOT_FOUND` | `fin_receipt_get`, `fin_receipt_cancel` |  |
+| `FIN_RECEIPT_NOT_PAID` | `fin_receipt_issue` |  |
+| `FIN_RECEIPT_PAYER_REQUIRED` | `fin_receipt_issue` |  |
+| `FIN_RECEIPT_REASON_REQUIRED` | `fin_receipt_cancel` |  |
 | `FIN_RECEIVABLE_ACCOUNT_INVALID` | `fin_receivable_settle` |  |
 | `FIN_RECEIVABLE_ACTION_INVALID` | `fin_receivable_settle` |  |
 | `FIN_RECEIVABLE_CONFIRMED` | `fin_entry_settle` |  |
@@ -2120,8 +2179,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `FIN_TRANSFER_STATUS_INVALID` | `fin_transfer_save` |  |
 | `FIN_TRANSFER_TYPE_INVALID` | `fin_transfer_save` |  |
 | `FIN_TRANSFER_VALUE_INVALID` | `fin_transfer_save` |  |
-| `FINANCE_BRANCH_REQUIRED` | `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout` |  |
-| `FINANCE_FORBIDDEN` | `fin_setup`, `fin_catalog`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `fin_cash_status`, `fin_receivable_list`, `fin_health_export`, `health_plan_list`, `health_guide_list`, `fin_bank_list`, `fin_recurrence_list`, `fin_attachment_list`, `appointment_pending_checkout` |  |
+| `FINANCE_BRANCH_REQUIRED` | `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout` |  |
+| `FINANCE_FORBIDDEN` | `fin_setup`, `fin_catalog`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `fin_cash_status`, `fin_receivable_list`, `fin_health_export`, `health_plan_list`, `health_guide_list`, `fin_bank_list`, `fin_recurrence_list`, `fin_receipt_get`, `fin_attachment_list`, `appointment_pending_checkout` |  |
 | `HEALTH_GUIDE_ACCOUNT_REQUIRED` | `health_guide_settle` |  |
 | `HEALTH_GUIDE_ACTION_INVALID` | `health_guide_save` |  |
 | `HEALTH_GUIDE_APPOINTMENT_INVALID` | `health_guide_save` |  |
@@ -2246,6 +2305,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SETTINGS_LATE_INVALID` | `settings_save` |  |
 | `SETTINGS_METHODS_INVALID` | `settings_save` |  |
 | `SETTINGS_PARALLEL_INVALID` | `settings_save` |  |
+| `SETTINGS_RECEIPT_INVALID` | `settings_save` |  |
 | `SETTINGS_RECORD_INVALID` | `settings_save` |  |
 | `SETTINGS_SLOT_INVALID` | `settings_save` |  |
 | `SETTINGS_VALUE_INVALID` | `settings_save` |  |
@@ -2272,5 +2332,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

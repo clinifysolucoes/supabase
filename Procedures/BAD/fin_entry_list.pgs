@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - multa e juros das contas vencidas                ::
+  ::  Change      : 06/11/2026 - recibo ativo da conta                            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Contas a receber (it_kind 1) ou a pagar (it_kind 2) da filial num periodo:
@@ -39,7 +39,7 @@
                   "vc_description", "vl_amount", "dt_due", "dt_competence", "it_payment_method",
                   "dt_paid", "vl_paid", "it_status", "id_overdue", "uu_group", "nr_installment",
                   "qt_installments", "id_recurring", "nr_recurrence", "qt_attachments", "vc_notes",
-                  "vl_late_fee", "vl_late_interest"}],
+                  "vl_late_fee", "vl_late_interest", "nr_receipt", "vc_receipt_number"}],
     vl_late_fee / vl_late_interest: multa e juros ate hoje da conta a receber
     vencida em aberto (od.fn_fin_late_charge); zero nas demais.
      "totals": {"vl_open", "vl_overdue", "vl_paid", "vl_cancelled", "qt_total",
@@ -179,7 +179,9 @@ begin
                                                    and t.nr_entry = b.nr_entry and t.it_status = 1),
                           'vc_notes',          b.vc_notes,
                           'vl_late_fee',       coalesce((b.late ->> 'vl_fine')::numeric, 0),
-                          'vl_late_interest',  coalesce((b.late ->> 'vl_interest')::numeric, 0))
+                          'vl_late_interest',  coalesce((b.late ->> 'vl_interest')::numeric, 0),
+                          'nr_receipt',        rc.nr_receipt,
+                          'vc_receipt_number', rc.vc_number)
                         order by b.dt_due, b.nr_entry), '[]'::jsonb),
            'totals', jsonb_build_object(
                         'vl_open',      coalesce(sum(b.vl_amount) filter (where b.it_status = 1), 0),
@@ -200,7 +202,9 @@ begin
     left join od.fin_supplier s on s.nr_company = b.nr_company and s.nr_branch = b.nr_branch and s.nr_supplier = b.nr_supplier
     left join od.patient p on p.nr_company = b.nr_company and p.nr_branch = b.nr_branch and p.nr_patient = b.nr_patient
     left join od.professional pr on pr.nr_company = b.nr_company and pr.nr_branch = b.nr_branch
-                                and pr.nr_professional = b.nr_professional;
+                                and pr.nr_professional = b.nr_professional
+    left join od.fin_receipt rc on rc.nr_company = b.nr_company and rc.nr_branch = b.nr_branch
+                               and rc.nr_entry = b.nr_entry and rc.it_status = 1;
 
   return _rows;
 end;
