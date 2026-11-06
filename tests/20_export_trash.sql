@@ -55,7 +55,7 @@ begin
   _rec := (select (x ->> 'nr_category')::bigint from jsonb_array_elements(_cat -> 'categories') x where x ->> 'vc_name' = 'Tratamentos');
   _pa := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Ana Export", "dt_birth": "1990-01-01",
            "vc_cpf": "529.982.247-25", "vc_mobile": "(41) 99999-0000"}'::jsonb) ->> 'nr_patient')::bigint;
-  _pb := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Bia Export", "dt_birth": "1985-05-05"}'::jsonb) ->> 'nr_patient')::bigint;
+  _pb := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Bia Export", "dt_birth": "1985-05-05", "vc_cpf": "23456789173"}'::jsonb) ->> 'nr_patient')::bigint;
   _ana := (ad.professional_save(_base || '{"vc_action": "I", "vc_name": "Dra. Ana"}'::jsonb) ->> 'nr_professional')::bigint;
   _ap := (ad.appointment_save(_base || jsonb_build_object('vc_action', 'I', 'nr_patient', _pa, 'nr_professional', _ana,
            'dh_start', '2030-03-04T09:00:00-03:00', 'dh_end', '2030-03-04T09:30:00-03:00')) ->> 'nr_appointment')::bigint;

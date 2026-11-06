@@ -53,10 +53,10 @@ begin
   perform set_config('test.nr_company', _ca::text, false);
 
   _pa := (ad.patient_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
-           'vc_name', 'Paciente Um', 'dt_birth', '1990-01-01', 'vc_mobile', '11987654321',
+           'vc_name', 'Paciente Um', 'dt_birth', '1990-01-01', 'vc_cpf', '12345678062', 'vc_mobile', '11987654321',
            'dt_return_alert', '2026-11-04', 'vc_return_alert', 'Revisão')) ->> 'nr_patient')::bigint;
   _pb := (ad.patient_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
-           'vc_name', 'Paciente Dois', 'dt_birth', '1985-01-01')) ->> 'nr_patient')::bigint;
+           'vc_name', 'Paciente Dois', 'dt_birth', '1985-01-01', 'vc_cpf', '23456789173')) ->> 'nr_patient')::bigint;
   _ana := (ad.professional_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
            'vc_name', 'Dra. Ana')) ->> 'nr_professional')::bigint;
   _bia := (ad.professional_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,

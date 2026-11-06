@@ -59,7 +59,7 @@ begin
   _base := jsonb_build_object('nr_version', 1, 'nr_company', _ca, 'nr_branch', 1);
   perform ad.fin_setup(_base);
   _pa := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Paciente Convenio',
-           'dt_birth', '1990-01-01')) ->> 'nr_patient')::bigint;
+           'dt_birth', '1990-01-01', 'vc_cpf', '12345678062')) ->> 'nr_patient')::bigint;
   _ana := (ad.professional_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Dra. Ana'))
            ->> 'nr_professional')::bigint;
   _p1 := (ad.procedure_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Limpeza',

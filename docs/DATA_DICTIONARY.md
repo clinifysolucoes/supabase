@@ -642,8 +642,7 @@ erDiagram
     boolean id_allow_outside_hours
     boolean id_auto_record_number
     bigint nr_next_record
-    boolean id_require_cpf
-    boolean id_require_mobile
+    text[] vc_patient_required
     smallint it_debt_rule
     smallint qt_debt_days
     boolean id_cash_enabled
@@ -1661,8 +1660,7 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `id_allow_outside_hours` | `boolean` |  | NOT NULL | `true` | Permite agendar fora do horário de atendimento do profissional. |
 | `id_auto_record_number` | `boolean` |  | NOT NULL | `false` | Numera o prontuário automaticamente no cadastro do paciente. |
 | `nr_next_record` | `bigint` |  | NOT NULL | `1` | Próximo número de prontuário. |
-| `id_require_cpf` | `boolean` |  | NOT NULL | `false` | CPF obrigatório no cadastro do paciente. |
-| `id_require_mobile` | `boolean` |  | NOT NULL | `false` | Celular obrigatório no cadastro do paciente. |
+| `vc_patient_required` | `text[]` |  | NOT NULL | `'{}'` | Campos obrigatórios no cadastro do paciente além de nome, nascimento e CPF (sempre obrigatórios): rg, gender (gênero), marital_status, education, source (como conheceu), referral (indicado por), mobile, phone, email (ou não possui e-mail), address (CEP, endereço, número, bairro, cidade e UF), profession, plan (convênio). |
 | `it_debt_rule` | `smallint` |  | NOT NULL | `1` | O que a agenda faz ao marcar consulta de paciente com conta a receber vencida (além da tolerância). Valores: 1 = Não bloquear; 2 = Avisar; 3 = Só o administrador da empresa libera; 4 = Bloquear. |
 | `qt_debt_days` | `smallint` |  | NOT NULL | `0` | Dias de tolerância depois do vencimento antes de valer o bloqueio de inadimplentes (0 a 365). |
 | `id_cash_enabled` | `boolean` |  | NOT NULL | `true` | Usa o caixa do dia (abrir e fechar caixa). Desligado, não abre caixa novo. |
@@ -1849,13 +1847,13 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
 | `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. |
 | `ad.trash_restore(p_json jsonb)` | authenticated | Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
 | `ad.patient_get(p_json jsonb)` | authenticated | Ficha completa de um paciente (todas as colunas, mais qt_age) e as notas gerais ativas, da mais recente para a mais antiga, com o nome do autor. Exige leitura na tela PATIENTS. |
-| `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). Segue as configurações da filial: número de prontuário automático e CPF/celular obrigatórios. |
+| `ad.patient_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) a ficha do paciente. Normaliza antes de validar (trim e corte dos textos; CPF, telefones e CEP só dígitos; e-mail minúsculo; UF maiúscula; id_no_email limpa o e-mail). Nascimento obrigatório entre 1900 e hoje; CPFs válidos; CPF do paciente único na filial; e-mail, telefones, CEP, UF e listas it_* validados. Grava event_log sem dados pessoais (nome, situação e campos alterados). Segue as configurações da filial: número de prontuário automático e CPF/celular obrigatórios. Nome, nascimento e CPF são sempre obrigatórios; os campos marcados na filial (branch_setting.vc_patient_required) também (PATIENT_FIELD_REQUIRED com o nome do campo). Na alteração, só valem quando o campo vem no JSON e fica vazio. |
 | `ad.patient_note_save(p_json jsonb)` | authenticated | Notas gerais do paciente: I adiciona (permissão criar ou alterar; autor = usuário da sessão), D exclui logicamente (permissão alterar). Grava event_log. vc_action R restaura uma nota excluída (lixeira, permissão alterar). |
 
 ### Helpers (regras compartilhadas / RLS)
@@ -2177,8 +2175,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_CPF_INVALID` | `patient_save` |  |
 | `PATIENT_CPF_REQUIRED` | `patient_save` |  |
 | `PATIENT_EMAIL_INVALID` | `patient_save` |  |
+| `PATIENT_FIELD_REQUIRED` | `patient_save` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
-| `PATIENT_MOBILE_REQUIRED` | `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
 | `PATIENT_NOT_FOUND` | `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |

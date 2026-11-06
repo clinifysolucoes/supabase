@@ -64,7 +64,11 @@ begin
   _pa := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Paciente Cartao',
            'dt_birth', '1990-01-01', 'vc_cpf', '529.982.247-25')) ->> 'nr_patient')::bigint;
   _pb := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Paciente Sem CPF',
-           'dt_birth', '1991-01-01')) ->> 'nr_patient')::bigint;
+           'dt_birth', '1991-01-01', 'vc_cpf', '12345678062')) ->> 'nr_patient')::bigint;
+  -- ficha antiga, de antes do CPF obrigatorio
+  reset role;
+  update od.patient set vc_cpf = null where nr_company = _ca and nr_patient = _pb;
+  set local role authenticated;
   _ana := (ad.professional_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Dra. Ana'))
            ->> 'nr_professional')::bigint;
 

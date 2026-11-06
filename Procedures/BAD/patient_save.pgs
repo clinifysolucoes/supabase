@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 14/10/2026                                                    ::
-  ::  Change      : 05/11/2026 - prontuario automatico e campos obrigatorios      ::
+  ::  Change      : 06/11/2026 - CPF sempre obrigatorio; obrigatorios da filial   ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastro do paciente (ficha completa).
@@ -49,7 +49,7 @@
     PATIENT_REQUIRED, PATIENT_NOT_FOUND, PATIENT_VALUE_INVALID {Field}, PATIENT_NAME_REQUIRED,
     PATIENT_BIRTH_REQUIRED, PATIENT_BIRTH_INVALID, PATIENT_CPF_INVALID {Field},
     PATIENT_CPF_IN_USE {Name}, PATIENT_EMAIL_INVALID, PATIENT_PHONE_INVALID {Field},
-    PATIENT_CPF_REQUIRED, PATIENT_MOBILE_REQUIRED (configuracoes da filial),
+    PATIENT_CPF_REQUIRED, PATIENT_FIELD_REQUIRED {Field} (obrigatorios da filial),
     PATIENT_ZIP_INVALID, PATIENT_STATE_INVALID, PATIENT_STATUS_INVALID
 */
 create or replace function ad.patient_save(p_json jsonb)
@@ -61,6 +61,9 @@ as $$
 declare
   _nr_user    bigint;
   _setting    od.branch_setting%rowtype;
+  _req        text;
+  _req_keys   text[];
+  _missing    boolean;
   _vc_action  text;
   _nr_company bigint;
   _nr_branch  bigint;
@@ -264,17 +267,53 @@ begin
     raise exception '%', ad.fn_message('PATIENT_STATUS_INVALID');
   end if;
 
-  -- configuracoes da filial: obrigatorios no cadastro (na alteracao, so se o
-  -- campo veio e ficou vazio, para nao travar fichas antigas)
+  -- obrigatorios: nome e nascimento (acima), CPF sempre e os campos que a
+  -- filial marcou (od.branch_setting.vc_patient_required). Na alteracao so
+  -- vale se o campo veio no JSON e ficou vazio, para nao travar fichas antigas.
   select * into _setting from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
-  if coalesce(_setting.id_require_cpf, false) and _new.vc_cpf is null
-     and (_vc_action = 'I' or p_json ? 'vc_cpf') then
+  if _new.vc_cpf is null and (_vc_action = 'I' or p_json ? 'vc_cpf') then
     raise exception '%', ad.fn_message('PATIENT_CPF_REQUIRED');
   end if;
-  if coalesce(_setting.id_require_mobile, false) and _new.vc_mobile is null
-     and (_vc_action = 'I' or p_json ? 'vc_mobile') then
-    raise exception '%', ad.fn_message('PATIENT_MOBILE_REQUIRED');
-  end if;
+  for _req in select unnest(coalesce(_setting.vc_patient_required, '{}'::text[])) loop
+    _req_keys := case _req
+      when 'address' then array['vc_zip', 'vc_address', 'vc_address_number', 'vc_district', 'vc_city', 'vc_state']
+      when 'email' then array['vc_email', 'id_no_email']
+      when 'plan' then array['vc_plan_name']
+      when 'source' then array['it_source']
+      when 'gender' then array['it_gender']
+      when 'marital_status' then array['it_marital_status']
+      when 'education' then array['it_education']
+      else array['vc_' || _req]
+    end;
+    continue when _vc_action = 'U'
+                  and not exists (select 1 from unnest(_req_keys) k where p_json ? k);
+    _missing := case _req
+         when 'rg' then _new.vc_rg is null
+         when 'gender' then _new.it_gender is null
+         when 'marital_status' then _new.it_marital_status is null
+         when 'education' then _new.it_education is null
+         when 'source' then _new.it_source is null
+         when 'referral' then _new.vc_referral is null
+         when 'mobile' then _new.vc_mobile is null
+         when 'phone' then _new.vc_phone is null
+         when 'email' then _new.vc_email is null and not coalesce(_new.id_no_email, false)
+         when 'address' then _new.vc_zip is null or _new.vc_address is null or _new.vc_address_number is null
+                             or _new.vc_district is null or _new.vc_city is null or _new.vc_state is null
+         when 'profession' then _new.vc_profession is null
+         when 'plan' then _new.vc_plan_name is null
+         else false
+       end;
+    if _missing then
+      raise exception '%', ad.fn_message('PATIENT_FIELD_REQUIRED', jsonb_build_object('Field',
+        case _req
+          when 'rg' then 'RG' when 'gender' then 'Gênero' when 'marital_status' then 'Estado civil'
+          when 'education' then 'Escolaridade' when 'source' then 'Como conheceu a clínica'
+          when 'referral' then 'Indicado por' when 'mobile' then 'Celular' when 'phone' then 'Telefone'
+          when 'email' then 'E-mail' when 'address' then 'Endereço completo' when 'profession' then 'Profissão'
+          else 'Convênio'
+        end));
+    end if;
+  end loop;
 
   /*------------------------------------------------------------------------
     6. grava

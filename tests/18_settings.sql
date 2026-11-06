@@ -58,7 +58,7 @@ begin
             {"it_weekday": 1, "qt_minute_start": 700, "qt_minute_end": 800}]}'::jsonb, 'SETTINGS_HOURS_INVALID');
 
   _r := ad.settings_save(_base || '{"qt_slot_minutes": 30, "qt_max_parallel": 2, "id_allow_outside_hours": false,
-          "id_auto_record_number": true, "nr_next_record": 100, "id_require_cpf": true,
+          "id_auto_record_number": true, "nr_next_record": 100, "vc_patient_required": ["rg", "address", "email"],
           "hours": [{"it_weekday": 1, "qt_minute_start": 480, "qt_minute_end": 720},
                     {"it_weekday": 1, "qt_minute_start": 780, "qt_minute_end": 1080}]}'::jsonb);
   assert (_r -> 'settings' ->> 'qt_slot_minutes')::int = 30 and jsonb_array_length(_r -> 'hours') = 2, 'gravou';
@@ -75,9 +75,24 @@ begin
   assert (_r -> 'clinic' ->> 'vc_phone_extra') = '4133334444' and (_r -> 'clinic' ->> 'vc_technical_cro_state') = 'PR'
      and (_r -> 'clinic' ->> 'vc_forum_city') = 'Curitiba', 'dados da clinica';
 
-  -- paciente: CPF obrigatorio e prontuario automatico
+  -- obrigatorios da filial: lista validada e sem repeticao
+  perform pg_temp.expect_error('settings_save', _base || '{"vc_patient_required": ["rg", "cpf"]}'::jsonb, 'SETTINGS_VALUE_INVALID');
+  perform pg_temp.expect_error('settings_save', _base || '{"vc_patient_required": "rg"}'::jsonb, 'SETTINGS_VALUE_INVALID');
+  assert (ad.settings_get(_base) -> 'settings' -> 'vc_patient_required') = '["address", "email", "rg"]'::jsonb, 'obrigatorios gravados';
+
+  -- paciente: CPF sempre obrigatorio, obrigatorios da filial e prontuario automatico
   perform pg_temp.expect_error('patient_save', _base || '{"vc_action": "I", "vc_name": "Sem CPF", "dt_birth": "1990-01-01"}'::jsonb,
             'PATIENT_CPF_REQUIRED');
+  perform pg_temp.expect_error('patient_save', _base || '{"vc_action": "I", "vc_name": "Sem RG", "dt_birth": "1990-01-01",
+            "vc_cpf": "529.982.247-25", "vc_zip": "80000000", "vc_address": "Rua A", "vc_address_number": "1",
+            "vc_district": "Centro", "vc_city": "Curitiba", "vc_state": "PR", "id_no_email": true}'::jsonb, '"Field": "RG"');
+  perform pg_temp.expect_error('patient_save', _base || '{"vc_action": "I", "vc_name": "Sem Bairro", "dt_birth": "1990-01-01",
+            "vc_cpf": "529.982.247-25", "vc_rg": "1234", "vc_zip": "80000000", "vc_address": "Rua A", "vc_address_number": "1",
+            "vc_city": "Curitiba", "vc_state": "PR", "id_no_email": true}'::jsonb, 'Endereço completo');
+  perform pg_temp.expect_error('patient_save', _base || '{"vc_action": "I", "vc_name": "Sem Email", "dt_birth": "1990-01-01",
+            "vc_cpf": "529.982.247-25", "vc_rg": "1234", "vc_zip": "80000000", "vc_address": "Rua A", "vc_address_number": "1",
+            "vc_district": "Centro", "vc_city": "Curitiba", "vc_state": "PR"}'::jsonb, 'PATIENT_FIELD_REQUIRED');
+  perform ad.settings_save(_base || '{"vc_patient_required": []}'::jsonb);
   _pa := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Com CPF", "dt_birth": "1990-01-01",
             "vc_cpf": "529.982.247-25"}'::jsonb) ->> 'nr_patient')::bigint;
   assert (select vc_record_number from od.patient where nr_company = _ca and nr_patient = _pa) = '100', 'prontuario 100';

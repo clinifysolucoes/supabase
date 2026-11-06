@@ -96,10 +96,10 @@ begin
 
   -- P2: sem CPF, com prontuario; P3: menor com representante legal
   _r := ad.patient_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
-          'vc_name', 'Carlos Lima', 'dt_birth', '1985-01-01', 'vc_record_number', '000123', 'it_source', 1));
+          'vc_name', 'Carlos Lima', 'dt_birth', '1985-01-01', 'vc_cpf', '123.456.780-62', 'vc_record_number', '000123', 'it_source', 1));
   _p2 := (_r ->> 'nr_patient')::bigint;
   _r := ad.patient_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
-          'vc_name', 'Ana Beatriz Silva', 'vc_nickname', 'Bia', 'dt_birth', '2015-03-10', 'it_gender', 2,
+          'vc_name', 'Ana Beatriz Silva', 'vc_nickname', 'Bia', 'dt_birth', '2015-03-10', 'vc_cpf', '234.567.891-73', 'it_gender', 2,
           'vc_guardian_name', 'Joana Silva', 'vc_guardian_cpf', '111.444.777-35', 'vc_guardian_phone', '11 91111-2222',
           'vc_mother_name', 'Joana Silva', 'id_no_email', true, 'vc_email', 'ignorado@x.com'));
   _p3 := (_r ->> 'nr_patient')::bigint;
@@ -253,7 +253,7 @@ begin
   assert (_r -> 'permission' ->> 'id_create')::boolean and not (_r -> 'permission' ->> 'id_update')::boolean, 'permission na lista';
 
   _r := ad.patient_save(jsonb_build_object('nr_version', 1, 'vc_action', 'I', 'nr_company', _ca, 'nr_branch', 1,
-          'vc_name', 'Paciente da Bia', 'dt_birth', '2000-01-01'));
+          'vc_name', 'Paciente da Bia', 'dt_birth', '2000-01-01', 'vc_cpf', '345.678.902-56'));
   assert (_r ->> 'nr_patient')::int = 4, 'Bia cadastra';
 
   begin
