@@ -191,3 +191,9 @@ drop policy if exists branch_hour_select on od.branch_hour;
 create policy branch_hour_select on od.branch_hour
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.fin_receipt
+drop policy if exists fin_receipt_select on od.fin_receipt;
+create policy fin_receipt_select on od.fin_receipt
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

@@ -1,0 +1,77 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_receipt_cancel(jsonb)                                  ::
+  ::  UsedBy      : Flutter -> rpc('fin_receipt_cancel') (Cancelar recibo)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cancela um recibo emitido (permissao ALTERAR na tela FINANCE), com o
+    motivo. O numero nao e reaproveitado: emitir de novo gera outro.
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+    nr_receipt  bigint   obrigatorio
+    vc_reason   text     obrigatorio (ate 200)
+
+  Output jsonb: {"nr_receipt", "it_status"}
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_RECEIPT_FORBIDDEN, FIN_RECEIPT_NOT_FOUND,
+    FIN_RECEIPT_REASON_REQUIRED
+*/
+create or replace function ad.fin_receipt_cancel(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr         bigint;
+  _reason     text := nullif(left(trim(p_json ->> 'vc_reason'), 200), '');
+  _number     text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_receipt_cancel');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('FIN_RECEIPT_FORBIDDEN');
+  end if;
+  if _reason is null then
+    raise exception '%', ad.fn_message('FIN_RECEIPT_REASON_REQUIRED');
+  end if;
+  _nr := (p_json ->> 'nr_receipt')::bigint;
+
+  update od.fin_receipt r set it_status = 90, vc_cancel_reason = _reason
+   where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_receipt = _nr and r.it_status = 1
+  returning r.vc_number into _number;
+  if _number is null then
+    raise exception '%', ad.fn_message('FIN_RECEIPT_NOT_FOUND');
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'DELETE',
+    'fin_receipt', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Recibo %s cancelado', _number),
+    jsonb_build_object('nr_receipt', _nr, 'vc_reason', _reason));
+
+  return jsonb_build_object('nr_receipt', _nr, 'it_status', 90);
+end;
+$$;
+
+revoke all on function ad.fin_receipt_cancel(jsonb) from public, anon;
+grant execute on function ad.fin_receipt_cancel(jsonb) to authenticated;

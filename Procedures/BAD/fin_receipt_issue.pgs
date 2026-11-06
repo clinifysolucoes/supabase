@@ -1,0 +1,133 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.fin_receipt_issue(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> rpc('fin_receipt_issue') (Emitir recibo)           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Emite o recibo de uma conta a receber paga (permissao CRIAR na tela
+    FINANCE). O numero vem da filial (od.branch_setting.nr_next_receipt, com
+    o prefixo vc_receipt_prefix) e o proximo e incrementado. Se a conta ja
+    tem recibo ativo, devolve o mesmo (id_existing). Pagador padrao: o
+    paciente da conta (nome e CPF); descricao padrao: a da conta. Grava
+    ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version         integer  obrigatorio = 1
+    nr_company         bigint   obrigatorio
+    nr_branch          bigint   obrigatorio
+    nr_entry           bigint   obrigatorio (conta a receber paga)
+    vc_payer_name      text     opcional (ate 120)
+    vc_payer_document  text     opcional (CPF ou CNPJ; so digitos sao gravados)
+    vc_description     text     opcional (ate 200; "referente a")
+
+  Output jsonb: o mesmo de ad.fin_receipt_get, mais "id_existing"
+
+  Errors: VERSION_MISMATCH, FINANCE_BRANCH_REQUIRED, FIN_RECEIPT_FORBIDDEN, FIN_ENTRY_REQUIRED,
+    FIN_ENTRY_NOT_FOUND, FIN_RECEIPT_NOT_PAID, FIN_RECEIPT_PAYER_REQUIRED, FIN_RECEIPT_DOCUMENT_INVALID
+*/
+create or replace function ad.fin_receipt_issue(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _e          od.fin_entry%rowtype;
+  _nr         bigint;
+  _prefix     text;
+  _payer      text;
+  _doc        text;
+  _desc       text;
+  _existing   boolean := false;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'fin_receipt_issue');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('FINANCE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean, false) then
+    raise exception '%', ad.fn_message('FIN_RECEIPT_FORBIDDEN');
+  end if;
+  if (p_json ->> 'nr_entry') is null then
+    raise exception '%', ad.fn_message('FIN_ENTRY_REQUIRED');
+  end if;
+
+  select * into _e from od.fin_entry e
+   where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_entry = (p_json ->> 'nr_entry')::bigint
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('FIN_ENTRY_NOT_FOUND');
+  end if;
+  if _e.it_kind <> 1 or _e.it_status <> 2 then
+    raise exception '%', ad.fn_message('FIN_RECEIPT_NOT_PAID');
+  end if;
+
+  if exists (select 1 from od.fin_receipt r
+              where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                and r.nr_entry = _e.nr_entry and r.it_status = 1) then
+    _existing := true;
+  else
+    select coalesce(nullif(left(trim(p_json ->> 'vc_payer_name'), 120), ''), p.vc_name),
+           case when p_json ? 'vc_payer_document'
+                then nullif(regexp_replace(coalesce(p_json ->> 'vc_payer_document', ''), '[^0-9]', '', 'g'), '')
+                else p.vc_cpf end
+      into _payer, _doc
+      from (select 1) x
+      left join od.patient p on p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _e.nr_patient;
+    if _payer is null then
+      raise exception '%', ad.fn_message('FIN_RECEIPT_PAYER_REQUIRED');
+    end if;
+    if _doc is not null and length(_doc) not in (11, 14) then
+      raise exception '%', ad.fn_message('FIN_RECEIPT_DOCUMENT_INVALID');
+    end if;
+    _desc := coalesce(nullif(left(trim(p_json ->> 'vc_description'), 200), ''), _e.vc_description);
+
+    -- numero da filial (cria a linha de configuracoes com os padroes se faltar)
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    insert into od.branch_setting (nr_company, nr_branch, nr_operator)
+    values (_nr_company, _nr_branch, _nr_user)
+    on conflict (nr_company, nr_branch) do nothing;
+    select s.nr_next_receipt, s.vc_receipt_prefix into _nr, _prefix
+      from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+    -- numero ja usado (proximo ajustado para tras): pula para o seguinte livre
+    while exists (select 1 from od.fin_receipt r
+                   where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                     and (r.nr_receipt = _nr or r.vc_number = _prefix || lpad(_nr::text, 6, '0'))) loop
+      _nr := _nr + 1;
+    end loop;
+    update od.branch_setting s set nr_next_receipt = _nr + 1
+     where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+    insert into od.fin_receipt (nr_company, nr_branch, nr_receipt, vc_number, nr_entry, vl_amount, dt_paid,
+                                it_payment_method, vc_payer_name, vc_payer_document, vc_description,
+                                nr_user_created, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _prefix || lpad(_nr::text, 6, '0'), _e.nr_entry, _e.vl_paid, _e.dt_paid,
+            _e.it_payment_method, _payer, _doc, _desc, _nr_user, _nr_user);
+
+    perform ad.fn_event_log(
+      _nr_user, _nr_company, _nr_branch, 'FINANCE', 'CREATE',
+      'fin_receipt', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+      format('Recibo %s emitido', _prefix || lpad(_nr::text, 6, '0')),
+      jsonb_build_object('nr_receipt', _nr, 'nr_entry', _e.nr_entry, 'vl_amount', _e.vl_paid));
+  end if;
+
+  return ad.fin_receipt_get(jsonb_build_object('nr_version', 1, 'nr_company', _nr_company, 'nr_branch', _nr_branch,
+                                               'nr_entry', _e.nr_entry))
+         || jsonb_build_object('id_existing', _existing);
+end;
+$$;
+
+revoke all on function ad.fin_receipt_issue(jsonb) from public, anon;
+grant execute on function ad.fin_receipt_issue(jsonb) to authenticated;
