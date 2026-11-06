@@ -1,0 +1,167 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.clinical_evolution_save(jsonb)                             ::
+  ::  UsedBy      : Flutter -> rpc('clinical_evolution_save') (prontuario)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Evolucao clinica do paciente (tela PATIENTS).
+      vc_action = 'I'  registra o atendimento (texto, profissional, dente) e, com
+                       nr_budget + nr_item, marca o item do orcamento aprovado como
+                       realizado                                -> CRIAR ou ALTERAR
+      vc_action = 'D'  exclui (it_status 90) e desmarca o item realizado -> ALTERAR
+    A evolucao nao e alterada depois de gravada (registro clinico): para corrigir,
+    exclui e registra de novo. Grava ad.event_log sem o texto.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     obrigatorio 'I' | 'D'
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    vc_text          text     obrigatorio em 'I' (ate 4000)
+    dh_evolution     timestamptz opcional (padrao agora; nao pode ser futura)
+    nr_professional  bigint   opcional
+    vc_tooth         text     opcional (ate 40)
+    nr_procedure     bigint   opcional
+    nr_budget, nr_item        opcionais (item de orcamento aprovado do paciente, ainda nao realizado)
+    nr_evolution     bigint   obrigatorio em 'D'
+
+  Output jsonb: {"nr_evolution"}
+
+  Errors: VERSION_MISMATCH, CLINICAL_EVOLUTION_ACTION_INVALID, RECORD_BRANCH_REQUIRED,
+    CLINICAL_EVOLUTION_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND, CLINICAL_EVOLUTION_TEXT_REQUIRED,
+    CLINICAL_EVOLUTION_VALUE_INVALID, CLINICAL_EVOLUTION_PROFESSIONAL_INVALID,
+    CLINICAL_EVOLUTION_PROCEDURE_INVALID, CLINICAL_EVOLUTION_ITEM_INVALID, CLINICAL_EVOLUTION_NOT_FOUND
+*/
+create or replace function ad.clinical_evolution_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_evol    bigint;
+  _perm       jsonb;
+  _vc_name    text;
+  _text       text := left(nullif(trim(p_json ->> 'vc_text'), ''), 4000);
+  _dh         timestamptz;
+  _prof       bigint;
+  _proc       bigint;
+  _budget     bigint;
+  _item       smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'clinical_evolution_save');
+  if _action not in ('I', 'D') then
+    raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
+     or (_action = 'D' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _vc_name
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  if _action = 'D' then
+    _nr_evol := (p_json ->> 'nr_evolution')::bigint;
+    update od.clinical_evolution e set it_status = 90
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+       and e.nr_evolution = _nr_evol and e.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_NOT_FOUND');
+    end if;
+    update od.budget_item i set dt_done = null, nr_evolution = null
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_evolution = _nr_evol
+       and exists (select 1 from od.budget b where b.nr_company = i.nr_company and b.nr_branch = i.nr_branch
+                                               and b.nr_budget = i.nr_budget and b.nr_patient = _nr_patient);
+  else
+    if _text is null then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_TEXT_REQUIRED');
+    end if;
+    begin
+      _dh     := coalesce((p_json ->> 'dh_evolution')::timestamptz, now());
+      _prof   := (p_json ->> 'nr_professional')::bigint;
+      _proc   := (p_json ->> 'nr_procedure')::bigint;
+      _budget := (p_json ->> 'nr_budget')::bigint;
+      _item   := (p_json ->> 'nr_item')::smallint;
+    exception when others then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_VALUE_INVALID');
+    end;
+    if _dh > now() + interval '5 minutes' or (_budget is null) <> (_item is null) then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_VALUE_INVALID');
+    end if;
+    if _prof is not null and not exists (
+         select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                           and r.nr_professional = _prof) then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_PROFESSIONAL_INVALID');
+    end if;
+    if _proc is not null and not exists (
+         select 1 from od.procedure r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                        and r.nr_procedure = _proc) then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_PROCEDURE_INVALID');
+    end if;
+    if _budget is not null then
+      perform 1
+        from od.budget_item i
+        join od.budget b on b.nr_company = i.nr_company and b.nr_branch = i.nr_branch and b.nr_budget = i.nr_budget
+       where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _budget and i.nr_item = _item
+         and b.nr_patient = _nr_patient and b.it_status = 3 and i.dt_done is null
+         for update of i;
+      if not found then
+        raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_ITEM_INVALID');
+      end if;
+      if _proc is null then
+        select i.nr_procedure into _proc from od.budget_item i
+         where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _budget and i.nr_item = _item;
+      end if;
+    end if;
+
+    select coalesce(max(e.nr_evolution), 0) + 1 into _nr_evol
+      from od.clinical_evolution e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient;
+    insert into od.clinical_evolution (nr_company, nr_branch, nr_patient, nr_evolution, dh_evolution, nr_professional,
+                                       vc_text, vc_tooth, nr_procedure, nr_budget, nr_item, nr_user, nr_operator)
+    values (_nr_company, _nr_branch, _nr_patient, _nr_evol, _dh, _prof, _text,
+            left(nullif(trim(p_json ->> 'vc_tooth'), ''), 40), _proc, _budget, _item, _nr_user, _nr_user);
+    if _budget is not null then
+      update od.budget_item i set dt_done = _dh::date, nr_evolution = _nr_evol
+       where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _budget and i.nr_item = _item;
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS', case when _action = 'I' then 'CREATE' else 'DELETE' end,
+    'clinical_evolution', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_evol::text,
+    format('Evolução %s no paciente %s', case when _action = 'I' then 'registrada' else 'excluída' end, _vc_name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_evolution', _nr_evol, 'nr_budget', _budget, 'nr_item', _item));
+
+  return jsonb_build_object('nr_evolution', _nr_evol);
+end;
+$$;
+
+revoke all on function ad.clinical_evolution_save(jsonb) from public, anon;
+grant execute on function ad.clinical_evolution_save(jsonb) to authenticated;

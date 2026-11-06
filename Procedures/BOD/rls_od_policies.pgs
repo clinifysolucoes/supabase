@@ -209,3 +209,39 @@ drop policy if exists budget_item_select on od.budget_item;
 create policy budget_item_select on od.budget_item
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.anamnesis_model
+drop policy if exists anamnesis_model_select on od.anamnesis_model;
+create policy anamnesis_model_select on od.anamnesis_model
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.anamnesis_question
+drop policy if exists anamnesis_question_select on od.anamnesis_question;
+create policy anamnesis_question_select on od.anamnesis_question
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_anamnesis
+drop policy if exists patient_anamnesis_select on od.patient_anamnesis;
+create policy patient_anamnesis_select on od.patient_anamnesis
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_anamnesis_answer
+drop policy if exists patient_anamnesis_answer_select on od.patient_anamnesis_answer;
+create policy patient_anamnesis_answer_select on od.patient_anamnesis_answer
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.clinical_evolution
+drop policy if exists clinical_evolution_select on od.clinical_evolution;
+create policy clinical_evolution_select on od.clinical_evolution
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.tooth_mark
+drop policy if exists tooth_mark_select on od.tooth_mark;
+create policy tooth_mark_select on od.tooth_mark
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

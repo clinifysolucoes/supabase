@@ -1,0 +1,79 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.anamnesis_model_list(jsonb)                                ::
+  ::  UsedBy      : Flutter -> rpc('anamnesis_model_list') (prontuario, config.)  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Modelos de anamnese da filial com as perguntas. Na primeira chamada cria o
+    modelo "Geral" (od.fn_anamnesis_default). Exige LER na tela PATIENTS ou na
+    tela SETTINGS. Devolve se o usuario pode editar os modelos (alterar em
+    SETTINGS).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    id_include_inactive    boolean opcional (padrao false)
+
+  Output jsonb:
+    {"models": [{"nr_model", "vc_name", "nr_specialty", "vc_specialty", "it_status",
+                 "questions": [{"nr_question", "vc_question", "it_type", "id_alert"}]}],
+     "permission": {"id_update"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN
+*/
+create or replace function ad.anamnesis_model_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _inactive   boolean := coalesce((p_json ->> 'id_include_inactive')::boolean, false);
+  _settings   jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'anamnesis_model_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user  := private.fn_current_user_nr();
+  _settings := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if _nr_user is null
+     or not (coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS') ->> 'id_read')::boolean, false)
+             or coalesce((_settings ->> 'id_read')::boolean, false)) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+
+  perform od.fn_anamnesis_default(_nr_company, _nr_branch, _nr_user);
+
+  return jsonb_build_object(
+    'models', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_model', m.nr_model, 'vc_name', m.vc_name, 'nr_specialty', m.nr_specialty,
+               'vc_specialty', s.vc_name, 'it_status', m.it_status,
+               'questions', coalesce((select jsonb_agg(jsonb_build_object(
+                    'nr_question', q.nr_question, 'vc_question', q.vc_question,
+                    'it_type', q.it_type, 'id_alert', q.id_alert) order by q.nr_question)
+                  from od.anamnesis_question q
+                 where q.nr_company = m.nr_company and q.nr_branch = m.nr_branch and q.nr_model = m.nr_model), '[]'::jsonb))
+             order by m.vc_name, m.nr_model)
+        from od.anamnesis_model m
+        left join od.specialty s on s.nr_company = m.nr_company and s.nr_branch = m.nr_branch
+                                and s.nr_specialty = m.nr_specialty
+       where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+         and (_inactive or m.it_status = 1)), '[]'::jsonb),
+    'permission', jsonb_build_object('id_update', coalesce((_settings ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.anamnesis_model_list(jsonb) from public, anon;
+grant execute on function ad.anamnesis_model_list(jsonb) to authenticated;

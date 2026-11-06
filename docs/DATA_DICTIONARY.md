@@ -62,6 +62,12 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.fin_entry`](#odfinentry) | Lançamento financeiro | Conta a receber ou a pagar da filial: categoria, conta, fornecedor ou paciente, descrição, valor, vencimento, competência, forma de pagamento, pagamento (data e valor) e situação. Parcelas e repetições mensais ficam ligadas pelo mesmo uu_group. nr_entry é sequencial por filial. |
 | [`od.budget`](#odbudget) | Orçamento | Orçamento (plano de tratamento) do paciente: itens, desconto, validade e condição de pagamento. Desconto acima do máximo da filial fica aguardando o administrador; aprovado pelo paciente gera as contas a receber (fin_entry.nr_budget). nr_budget é sequencial por filial. |
 | [`od.budget_item`](#odbudgetitem) | Item do orçamento | Procedimento (ou item livre) do orçamento com dente/região, quantidade e valores. |
+| [`od.anamnesis_model`](#odanamnesismodel) | Modelo de anamnese | Modelo (questionário) de anamnese da filial, opcionalmente de uma especialidade. O modelo "Geral" com as perguntas usuais é criado na primeira consulta (od.fn_anamnesis_default). nr_model é sequencial por filial. |
+| [`od.anamnesis_question`](#odanamnesisquestion) | Pergunta do modelo de anamnese | Perguntas do modelo, na ordem de nr_question. id_alert: resposta "sim" vira alerta no prontuário. Substituídas inteiras a cada alteração do modelo (as anamneses preenchidas guardam a própria cópia). |
+| [`od.patient_anamnesis`](#odpatientanamnesis) | Anamnese do paciente | Anamnese preenchida do paciente a partir de um modelo, com cópia do nome do modelo e das perguntas para o histórico não mudar. A mais recente define os alertas do prontuário. Exclusão lógica. |
+| [`od.patient_anamnesis_answer`](#odpatientanamnesisanswer) | Resposta da anamnese | Respostas da anamnese do paciente, com a cópia da pergunta e do tipo. id_alert marca a resposta "sim" de pergunta de alerta. |
+| [`od.clinical_evolution`](#odclinicalevolution) | Evolução clínica | Registro do atendimento no prontuário: texto, profissional, dente/região, procedimento e, quando ligado, o item de orçamento aprovado realizado (budget_item.dt_done). Não se altera depois de gravada; exclusão lógica desmarca o item. nr_evolution é sequencial por paciente. |
+| [`od.tooth_mark`](#odtoothmark) | Marcação do odontograma | Odontograma do paciente: uma linha por marcação de dente (numeração FDI: 11 a 48 permanentes, 51 a 85 decíduos), condição, faces e situação (existente, a tratar, realizado). Exclusão lógica. |
 | [`od.fin_cash_session`](#odfincashsession) | Sessão de caixa | Caixa do dia por pessoa: abertura (valor contado) e fechamento (contado × esperado) numa conta do tipo caixa. Uma sessão aberta por conta e por usuário; recebimentos, pagamentos e transferências feitos na conta enquanto aberta entram no fechamento. nr_session é sequencial por filial. |
 | [`od.fin_transfer`](#odfintransfer) | Transferência entre contas | Dinheiro que passa de uma conta da filial para outra (não é receita nem despesa): transferência, sangria (do caixa para outra conta) ou suprimento (de outra conta para o caixa). Entra no saldo e no extrato das duas contas. nr_transfer é sequencial por filial. |
 | [`od.fin_card_rate`](#odfincardrate) | Taxa de recebimento | Taxa da filial por forma de pagamento (cartão de crédito, débito, boleto, cheque) e faixa de parcelas: percentual, tarifa fixa, prazo em dias para o dinheiro cair e a conta destino. Com taxa cadastrada, a baixa nessa forma gera recebíveis. nr_rate é sequencial por filial. |
@@ -135,6 +141,14 @@ erDiagram
   fin_entry ||--o{ fin_attachment : "anexa"
   patient ||--o{ budget : "orçamentos"
   budget ||--|{ budget_item : "itens"
+  anamnesis_model ||--|{ anamnesis_question : "perguntas"
+  patient ||--o{ patient_anamnesis : "anamneses"
+  anamnesis_model ||--o{ patient_anamnesis : "preenchida"
+  patient_anamnesis ||--|{ patient_anamnesis_answer : "respostas"
+  patient ||--o{ clinical_evolution : "evoluções"
+  budget_item ||--o| clinical_evolution : "realizado"
+  professional ||--o{ clinical_evolution : "atendeu"
+  patient ||--o{ tooth_mark : "odontograma"
   procedure ||--o{ budget_item : "orçado"
   budget ||--o{ fin_entry : "gera contas"
   fin_entry ||--o{ fin_receipt : "recibos"
@@ -507,6 +521,78 @@ erDiagram
     numeric qt_quantity
     numeric vl_unit
     numeric vl_total
+    date dt_done
+    bigint nr_evolution
+  }
+  anamnesis_model {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_model PK
+    varchar vc_name
+    bigint nr_specialty FK
+    smallint it_status
+  }
+  anamnesis_question {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_model PK, FK
+    smallint nr_question PK
+    varchar vc_question
+    smallint it_type
+    boolean id_alert
+  }
+  patient_anamnesis {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_anamnesis PK
+    bigint nr_model FK
+    varchar vc_model
+    date dt_filled
+    varchar vc_notes
+    smallint it_status
+    bigint nr_user FK
+  }
+  patient_anamnesis_answer {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_anamnesis PK, FK
+    smallint nr_question PK
+    varchar vc_question
+    smallint it_type
+    boolean id_yes
+    varchar vc_text
+    boolean id_alert
+  }
+  clinical_evolution {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_evolution PK
+    timestamptz dh_evolution
+    bigint nr_professional FK
+    varchar vc_text
+    varchar vc_tooth
+    bigint nr_procedure FK
+    bigint nr_budget FK
+    smallint nr_item FK
+    smallint it_status
+    bigint nr_user FK
+  }
+  tooth_mark {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_mark PK
+    varchar vc_tooth
+    smallint it_condition
+    varchar vc_faces
+    smallint it_situation
+    varchar vc_notes
+    date dt_mark
+    smallint it_status
+    bigint nr_user FK
   }
   fin_cash_session {
     bigint nr_company PK, FK
@@ -1471,6 +1557,150 @@ Procedimento (ou item livre) do orçamento com dente/região, quantidade e valor
 | `qt_quantity` | `numeric(7,2)` |  | NOT NULL | `1` | Quantidade. |
 | `vl_unit` | `numeric(12,2)` |  | NOT NULL | `0` | Valor unitário (padrão: valor cobrado hoje do procedimento). |
 | `vl_total` | `numeric(14,2)` |  | NOT NULL | `0` | Quantidade × valor unitário. |
+| `dt_done` | `date` |  | NULL |  | Data em que o item foi realizado (evolução clínica ligada); nulo = a fazer. |
+| `nr_evolution` | `bigint` |  | NULL |  | Evolução clínica (clinical_evolution.nr_evolution do paciente) que registrou a realização. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.anamnesis_model
+
+**Modelo de anamnese**
+
+Modelo (questionário) de anamnese da filial, opcionalmente de uma especialidade. O modelo "Geral" com as perguntas usuais é criado na primeira consulta (od.fn_anamnesis_default). nr_model é sequencial por filial.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via anamnesis_model_save (tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_model` | `bigint` | PK3 | NOT NULL |  | Número sequencial do modelo na filial. |
+| `vc_name` | `varchar(80)` |  | NOT NULL |  | Nome do modelo (ex. Geral, Ortodontia). |
+| `nr_specialty` | `bigint` | FK → `specialty.nr_specialty` | NULL |  | Especialidade a que o modelo se destina (nulo = qualquer). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do modelo. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.anamnesis_question
+
+**Pergunta do modelo de anamnese**
+
+Perguntas do modelo, na ordem de nr_question. id_alert: resposta "sim" vira alerta no prontuário. Substituídas inteiras a cada alteração do modelo (as anamneses preenchidas guardam a própria cópia).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via anamnesis_model_save (tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `anamnesis_model.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `anamnesis_model.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_model` | `bigint` | PK3, FK → `anamnesis_model.nr_model` | NOT NULL |  | Modelo. |
+| `nr_question` | `smallint` | PK4 | NOT NULL |  | Ordem da pergunta. |
+| `vc_question` | `varchar(200)` |  | NOT NULL |  | Texto da pergunta. |
+| `it_type` | `smallint` |  | NOT NULL | `1` | Tipo de resposta. Valores: 1 = Sim/não; 2 = Texto livre; 3 = Sim/não com detalhe. |
+| `id_alert` | `boolean` |  | NOT NULL | `false` | Resposta "sim" gera alerta no prontuário (não vale para texto livre). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.patient_anamnesis
+
+**Anamnese do paciente**
+
+Anamnese preenchida do paciente a partir de um modelo, com cópia do nome do modelo e das perguntas para o histórico não mudar. A mais recente define os alertas do prontuário. Exclusão lógica.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_anamnesis_save (tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_anamnesis` | `bigint` | PK4 | NOT NULL |  | Número sequencial da anamnese do paciente. |
+| `nr_model` | `bigint` | FK → `anamnesis_model.nr_model` | NULL |  | Modelo usado. |
+| `vc_model` | `varchar(80)` |  | NOT NULL |  | Nome do modelo no momento do preenchimento. |
+| `dt_filled` | `date` |  | NOT NULL |  | Data do preenchimento (não pode ser futura). |
+| `vc_notes` | `varchar(2000)` |  | NULL |  | Observações gerais. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Excluído. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.patient_anamnesis_answer
+
+**Resposta da anamnese**
+
+Respostas da anamnese do paciente, com a cópia da pergunta e do tipo. id_alert marca a resposta "sim" de pergunta de alerta.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_anamnesis_save (tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient_anamnesis.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient_anamnesis.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient_anamnesis.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_anamnesis` | `bigint` | PK4, FK → `patient_anamnesis.nr_anamnesis` | NOT NULL |  | Anamnese. |
+| `nr_question` | `smallint` | PK5 | NOT NULL |  | Ordem da pergunta. |
+| `vc_question` | `varchar(200)` |  | NOT NULL |  | Texto da pergunta no momento do preenchimento. |
+| `it_type` | `smallint` |  | NOT NULL |  | Tipo de resposta. Valores: 1 = Sim/não; 2 = Texto livre; 3 = Sim/não com detalhe. |
+| `id_yes` | `boolean` |  | NULL |  | Resposta sim/não (nulo = não respondida ou texto livre). |
+| `vc_text` | `varchar(1000)` |  | NULL |  | Texto da resposta ou detalhe do "sim". |
+| `id_alert` | `boolean` |  | NOT NULL | `false` | Resposta gera alerta no prontuário. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.clinical_evolution
+
+**Evolução clínica**
+
+Registro do atendimento no prontuário: texto, profissional, dente/região, procedimento e, quando ligado, o item de orçamento aprovado realizado (budget_item.dt_done). Não se altera depois de gravada; exclusão lógica desmarca o item. nr_evolution é sequencial por paciente.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via clinical_evolution_save (tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_evolution` | `bigint` | PK4 | NOT NULL |  | Número sequencial da evolução do paciente. |
+| `dh_evolution` | `timestamptz` |  | NOT NULL | `now()` | Data e hora do atendimento (não pode ser futura). |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional que atendeu. |
+| `vc_text` | `varchar(4000)` |  | NOT NULL |  | Descrição do atendimento. |
+| `vc_tooth` | `varchar(40)` |  | NULL |  | Dente ou região. |
+| `nr_procedure` | `bigint` | FK → `procedure.nr_procedure` | NULL |  | Procedimento realizado (padrão: o do item do orçamento). |
+| `nr_budget` | `bigint` | FK → `budget_item.nr_budget` | NULL |  | Orçamento do item realizado. |
+| `nr_item` | `smallint` | FK → `budget_item.nr_item` | NULL |  | Item do orçamento realizado. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Excluído. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.tooth_mark
+
+**Marcação do odontograma**
+
+Odontograma do paciente: uma linha por marcação de dente (numeração FDI: 11 a 48 permanentes, 51 a 85 decíduos), condição, faces e situação (existente, a tratar, realizado). Exclusão lógica.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via tooth_mark_save (tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_mark` | `bigint` | PK4 | NOT NULL |  | Número sequencial da marcação do paciente. |
+| `vc_tooth` | `varchar(2)` |  | NOT NULL |  | Dente na numeração FDI (ex. 11, 36, 55). |
+| `it_condition` | `smallint` |  | NOT NULL |  | Condição marcada. Valores: 1 = Cárie; 2 = Restauração; 3 = Ausente/extraído; 4 = Implante; 5 = Coroa/prótese; 6 = Tratamento de canal; 7 = Extração indicada; 8 = Fratura; 9 = Selante; 10 = Outro. |
+| `vc_faces` | `varchar(5)` |  | NULL |  | Faces: M mesial, D distal, O oclusal, V vestibular, L lingual, I incisal, P palatina. |
+| `it_situation` | `smallint` |  | NOT NULL | `1` | Situação da condição. Valores: 1 = Existente; 2 = A tratar; 3 = Realizado. |
+| `vc_notes` | `varchar(300)` |  | NULL |  | Observação. |
+| `dt_mark` | `date` |  | NOT NULL |  | Data da marcação. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do registro. Valores: 1 = Ativo; 90 = Excluído. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -2022,6 +2252,12 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_receipt_issue(p_json jsonb)` | authenticated | Emite o recibo de uma conta a receber paga (criar na tela FINANCE) com o próximo número da filial; se já existe recibo ativo devolve o mesmo (id_existing). Pagador padrão: o paciente (nome e CPF); descrição padrão: a da conta. Devolve recibo e emitente. Grava event_log. |
 | `ad.fin_receipt_get(p_json jsonb)` | authenticated | Um recibo (por número ou o ativo da conta) com os dados da clínica emitente (razão social, CNPJ, endereço, responsável técnico) para o PDF. Exige ler na tela FINANCE. |
 | `ad.fin_receipt_cancel(p_json jsonb)` | authenticated | Cancela um recibo emitido com o motivo (alterar na tela FINANCE); o número não é reaproveitado. Grava event_log. |
+| `ad.anamnesis_model_list(p_json jsonb)` | authenticated | Modelos de anamnese da filial com as perguntas (cria o modelo Geral na primeira chamada). Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = pode editar (alterar em SETTINGS). |
+| `ad.anamnesis_model_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um modelo de anamnese: nome, especialidade, situação e as perguntas (substituídas inteiras). Exige alterar na tela SETTINGS. Grava event_log. |
+| `ad.patient_anamnesis_save(p_json jsonb)` | authenticated | Preenche (I, criar ou alterar) ou exclui (D, alterar) uma anamnese do paciente na tela PATIENTS: copia as perguntas do modelo e grava as respostas; "sim" em pergunta de alerta vira alerta. Grava event_log sem as respostas. |
+| `ad.clinical_evolution_save(p_json jsonb)` | authenticated | Registra (I, criar ou alterar) ou exclui (D, alterar) uma evolução clínica na tela PATIENTS; com nr_budget/nr_item marca o item do orçamento aprovado como realizado (e a exclusão desmarca). Grava event_log sem o texto. |
+| `ad.tooth_mark_save(p_json jsonb)` | authenticated | Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log. |
+| `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. |
 | `ad.budget_list(p_json jsonb)` | authenticated | Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS. |
 | `ad.budget_get(p_json jsonb)` | authenticated | Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. |
 | `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. |
@@ -2062,6 +2298,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fn_dre_cat_lines(p_cats jsonb, p_group integer, p_sign integer, p_gross numeric)` | interna | Linhas de categoria de um grupo do DRE. |
 | `ad.fn_dre_line(p_key text, p_label text, p_level integer, p_sign integer, p_estimated boolean, p_values numeric[], p_gross numeric)` | interna | Uma linha do DRE (array jsonb de um elemento): valores por mês, total e percentual sobre a receita bruta. |
 | `od.fn_procedure_min_price(p_nr_company bigint, p_nr_branch bigint, p_nr_procedure bigint)` | interna | Preço mínimo (lucro zero) de um procedimento pela fórmula da precificação, sem exigir a tela PRICING; usado na regra de orçamento abaixo do mínimo. |
+| `od.fn_anamnesis_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)` | interna | Cria o modelo de anamnese Geral (16 perguntas usuais, com alertas de saúde) quando a filial ainda não tem modelo; usado por anamnesis_model_list. |
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
@@ -2107,6 +2344,14 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ACCESS_PROFILE_STATUS_INVALID` | `access_profile_save` |  |
 | `AGENDA_BRANCH_REQUIRED` | `appointment_list`, `appointment_save`, `professional_list`, `professional_save` |  |
 | `AGENDA_FORBIDDEN` | `appointment_list`, `professional_list` |  |
+| `ANAMNESIS_MODEL_ACTION_INVALID` | `anamnesis_model_save` |  |
+| `ANAMNESIS_MODEL_FORBIDDEN` | `anamnesis_model_save` |  |
+| `ANAMNESIS_MODEL_NAME_REQUIRED` | `anamnesis_model_save` |  |
+| `ANAMNESIS_MODEL_NOT_FOUND` | `anamnesis_model_save`, `patient_anamnesis_save` |  |
+| `ANAMNESIS_MODEL_QUESTIONS_REQUIRED` | `anamnesis_model_save` |  |
+| `ANAMNESIS_MODEL_SPECIALTY_INVALID` | `anamnesis_model_save` |  |
+| `ANAMNESIS_MODEL_VALUE_INVALID` | `anamnesis_model_save` |  |
+| `ANAMNESIS_QUESTION_INVALID` | `anamnesis_model_save` |  |
 | `APPOINTMENT_ACTION_INVALID` | `appointment_save` |  |
 | `APPOINTMENT_CONFLICT` | `appointment_save` |  |
 | `APPOINTMENT_DEBT_APPROVAL` | `appointment_save` |  |
@@ -2176,6 +2421,14 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `CHECKOUT_APPOINTMENT_REQUIRED` | `appointment_checkout_get`, `appointment_checkout` |  |
 | `CHECKOUT_COMMISSION_INVALID` | `appointment_checkout` |  |
 | `CHECKOUT_NOT_CONFIGURED` | `appointment_checkout` |  |
+| `CLINICAL_EVOLUTION_ACTION_INVALID` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_FORBIDDEN` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_ITEM_INVALID` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_NOT_FOUND` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_PROCEDURE_INVALID` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_PROFESSIONAL_INVALID` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_TEXT_REQUIRED` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_VALUE_INVALID` | `clinical_evolution_save` |  |
 | `COMPANY_CREATE_CNPJ_IN_USE` | `company_create` | Cnpj |
 | `COMPANY_CREATE_CNPJ_INVALID` | `company_create` | Cnpj |
 | `COMPANY_CREATE_EMAIL_INVALID` | `company_create` | Email |
@@ -2391,6 +2644,10 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `MATERIAL_WASTE_INVALID` | `material_save` |  |
 | `MATERIAL_YIELD_INVALID` | `material_save` |  |
 | `PATIENT_ACTION_INVALID` | `patient_save` |  |
+| `PATIENT_ANAMNESIS_ACTION_INVALID` | `patient_anamnesis_save` |  |
+| `PATIENT_ANAMNESIS_FORBIDDEN` | `patient_anamnesis_save` |  |
+| `PATIENT_ANAMNESIS_NOT_FOUND` | `patient_anamnesis_save` |  |
+| `PATIENT_ANAMNESIS_VALUE_INVALID` | `patient_anamnesis_save` |  |
 | `PATIENT_BIRTH_INVALID` | `patient_save` |  |
 | `PATIENT_BIRTH_REQUIRED` | `patient_save` |  |
 | `PATIENT_BRANCH_REQUIRED` | `patient_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
@@ -2401,13 +2658,13 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_FIELD_REQUIRED` | `patient_save` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
-| `PATIENT_NOT_FOUND` | `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
 | `PATIENT_NOTE_FORBIDDEN` | `patient_note_save` |  |
 | `PATIENT_NOTE_NOT_FOUND` | `patient_note_save` |  |
 | `PATIENT_NOTE_REQUIRED` | `patient_note_save` |  |
 | `PATIENT_PHONE_INVALID` | `patient_save` |  |
-| `PATIENT_REQUIRED` | `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_STATE_INVALID` | `patient_save` |  |
 | `PATIENT_STATUS_INVALID` | `patient_save` |  |
 | `PATIENT_VALUE_INVALID` | `patient_save` |  |
@@ -2453,6 +2710,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROFESSIONAL_STATUS_INVALID` | `professional_save` |  |
 | `PROFESSIONAL_USER_IN_USE` | `professional_save` |  |
 | `PROFESSIONAL_USER_INVALID` | `professional_save` |  |
+| `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get` |  |
+| `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get` |  |
 | `SCREEN_LIST_FORBIDDEN` | `screen_list` |  |
 | `SESSION_COMPANY_BLOCKED` | `session_context` |  |
 | `SESSION_COMPANY_INACTIVE` | `session_context` |  |
@@ -2483,6 +2742,11 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SPECIALTY_PERCENT_INVALID` | `specialty_save` |  |
 | `SPECIALTY_REQUIRED` | `specialty_save` |  |
 | `SPECIALTY_STATUS_INVALID` | `specialty_save` |  |
+| `TOOTH_MARK_ACTION_INVALID` | `tooth_mark_save` |  |
+| `TOOTH_MARK_FORBIDDEN` | `tooth_mark_save` |  |
+| `TOOTH_MARK_NOT_FOUND` | `tooth_mark_save` |  |
+| `TOOTH_MARK_TOOTH_INVALID` | `tooth_mark_save` |  |
+| `TOOTH_MARK_VALUE_INVALID` | `tooth_mark_save` |  |
 | `TRASH_BRANCH_REQUIRED` | `trash_list`, `trash_restore` |  |
 | `TRASH_FORBIDDEN` | `trash_list`, `trash_restore` |  |
 | `TRASH_KIND_INVALID` | `trash_list`, `trash_restore` |  |
@@ -2498,5 +2762,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

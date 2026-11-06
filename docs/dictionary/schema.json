@@ -582,7 +582,121 @@
         { "name": "vc_tooth", "type": "varchar(40)", "nullable": true, "description": "Dente ou região." },
         { "name": "qt_quantity", "type": "numeric(7,2)", "nullable": false, "default": "1", "description": "Quantidade." },
         { "name": "vl_unit", "type": "numeric(12,2)", "nullable": false, "default": "0", "description": "Valor unitário (padrão: valor cobrado hoje do procedimento)." },
-        { "name": "vl_total", "type": "numeric(14,2)", "nullable": false, "default": "0", "description": "Quantidade × valor unitário." }
+        { "name": "vl_total", "type": "numeric(14,2)", "nullable": false, "default": "0", "description": "Quantidade × valor unitário." },
+        { "name": "dt_done", "type": "date", "nullable": true, "description": "Data em que o item foi realizado (evolução clínica ligada); nulo = a fazer." },
+        { "name": "nr_evolution", "type": "bigint", "nullable": true, "description": "Evolução clínica (clinical_evolution.nr_evolution do paciente) que registrou a realização." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "anamnesis_model",
+      "title": "Modelo de anamnese",
+      "description": "Modelo (questionário) de anamnese da filial, opcionalmente de uma especialidade. O modelo \"Geral\" com as perguntas usuais é criado na primeira consulta (od.fn_anamnesis_default). nr_model é sequencial por filial.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via anamnesis_model_save (tela SETTINGS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "branch.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "branch.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_model", "type": "bigint", "pk": 3, "nullable": false, "description": "Número sequencial do modelo na filial." },
+        { "name": "vc_name", "type": "varchar(80)", "nullable": false, "description": "Nome do modelo (ex. Geral, Ortodontia)." },
+        { "name": "nr_specialty", "type": "bigint", "fk": "specialty.nr_specialty", "nullable": true, "description": "Especialidade a que o modelo se destina (nulo = qualquer)." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação do modelo.", "values": {"1": "Ativo", "90": "Inativo"} }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "anamnesis_question",
+      "title": "Pergunta do modelo de anamnese",
+      "description": "Perguntas do modelo, na ordem de nr_question. id_alert: resposta \"sim\" vira alerta no prontuário. Substituídas inteiras a cada alteração do modelo (as anamneses preenchidas guardam a própria cópia).",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via anamnesis_model_save (tela SETTINGS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "anamnesis_model.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "anamnesis_model.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_model", "type": "bigint", "pk": 3, "fk": "anamnesis_model.nr_model", "nullable": false, "description": "Modelo." },
+        { "name": "nr_question", "type": "smallint", "pk": 4, "nullable": false, "description": "Ordem da pergunta." },
+        { "name": "vc_question", "type": "varchar(200)", "nullable": false, "description": "Texto da pergunta." },
+        { "name": "it_type", "type": "smallint", "nullable": false, "default": "1", "description": "Tipo de resposta.", "values": {"1": "Sim/não", "2": "Texto livre", "3": "Sim/não com detalhe"} },
+        { "name": "id_alert", "type": "boolean", "nullable": false, "default": "false", "description": "Resposta \"sim\" gera alerta no prontuário (não vale para texto livre)." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "patient_anamnesis",
+      "title": "Anamnese do paciente",
+      "description": "Anamnese preenchida do paciente a partir de um modelo, com cópia do nome do modelo e das perguntas para o histórico não mudar. A mais recente define os alertas do prontuário. Exclusão lógica.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_anamnesis_save (tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_anamnesis", "type": "bigint", "pk": 4, "nullable": false, "description": "Número sequencial da anamnese do paciente." },
+        { "name": "nr_model", "type": "bigint", "fk": "anamnesis_model.nr_model", "nullable": true, "description": "Modelo usado." },
+        { "name": "vc_model", "type": "varchar(80)", "nullable": false, "description": "Nome do modelo no momento do preenchimento." },
+        { "name": "dt_filled", "type": "date", "nullable": false, "description": "Data do preenchimento (não pode ser futura)." },
+        { "name": "vc_notes", "type": "varchar(2000)", "nullable": true, "description": "Observações gerais." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação.", "values": {"1": "Ativo", "90": "Excluído"} },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "patient_anamnesis_answer",
+      "title": "Resposta da anamnese",
+      "description": "Respostas da anamnese do paciente, com a cópia da pergunta e do tipo. id_alert marca a resposta \"sim\" de pergunta de alerta.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_anamnesis_save (tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient_anamnesis.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient_anamnesis.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient_anamnesis.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_anamnesis", "type": "bigint", "pk": 4, "fk": "patient_anamnesis.nr_anamnesis", "nullable": false, "description": "Anamnese." },
+        { "name": "nr_question", "type": "smallint", "pk": 5, "nullable": false, "description": "Ordem da pergunta." },
+        { "name": "vc_question", "type": "varchar(200)", "nullable": false, "description": "Texto da pergunta no momento do preenchimento." },
+        { "name": "it_type", "type": "smallint", "nullable": false, "description": "Tipo de resposta.", "values": {"1": "Sim/não", "2": "Texto livre", "3": "Sim/não com detalhe"} },
+        { "name": "id_yes", "type": "boolean", "nullable": true, "description": "Resposta sim/não (nulo = não respondida ou texto livre)." },
+        { "name": "vc_text", "type": "varchar(1000)", "nullable": true, "description": "Texto da resposta ou detalhe do \"sim\"." },
+        { "name": "id_alert", "type": "boolean", "nullable": false, "default": "false", "description": "Resposta gera alerta no prontuário." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "clinical_evolution",
+      "title": "Evolução clínica",
+      "description": "Registro do atendimento no prontuário: texto, profissional, dente/região, procedimento e, quando ligado, o item de orçamento aprovado realizado (budget_item.dt_done). Não se altera depois de gravada; exclusão lógica desmarca o item. nr_evolution é sequencial por paciente.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via clinical_evolution_save (tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_evolution", "type": "bigint", "pk": 4, "nullable": false, "description": "Número sequencial da evolução do paciente." },
+        { "name": "dh_evolution", "type": "timestamptz", "nullable": false, "default": "now()", "description": "Data e hora do atendimento (não pode ser futura)." },
+        { "name": "nr_professional", "type": "bigint", "fk": "professional.nr_professional", "nullable": true, "description": "Profissional que atendeu." },
+        { "name": "vc_text", "type": "varchar(4000)", "nullable": false, "description": "Descrição do atendimento." },
+        { "name": "vc_tooth", "type": "varchar(40)", "nullable": true, "description": "Dente ou região." },
+        { "name": "nr_procedure", "type": "bigint", "fk": "procedure.nr_procedure", "nullable": true, "description": "Procedimento realizado (padrão: o do item do orçamento)." },
+        { "name": "nr_budget", "type": "bigint", "fk": "budget_item.nr_budget", "nullable": true, "description": "Orçamento do item realizado." },
+        { "name": "nr_item", "type": "smallint", "fk": "budget_item.nr_item", "nullable": true, "description": "Item do orçamento realizado." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação.", "values": {"1": "Ativo", "90": "Excluído"} },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "tooth_mark",
+      "title": "Marcação do odontograma",
+      "description": "Odontograma do paciente: uma linha por marcação de dente (numeração FDI: 11 a 48 permanentes, 51 a 85 decíduos), condição, faces e situação (existente, a tratar, realizado). Exclusão lógica.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via tooth_mark_save (tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_mark", "type": "bigint", "pk": 4, "nullable": false, "description": "Número sequencial da marcação do paciente." },
+        { "name": "vc_tooth", "type": "varchar(2)", "nullable": false, "description": "Dente na numeração FDI (ex. 11, 36, 55)." },
+        { "name": "it_condition", "type": "smallint", "nullable": false, "description": "Condição marcada.", "values": {"1": "Cárie", "2": "Restauração", "3": "Ausente/extraído", "4": "Implante", "5": "Coroa/prótese", "6": "Tratamento de canal", "7": "Extração indicada", "8": "Fratura", "9": "Selante", "10": "Outro"} },
+        { "name": "vc_faces", "type": "varchar(5)", "nullable": true, "description": "Faces: M mesial, D distal, O oclusal, V vestibular, L lingual, I incisal, P palatina." },
+        { "name": "it_situation", "type": "smallint", "nullable": false, "default": "1", "description": "Situação da condição.", "values": {"1": "Existente", "2": "A tratar", "3": "Realizado"} },
+        { "name": "vc_notes", "type": "varchar(300)", "nullable": true, "description": "Observação." },
+        { "name": "dt_mark", "type": "date", "nullable": false, "description": "Data da marcação." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação do registro.", "values": {"1": "Ativo", "90": "Excluído"} },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
       ]
     },
     {
@@ -1044,6 +1158,14 @@
     { "from": "fin_entry", "to": "fin_attachment", "card": "||--o{", "label": "anexa" },
     { "from": "patient", "to": "budget", "card": "||--o{", "label": "orçamentos" },
     { "from": "budget", "to": "budget_item", "card": "||--|{", "label": "itens" },
+    { "from": "anamnesis_model", "to": "anamnesis_question", "card": "||--|{", "label": "perguntas" },
+    { "from": "patient", "to": "patient_anamnesis", "card": "||--o{", "label": "anamneses" },
+    { "from": "anamnesis_model", "to": "patient_anamnesis", "card": "||--o{", "label": "preenchida" },
+    { "from": "patient_anamnesis", "to": "patient_anamnesis_answer", "card": "||--|{", "label": "respostas" },
+    { "from": "patient", "to": "clinical_evolution", "card": "||--o{", "label": "evoluções" },
+    { "from": "budget_item", "to": "clinical_evolution", "card": "||--o|", "label": "realizado" },
+    { "from": "professional", "to": "clinical_evolution", "card": "||--o{", "label": "atendeu" },
+    { "from": "patient", "to": "tooth_mark", "card": "||--o{", "label": "odontograma" },
     { "from": "procedure", "to": "budget_item", "card": "||--o{", "label": "orçado" },
     { "from": "budget", "to": "fin_entry", "card": "||--o{", "label": "gera contas" },
     { "from": "fin_entry", "to": "fin_receipt", "card": "||--o{", "label": "recibos" },
@@ -1217,6 +1339,7 @@
     { "name": "fin_transfer_save", "signature": "ad.fin_transfer_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Transferência entre contas, sangria ou suprimento (I, criar) e cancelamento (CANCEL, alterar; não vale com o caixa da sessão fechado). Entra no caixa aberto da conta caixa envolvida. Grava event_log.",
       "errors": ["VERSION_MISMATCH", "FINANCE_BRANCH_REQUIRED", "FIN_TRANSFER_ACTION_INVALID", "FIN_TRANSFER_FORBIDDEN", "FIN_TRANSFER_VALUE_INVALID", "FIN_TRANSFER_TYPE_INVALID", "FIN_TRANSFER_ACCOUNT_INVALID", "FIN_TRANSFER_SAME_ACCOUNT", "FIN_TRANSFER_AMOUNT_INVALID", "FIN_TRANSFER_REQUIRED", "FIN_TRANSFER_NOT_FOUND", "FIN_TRANSFER_STATUS_INVALID", "FIN_CASH_SESSION_CLOSED", "FIN_BANK_RECONCILED"] },
     { "name": "fn_procedure_min_price", "signature": "od.fn_procedure_min_price(p_nr_company bigint, p_nr_branch bigint, p_nr_procedure bigint)", "kind": "helper", "grant": "interna", "description": "Preço mínimo (lucro zero) de um procedimento pela fórmula da precificação, sem exigir a tela PRICING; usado na regra de orçamento abaixo do mínimo." },
+    { "name": "fn_anamnesis_default", "signature": "od.fn_anamnesis_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)", "kind": "helper", "grant": "interna", "description": "Cria o modelo de anamnese Geral (16 perguntas usuais, com alertas de saúde) quando a filial ainda não tem modelo; usado por anamnesis_model_list." },
     { "name": "fn_fin_open_session", "signature": "od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)", "kind": "helper", "grant": "interna", "description": "Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela." },
     { "name": "fn_fin_late_charge", "signature": "od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)", "kind": "helper", "grant": "interna", "description": "Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}." },
     { "name": "fn_patient_overdue", "signature": "od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)", "kind": "helper", "grant": "interna", "description": "Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}." },
@@ -1254,6 +1377,12 @@
     { "name": "fin_receipt_issue", "signature": "ad.fin_receipt_issue(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Emite o recibo de uma conta a receber paga (criar na tela FINANCE) com o próximo número da filial; se já existe recibo ativo devolve o mesmo (id_existing). Pagador padrão: o paciente (nome e CPF); descrição padrão: a da conta. Devolve recibo e emitente. Grava event_log.", "errors": ["VERSION_MISMATCH", "FINANCE_BRANCH_REQUIRED", "FIN_RECEIPT_FORBIDDEN", "FIN_ENTRY_REQUIRED", "FIN_ENTRY_NOT_FOUND", "FIN_RECEIPT_NOT_PAID", "FIN_RECEIPT_PAYER_REQUIRED", "FIN_RECEIPT_DOCUMENT_INVALID"] },
     { "name": "fin_receipt_get", "signature": "ad.fin_receipt_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Um recibo (por número ou o ativo da conta) com os dados da clínica emitente (razão social, CNPJ, endereço, responsável técnico) para o PDF. Exige ler na tela FINANCE.", "errors": ["VERSION_MISMATCH", "FINANCE_BRANCH_REQUIRED", "FINANCE_FORBIDDEN", "FIN_RECEIPT_NOT_FOUND"] },
     { "name": "fin_receipt_cancel", "signature": "ad.fin_receipt_cancel(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cancela um recibo emitido com o motivo (alterar na tela FINANCE); o número não é reaproveitado. Grava event_log.", "errors": ["VERSION_MISMATCH", "FINANCE_BRANCH_REQUIRED", "FIN_RECEIPT_FORBIDDEN", "FIN_RECEIPT_NOT_FOUND", "FIN_RECEIPT_REASON_REQUIRED"] },
+    { "name": "anamnesis_model_list", "signature": "ad.anamnesis_model_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Modelos de anamnese da filial com as perguntas (cria o modelo Geral na primeira chamada). Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = pode editar (alterar em SETTINGS).", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN"] },
+    { "name": "anamnesis_model_save", "signature": "ad.anamnesis_model_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I) ou altera parcialmente (U) um modelo de anamnese: nome, especialidade, situação e as perguntas (substituídas inteiras). Exige alterar na tela SETTINGS. Grava event_log.", "errors": ["VERSION_MISMATCH", "ANAMNESIS_MODEL_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "ANAMNESIS_MODEL_FORBIDDEN", "ANAMNESIS_MODEL_NOT_FOUND", "ANAMNESIS_MODEL_NAME_REQUIRED", "ANAMNESIS_MODEL_SPECIALTY_INVALID", "ANAMNESIS_MODEL_QUESTIONS_REQUIRED", "ANAMNESIS_QUESTION_INVALID", "ANAMNESIS_MODEL_VALUE_INVALID"] },
+    { "name": "patient_anamnesis_save", "signature": "ad.patient_anamnesis_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Preenche (I, criar ou alterar) ou exclui (D, alterar) uma anamnese do paciente na tela PATIENTS: copia as perguntas do modelo e grava as respostas; \"sim\" em pergunta de alerta vira alerta. Grava event_log sem as respostas.", "errors": ["VERSION_MISMATCH", "PATIENT_ANAMNESIS_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "PATIENT_ANAMNESIS_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "ANAMNESIS_MODEL_NOT_FOUND", "PATIENT_ANAMNESIS_VALUE_INVALID", "PATIENT_ANAMNESIS_NOT_FOUND"] },
+    { "name": "clinical_evolution_save", "signature": "ad.clinical_evolution_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Registra (I, criar ou alterar) ou exclui (D, alterar) uma evolução clínica na tela PATIENTS; com nr_budget/nr_item marca o item do orçamento aprovado como realizado (e a exclusão desmarca). Grava event_log sem o texto.", "errors": ["VERSION_MISMATCH", "CLINICAL_EVOLUTION_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "CLINICAL_EVOLUTION_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "CLINICAL_EVOLUTION_TEXT_REQUIRED", "CLINICAL_EVOLUTION_VALUE_INVALID", "CLINICAL_EVOLUTION_PROFESSIONAL_INVALID", "CLINICAL_EVOLUTION_PROCEDURE_INVALID", "CLINICAL_EVOLUTION_ITEM_INVALID", "CLINICAL_EVOLUTION_NOT_FOUND"] },
+    { "name": "tooth_mark_save", "signature": "ad.tooth_mark_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log.", "errors": ["VERSION_MISMATCH", "TOOTH_MARK_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "TOOTH_MARK_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "TOOTH_MARK_TOOTH_INVALID", "TOOTH_MARK_VALUE_INVALID", "TOOTH_MARK_NOT_FOUND"] },
+    { "name": "patient_record_get", "signature": "ad.patient_record_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND"] },
     { "name": "budget_list", "signature": "ad.budget_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS.", "errors": ["VERSION_MISMATCH", "BUDGET_BRANCH_REQUIRED", "BUDGET_FORBIDDEN", "BUDGET_FILTER_INVALID"] },
     { "name": "budget_get", "signature": "ad.budget_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS.", "errors": ["VERSION_MISMATCH", "BUDGET_BRANCH_REQUIRED", "BUDGET_FORBIDDEN", "BUDGET_NOT_FOUND"] },
     { "name": "budget_save", "signature": "ad.budget_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado.", "errors": ["VERSION_MISMATCH", "BUDGET_ACTION_INVALID", "BUDGET_BRANCH_REQUIRED", "BUDGET_FORBIDDEN", "BUDGET_REQUIRED", "BUDGET_NOT_FOUND", "BUDGET_STATUS_INVALID", "BUDGET_VALUE_INVALID", "BUDGET_PATIENT_INVALID", "BUDGET_PROFESSIONAL_INVALID", "BUDGET_DATE_INVALID", "BUDGET_ITEMS_REQUIRED", "BUDGET_ITEM_INVALID", "BUDGET_PROCEDURE_INVALID", "BUDGET_DISCOUNT_INVALID", "BUDGET_DISCOUNT_OVER_MAX", "BUDGET_BELOW_MIN"] },

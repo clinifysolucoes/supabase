@@ -1,0 +1,154 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_anamnesis_save(jsonb)                              ::
+  ::  UsedBy      : Flutter -> rpc('patient_anamnesis_save') (prontuario)         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Anamnese do paciente (tela PATIENTS).
+      vc_action = 'I'  preenche uma anamnese a partir de um modelo: copia as
+                       perguntas e grava as respostas      -> CRIAR ou ALTERAR
+      vc_action = 'D'  exclui (it_status 90)               -> ALTERAR
+    Resposta "sim" em pergunta marcada como alerta vira alerta do prontuario.
+    Grava ad.event_log (sem as respostas: dado de saude).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     obrigatorio 'I' | 'D'
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_model     bigint   obrigatorio em 'I'
+    dt_filled    date     opcional (padrao hoje)
+    vc_notes     text     opcional (ate 2000)
+    answers      array    [{"nr_question", "id_yes", "vc_text"}] (perguntas sem resposta ficam vazias)
+    nr_anamnesis bigint   obrigatorio em 'D'
+
+  Output jsonb: {"nr_anamnesis", "qt_alerts"}
+
+  Errors: VERSION_MISMATCH, PATIENT_ANAMNESIS_ACTION_INVALID, RECORD_BRANCH_REQUIRED,
+    PATIENT_ANAMNESIS_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND, ANAMNESIS_MODEL_NOT_FOUND,
+    PATIENT_ANAMNESIS_VALUE_INVALID, PATIENT_ANAMNESIS_NOT_FOUND
+*/
+create or replace function ad.patient_anamnesis_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_model   bigint;
+  _nr_anam    bigint;
+  _perm       jsonb;
+  _vc_name    text;
+  _vc_model   text;
+  _dt         date;
+  _answers    jsonb := '{}'::jsonb;
+  _a          jsonb;
+  _alerts     integer := 0;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_anamnesis_save');
+  if _action not in ('I', 'D') then
+    raise exception '%', ad.fn_message('PATIENT_ANAMNESIS_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
+     or (_action = 'D' and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PATIENT_ANAMNESIS_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _vc_name
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  if _action = 'D' then
+    _nr_anam := (p_json ->> 'nr_anamnesis')::bigint;
+    update od.patient_anamnesis a set it_status = 90
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_patient = _nr_patient
+       and a.nr_anamnesis = _nr_anam and a.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('PATIENT_ANAMNESIS_NOT_FOUND');
+    end if;
+  else
+    _nr_model := (p_json ->> 'nr_model')::bigint;
+    select m.vc_name into _vc_model
+      from od.anamnesis_model m
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_model = _nr_model and m.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('ANAMNESIS_MODEL_NOT_FOUND');
+    end if;
+    begin
+      _dt := coalesce((p_json ->> 'dt_filled')::date, current_date);
+      if p_json ? 'answers' then
+        if jsonb_typeof(p_json -> 'answers') <> 'array' then
+          raise exception 'invalid';
+        end if;
+        for _a in select * from jsonb_array_elements(p_json -> 'answers') loop
+          _answers := _answers || jsonb_build_object(((_a ->> 'nr_question')::smallint)::text, _a);
+        end loop;
+      end if;
+    exception when others then
+      raise exception '%', ad.fn_message('PATIENT_ANAMNESIS_VALUE_INVALID');
+    end;
+    if _dt > current_date then
+      raise exception '%', ad.fn_message('PATIENT_ANAMNESIS_VALUE_INVALID');
+    end if;
+
+    select coalesce(max(a.nr_anamnesis), 0) + 1 into _nr_anam
+      from od.patient_anamnesis a
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_patient = _nr_patient;
+    insert into od.patient_anamnesis (nr_company, nr_branch, nr_patient, nr_anamnesis, nr_model, vc_model,
+                                      dt_filled, vc_notes, nr_user, nr_operator)
+    values (_nr_company, _nr_branch, _nr_patient, _nr_anam, _nr_model, _vc_model, _dt,
+            left(nullif(trim(p_json ->> 'vc_notes'), ''), 2000), _nr_user, _nr_user);
+
+    insert into od.patient_anamnesis_answer (nr_company, nr_branch, nr_patient, nr_anamnesis, nr_question,
+                                             vc_question, it_type, id_yes, vc_text, id_alert, nr_operator)
+    select _nr_company, _nr_branch, _nr_patient, _nr_anam, q.nr_question, q.vc_question, q.it_type,
+           case when q.it_type in (1, 3) then (_answers -> q.nr_question::text ->> 'id_yes')::boolean end,
+           case when q.it_type in (2, 3) then left(nullif(trim(_answers -> q.nr_question::text ->> 'vc_text'), ''), 1000) end,
+           q.id_alert and q.it_type in (1, 3)
+             and coalesce((_answers -> q.nr_question::text ->> 'id_yes')::boolean, false),
+           _nr_user
+      from od.anamnesis_question q
+     where q.nr_company = _nr_company and q.nr_branch = _nr_branch and q.nr_model = _nr_model;
+
+    select count(*) into _alerts
+      from od.patient_anamnesis_answer r
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_patient = _nr_patient
+       and r.nr_anamnesis = _nr_anam and r.id_alert;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS', case when _action = 'I' then 'CREATE' else 'DELETE' end,
+    'patient_anamnesis', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_anam::text,
+    format('Anamnese %s no paciente %s', case when _action = 'I' then 'preenchida' else 'excluída' end, _vc_name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_anamnesis', _nr_anam, 'qt_alerts', _alerts));
+
+  return jsonb_build_object('nr_anamnesis', _nr_anam, 'qt_alerts', _alerts);
+end;
+$$;
+
+revoke all on function ad.patient_anamnesis_save(jsonb) from public, anon;
+grant execute on function ad.patient_anamnesis_save(jsonb) to authenticated;

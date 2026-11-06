@@ -1,0 +1,142 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_record_get(jsonb)                                  ::
+  ::  UsedBy      : Flutter -> rpc('patient_record_get') (prontuario)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Prontuario do paciente (LER na tela PATIENTS): anamneses com respostas,
+    alertas da anamnese mais recente, evolucoes clinicas, marcacoes do
+    odontograma e itens de orcamento aprovado ainda nao realizados.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+
+  Output jsonb:
+    {"alerts": [{"vc_question", "vc_text"}],
+     "anamneses": [{"nr_anamnesis", "nr_model", "vc_model", "dt_filled", "vc_notes", "vc_user", "dh_created",
+                    "answers": [{"nr_question", "vc_question", "it_type", "id_yes", "vc_text", "id_alert"}]}],
+     "evolutions": [{"nr_evolution", "dh_evolution", "nr_professional", "vc_professional", "vc_text",
+                     "vc_tooth", "nr_procedure", "vc_procedure", "nr_budget", "nr_item", "vc_user"}],
+     "marks": [{"nr_mark", "vc_tooth", "it_condition", "vc_faces", "it_situation", "vc_notes", "dt_mark"}],
+     "pending_items": [{"nr_budget", "nr_item", "vc_description", "vc_tooth", "nr_procedure", "dt_budget"}],
+     "done_items": [{"nr_budget", "nr_item", "vc_description", "vc_tooth", "dt_done", "nr_evolution"}],
+     "permission": {"id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND
+*/
+create or replace function ad.patient_record_get(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _perm       jsonb;
+  _last       bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_record_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  if not exists (select 1 from od.patient p where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                              and p.nr_patient = _nr_patient) then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  select a.nr_anamnesis into _last
+    from od.patient_anamnesis a
+   where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_patient = _nr_patient and a.it_status = 1
+   order by a.dt_filled desc, a.nr_anamnesis desc
+   limit 1;
+
+  return jsonb_build_object(
+    'alerts', coalesce((
+      select jsonb_agg(jsonb_build_object('vc_question', r.vc_question, 'vc_text', r.vc_text) order by r.nr_question)
+        from od.patient_anamnesis_answer r
+       where r.nr_company = _nr_company and r.nr_branch = _nr_branch and r.nr_patient = _nr_patient
+         and r.nr_anamnesis = _last and r.id_alert), '[]'::jsonb),
+    'anamneses', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_anamnesis', a.nr_anamnesis, 'nr_model', a.nr_model, 'vc_model', a.vc_model,
+               'dt_filled', a.dt_filled, 'vc_notes', a.vc_notes, 'vc_user', u.vc_name, 'dh_created', a.dh_created,
+               'answers', coalesce((select jsonb_agg(jsonb_build_object(
+                    'nr_question', r.nr_question, 'vc_question', r.vc_question, 'it_type', r.it_type,
+                    'id_yes', r.id_yes, 'vc_text', r.vc_text, 'id_alert', r.id_alert) order by r.nr_question)
+                  from od.patient_anamnesis_answer r
+                 where r.nr_company = a.nr_company and r.nr_branch = a.nr_branch and r.nr_patient = a.nr_patient
+                   and r.nr_anamnesis = a.nr_anamnesis), '[]'::jsonb))
+             order by a.dt_filled desc, a.nr_anamnesis desc)
+        from od.patient_anamnesis a
+        left join ad.app_user u on u.nr_user = a.nr_user
+       where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_patient = _nr_patient
+         and a.it_status = 1), '[]'::jsonb),
+    'evolutions', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_evolution', e.nr_evolution, 'dh_evolution', e.dh_evolution,
+               'nr_professional', e.nr_professional, 'vc_professional', pr.vc_name,
+               'vc_text', e.vc_text, 'vc_tooth', e.vc_tooth, 'nr_procedure', e.nr_procedure,
+               'vc_procedure', pc.vc_name, 'nr_budget', e.nr_budget, 'nr_item', e.nr_item, 'vc_user', u.vc_name)
+             order by e.dh_evolution desc, e.nr_evolution desc)
+        from od.clinical_evolution e
+        left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
+                                    and pr.nr_professional = e.nr_professional
+        left join od.procedure pc on pc.nr_company = e.nr_company and pc.nr_branch = e.nr_branch
+                                 and pc.nr_procedure = e.nr_procedure
+        left join ad.app_user u on u.nr_user = e.nr_user
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+         and e.it_status = 1), '[]'::jsonb),
+    'marks', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_mark', t.nr_mark, 'vc_tooth', t.vc_tooth, 'it_condition', t.it_condition,
+               'vc_faces', t.vc_faces, 'it_situation', t.it_situation, 'vc_notes', t.vc_notes, 'dt_mark', t.dt_mark)
+             order by t.vc_tooth, t.nr_mark)
+        from od.tooth_mark t
+       where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient
+         and t.it_status = 1), '[]'::jsonb),
+    'pending_items', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_budget', i.nr_budget, 'nr_item', i.nr_item, 'vc_description', i.vc_description,
+               'vc_tooth', i.vc_tooth, 'nr_procedure', i.nr_procedure, 'dt_budget', b.dt_budget)
+             order by b.dt_budget, i.nr_budget, i.nr_item)
+        from od.budget b
+        join od.budget_item i on i.nr_company = b.nr_company and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget
+       where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_patient = _nr_patient
+         and b.it_status = 3 and i.dt_done is null), '[]'::jsonb),
+    'done_items', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_budget', i.nr_budget, 'nr_item', i.nr_item, 'vc_description', i.vc_description,
+               'vc_tooth', i.vc_tooth, 'dt_done', i.dt_done, 'nr_evolution', i.nr_evolution)
+             order by i.dt_done desc, i.nr_budget, i.nr_item)
+        from od.budget b
+        join od.budget_item i on i.nr_company = b.nr_company and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget
+       where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_patient = _nr_patient
+         and i.dt_done is not null), '[]'::jsonb),
+    'permission', jsonb_build_object(
+      'id_create', coalesce((_perm ->> 'id_create')::boolean, false) or coalesce((_perm ->> 'id_update')::boolean, false),
+      'id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.patient_record_get(jsonb) from public, anon;
+grant execute on function ad.patient_record_get(jsonb) to authenticated;
