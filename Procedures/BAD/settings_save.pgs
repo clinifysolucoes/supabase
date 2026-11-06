@@ -1,0 +1,146 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.settings_save(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> rpc('settings_save') (tela Configuracoes)          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava as preferencias da filial (od.branch_setting, criada na primeira
+    vez) com update parcial: chave presente altera, ausente mantem. Com
+    "hours" (lista, pode ser vazia) substitui o horario de funcionamento.
+    Permissao ALTERAR da tela SETTINGS. Dados da clinica ficam em
+    ad.branch_update (administrador). Grava ad.event_log.
+
+  Input p_json:
+    nr_version              integer  obrigatorio = 1
+    nr_company, nr_branch   bigint   obrigatorios
+    qt_slot_minutes         integer  opcional 5 | 15 | 20 | 30
+    qt_max_parallel         integer  opcional 1..20 (consultas do mesmo profissional no mesmo horario)
+    id_allow_outside_hours  boolean  opcional (agendar fora do horario de atendimento)
+    id_auto_record_number   boolean  opcional (numero de prontuario automatico)
+    nr_next_record          bigint   opcional >= 1 (proximo numero)
+    id_require_cpf, id_require_mobile  boolean  opcionais (obrigatorios no cadastro do paciente)
+    hours                   array    opcional [{"it_weekday": 0..6, "qt_minute_start", "qt_minute_end"}]
+
+  Output jsonb: o mesmo de ad.settings_get
+
+  Errors: VERSION_MISMATCH, SETTINGS_BRANCH_REQUIRED, SETTINGS_FORBIDDEN, SETTINGS_VALUE_INVALID,
+    SETTINGS_SLOT_INVALID, SETTINGS_PARALLEL_INVALID, SETTINGS_RECORD_INVALID, SETTINGS_HOURS_INVALID
+*/
+create or replace function ad.settings_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _cur        od.branch_setting%rowtype;
+  _new        od.branch_setting%rowtype;
+  _h          jsonb;
+  _i          integer := 0;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'settings_save');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('SETTINGS_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not (ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean then
+    raise exception '%', ad.fn_message('SETTINGS_FORBIDDEN');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select * into _cur from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+  if not found then
+    _cur.qt_slot_minutes := 15;
+    _cur.qt_max_parallel := 1;
+    _cur.id_allow_outside_hours := true;
+    _cur.id_auto_record_number := false;
+    _cur.nr_next_record := 1;
+    _cur.id_require_cpf := false;
+    _cur.id_require_mobile := false;
+  end if;
+
+  begin
+    _new.qt_slot_minutes        := case when p_json ? 'qt_slot_minutes'        then (p_json ->> 'qt_slot_minutes')::smallint       else _cur.qt_slot_minutes end;
+    _new.qt_max_parallel        := case when p_json ? 'qt_max_parallel'        then (p_json ->> 'qt_max_parallel')::smallint       else _cur.qt_max_parallel end;
+    _new.id_allow_outside_hours := case when p_json ? 'id_allow_outside_hours' then (p_json ->> 'id_allow_outside_hours')::boolean else _cur.id_allow_outside_hours end;
+    _new.id_auto_record_number  := case when p_json ? 'id_auto_record_number'  then (p_json ->> 'id_auto_record_number')::boolean  else _cur.id_auto_record_number end;
+    _new.nr_next_record         := case when p_json ? 'nr_next_record'         then (p_json ->> 'nr_next_record')::bigint          else _cur.nr_next_record end;
+    _new.id_require_cpf         := case when p_json ? 'id_require_cpf'         then (p_json ->> 'id_require_cpf')::boolean         else _cur.id_require_cpf end;
+    _new.id_require_mobile      := case when p_json ? 'id_require_mobile'      then (p_json ->> 'id_require_mobile')::boolean      else _cur.id_require_mobile end;
+  exception when others then
+    raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
+  end;
+  if _new.qt_slot_minutes is null or _new.qt_slot_minutes not in (5, 15, 20, 30) then
+    raise exception '%', ad.fn_message('SETTINGS_SLOT_INVALID');
+  end if;
+  if _new.qt_max_parallel is null or _new.qt_max_parallel not between 1 and 20 then
+    raise exception '%', ad.fn_message('SETTINGS_PARALLEL_INVALID');
+  end if;
+  if _new.nr_next_record is null or _new.nr_next_record < 1 then
+    raise exception '%', ad.fn_message('SETTINGS_RECORD_INVALID');
+  end if;
+  if _new.id_allow_outside_hours is null or _new.id_auto_record_number is null
+     or _new.id_require_cpf is null or _new.id_require_mobile is null then
+    raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
+  end if;
+
+  insert into od.branch_setting (nr_company, nr_branch, qt_slot_minutes, qt_max_parallel, id_allow_outside_hours,
+                                 id_auto_record_number, nr_next_record, id_require_cpf, id_require_mobile, nr_operator)
+  values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
+          _new.id_auto_record_number, _new.nr_next_record, _new.id_require_cpf, _new.id_require_mobile, _nr_user)
+  on conflict (nr_company, nr_branch) do update set
+    qt_slot_minutes        = excluded.qt_slot_minutes,
+    qt_max_parallel        = excluded.qt_max_parallel,
+    id_allow_outside_hours = excluded.id_allow_outside_hours,
+    id_auto_record_number  = excluded.id_auto_record_number,
+    nr_next_record         = excluded.nr_next_record,
+    id_require_cpf         = excluded.id_require_cpf,
+    id_require_mobile      = excluded.id_require_mobile;
+
+  if p_json ? 'hours' then
+    if jsonb_typeof(p_json -> 'hours') <> 'array' then
+      raise exception '%', ad.fn_message('SETTINGS_HOURS_INVALID');
+    end if;
+    delete from od.branch_hour h where h.nr_company = _nr_company and h.nr_branch = _nr_branch;
+    for _h in select * from jsonb_array_elements(p_json -> 'hours') loop
+      _i := _i + 1;
+      begin
+        insert into od.branch_hour (nr_company, nr_branch, nr_hour, it_weekday, qt_minute_start, qt_minute_end, nr_operator)
+        values (_nr_company, _nr_branch, _i, (_h ->> 'it_weekday')::smallint,
+                (_h ->> 'qt_minute_start')::smallint, (_h ->> 'qt_minute_end')::smallint, _nr_user);
+      exception when others then
+        raise exception '%', ad.fn_message('SETTINGS_HOURS_INVALID');
+      end;
+    end loop;
+    if exists (select 1 from od.branch_hour a join od.branch_hour b
+                 on b.nr_company = a.nr_company and b.nr_branch = a.nr_branch and b.it_weekday = a.it_weekday
+                and b.nr_hour > a.nr_hour and b.qt_minute_start < a.qt_minute_end and a.qt_minute_start < b.qt_minute_end
+                where a.nr_company = _nr_company and a.nr_branch = _nr_branch) then
+      raise exception '%', ad.fn_message('SETTINGS_HOURS_INVALID');
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', 'UPDATE',
+    'branch_setting', _nr_company::text || '/' || _nr_branch::text,
+    'Configurações da filial alteradas',
+    (p_json - 'nr_version' - 'nr_company' - 'nr_branch'));
+
+  return ad.settings_get(jsonb_build_object('nr_version', 1, 'nr_company', _nr_company, 'nr_branch', _nr_branch));
+end;
+$$;
+
+revoke all on function ad.settings_save(jsonb) from public, anon;
+grant execute on function ad.settings_save(jsonb) to authenticated;

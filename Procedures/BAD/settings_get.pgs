@@ -1,0 +1,93 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.settings_get(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> rpc('settings_get') (Configuracoes, agenda, ficha) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 05/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Configuracoes da filial: dados da clinica (ad.branch), preferencias da
+    agenda e do cadastro de pacientes (od.branch_setting; sem linha = padroes)
+    e o horario de funcionamento. Qualquer usuario com acesso a filial le (a
+    agenda e a ficha do paciente seguem estas regras); o retorno diz se ele
+    pode alterar (tela SETTINGS) e se pode alterar os dados da clinica
+    (administrador da empresa).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company  bigint   obrigatorio
+    nr_branch   bigint   obrigatorio
+
+  Output jsonb:
+    {"clinic": {"vc_name", "vc_legal_name", "vc_cnpj", "vc_email", "vc_phone", "vc_phone_extra",
+                "vc_zip_code", "vc_address", "vc_address_number", "vc_address_extra", "vc_district",
+                "vc_city", "vc_state", "vc_timezone", "vc_technical_name", "vc_technical_cro",
+                "vc_technical_cro_state", "vc_forum_city"},
+     "settings": {"qt_slot_minutes", "qt_max_parallel", "id_allow_outside_hours",
+                  "id_auto_record_number", "nr_next_record", "id_require_cpf", "id_require_mobile"},
+     "hours": [{"it_weekday", "qt_minute_start", "qt_minute_end"}],
+     "permission": {"id_update", "id_clinic"}}
+
+  Errors: VERSION_MISMATCH, SETTINGS_BRANCH_REQUIRED, SETTINGS_FORBIDDEN
+*/
+create or replace function ad.settings_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _b          ad.branch%rowtype;
+  _s          od.branch_setting%rowtype;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'settings_get');
+
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('SETTINGS_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or (_nr_company, _nr_branch) not in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb) then
+    raise exception '%', ad.fn_message('SETTINGS_FORBIDDEN');
+  end if;
+
+  select * into _b from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  select * into _s from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+  return jsonb_build_object(
+    'clinic', jsonb_build_object(
+      'vc_name', _b.vc_name, 'vc_legal_name', _b.vc_legal_name, 'vc_cnpj', _b.vc_cnpj,
+      'vc_email', _b.vc_email, 'vc_phone', _b.vc_phone, 'vc_phone_extra', _b.vc_phone_extra,
+      'vc_zip_code', _b.vc_zip_code, 'vc_address', _b.vc_address, 'vc_address_number', _b.vc_address_number,
+      'vc_address_extra', _b.vc_address_extra, 'vc_district', _b.vc_district, 'vc_city', _b.vc_city,
+      'vc_state', _b.vc_state, 'vc_timezone', _b.vc_timezone, 'vc_technical_name', _b.vc_technical_name,
+      'vc_technical_cro', _b.vc_technical_cro, 'vc_technical_cro_state', _b.vc_technical_cro_state,
+      'vc_forum_city', _b.vc_forum_city),
+    'settings', jsonb_build_object(
+      'qt_slot_minutes',        coalesce(_s.qt_slot_minutes, 15),
+      'qt_max_parallel',        coalesce(_s.qt_max_parallel, 1),
+      'id_allow_outside_hours', coalesce(_s.id_allow_outside_hours, true),
+      'id_auto_record_number',  coalesce(_s.id_auto_record_number, false),
+      'nr_next_record',         coalesce(_s.nr_next_record, 1),
+      'id_require_cpf',         coalesce(_s.id_require_cpf, false),
+      'id_require_mobile',      coalesce(_s.id_require_mobile, false)),
+    'hours', coalesce((
+      select jsonb_agg(jsonb_build_object('it_weekday', h.it_weekday, 'qt_minute_start', h.qt_minute_start,
+                                          'qt_minute_end', h.qt_minute_end)
+                       order by h.it_weekday, h.qt_minute_start)
+        from od.branch_hour h where h.nr_company = _nr_company and h.nr_branch = _nr_branch), '[]'::jsonb),
+    'permission', jsonb_build_object(
+      'id_update', coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false),
+      'id_clinic', private.fn_is_company_admin(_nr_company)));
+end;
+$$;
+
+revoke all on function ad.settings_get(jsonb) from public, anon;
+grant execute on function ad.settings_get(jsonb) to authenticated;

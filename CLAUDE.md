@@ -64,6 +64,7 @@ Objetos principais:
 | `od.fin_attachment` / `ad.fin_attachment_save` / `ad.fin_attachment_list` + Edge Function `fin-attachment` | anexos das contas (documento e comprovante) no bucket privado `finance`; upload/download só por URL assinada da Edge Function, que valida pela RPC antes |
 | `ad.appointment_pending_checkout` / `od.fn_fin_receivable_details` | consultas passadas sem fechamento (aba A receber); dados do cartão e do cheque nos recebíveis; `fin_entry.dh_health_exported` marca o exportado para a Receita Saúde; `fin_account` com banco, agência e conta |
 | `od.fn_pricing_calc` / `od.fn_pricing_context` | fórmula do preço (única fonte) e resumo da filial |
+| `od.branch_setting` / `od.branch_hour` / `ad.settings_get` / `ad.settings_save` | tela Configurações (`SETTINGS`, uuid `...000000000009`): preferências da agenda (intervalo, consultas no mesmo horário, fora do expediente) e do cadastro de pacientes (prontuário automático, CPF/celular obrigatórios), horário de funcionamento; dados da clínica (responsável técnico, foro) em `ad.branch_update` |
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |
 | Edge Function `material-price-lookup` | pesquisa de preço de mercado de um material (Claude + web search; secret `ANTHROPIC_API_KEY`) |

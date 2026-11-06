@@ -55,7 +55,7 @@ begin
 
   -- catalogo de telas
   _r := ad.screen_list('{"nr_version": 1}'::jsonb);
-  assert jsonb_array_length(_r -> 'screens') = 8, 'deveriam existir 8 telas';
+  assert jsonb_array_length(_r -> 'screens') = 9, 'deveriam existir 9 telas';
   assert _r -> 'screens' -> 0 ->> 'vc_code' = 'DASHBOARD', 'DASHBOARD deveria vir primeiro';
   select (s ->> 'uu_screen')::uuid into _uu_users from jsonb_array_elements(_r -> 'screens') s where s ->> 'vc_code' = 'USERS';
   select (s ->> 'uu_screen')::uuid into _uu_prof  from jsonb_array_elements(_r -> 'screens') s where s ->> 'vc_code' = 'PROFILES';
@@ -110,8 +110,8 @@ begin
 
   -- admin: session_context traz todas as telas com tudo liberado
   _r := ad.session_context(jsonb_build_object('it_app', 1, 'nr_company', _ca, 'nr_branch', 1));
-  assert jsonb_array_length(_r -> 'companies' -> 0 -> 'branches' -> 0 -> 'permissions') = 8,
-    'admin deveria ter as 8 telas';
+  assert jsonb_array_length(_r -> 'companies' -> 0 -> 'branches' -> 0 -> 'permissions') = 9,
+    'admin deveria ter as 9 telas';
   assert (select bool_and((p ->> 'id_create')::boolean and (p ->> 'id_update')::boolean)
             from jsonb_array_elements(_r -> 'companies' -> 0 -> 'branches' -> 0 -> 'permissions') p),
     'admin deveria poder criar e alterar em todas';
@@ -197,7 +197,7 @@ do $$
 declare _r jsonb;
 begin
   _r := ad.screen_list('{"nr_version": 1}'::jsonb);
-  assert jsonb_array_length(_r -> 'screens') = 8, 'qualquer logado lista as telas';
+  assert jsonb_array_length(_r -> 'screens') = 9, 'qualquer logado lista as telas';
 end $$;
 
 reset role;

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - responsavel tecnico, telefone 2 e foro           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Atualizacao parcial dos dados da filial (somente administrador da empresa).
@@ -22,13 +22,16 @@
     vc_state_registration, vc_city_registration,
     vc_address, vc_address_number, vc_address_extra, vc_district, vc_city,
     vc_state, vc_zip_code, vc_timezone, id_main        opcionais (parciais)
+    vc_phone_extra, vc_technical_name, vc_technical_cro, vc_technical_cro_state,
+    vc_forum_city                                      opcionais (configuracoes da clinica)
 
   Output jsonb: linha completa de ad.branch.
 
   Errors: VERSION_MISMATCH, BRANCH_UPDATE_KEY_REQUIRED, BRANCH_UPDATE_FORBIDDEN,
     BRANCH_UPDATE_NOT_FOUND, BRANCH_UPDATE_NAME_REQUIRED, BRANCH_UPDATE_CNPJ_INVALID {Cnpj},
     BRANCH_UPDATE_CNPJ_IN_USE {Cnpj}, BRANCH_UPDATE_EMAIL_INVALID {Email},
-    BRANCH_UPDATE_TIMEZONE_INVALID {Timezone}
+    BRANCH_UPDATE_TIMEZONE_INVALID {Timezone}, BRANCH_UPDATE_PHONE_INVALID,
+    BRANCH_UPDATE_STATE_INVALID
 */
 
 create or replace function ad.branch_update(p_json jsonb)
@@ -45,6 +48,8 @@ declare
   _vc_email    varchar(200);
   _vc_timezone varchar(60);
   _row         ad.branch%rowtype;
+  _phone_extra text := nullif(regexp_replace(coalesce(p_json ->> 'vc_phone_extra', ''), '[^0-9]', '', 'g'), '');
+  _cro_state   text := upper(nullif(trim(coalesce(p_json ->> 'vc_technical_cro_state', '')), ''));
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'branch_update');
 
@@ -94,6 +99,13 @@ begin
     end if;
   end if;
 
+  if _phone_extra is not null and length(_phone_extra) not in (10, 11) then
+    raise exception '%', ad.fn_message('BRANCH_UPDATE_PHONE_INVALID');
+  end if;
+  if _cro_state is not null and (length(_cro_state) <> 2 or _cro_state ~ '[^A-Z]') then
+    raise exception '%', ad.fn_message('BRANCH_UPDATE_STATE_INVALID');
+  end if;
+
   /* Transferencia de matriz: so uma filial id_main por empresa (indice unico) */
   if coalesce((p_json ->> 'id_main')::boolean, false) then
     update ad.branch b set id_main = false
@@ -118,7 +130,12 @@ begin
     vc_state              = case when p_json ? 'vc_state'              then upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2))        else b.vc_state end,
     vc_zip_code           = case when p_json ? 'vc_zip_code'           then nullif(regexp_replace(coalesce(p_json ->> 'vc_zip_code', ''), '[^0-9]', '', 'g'), '') else b.vc_zip_code end,
     vc_timezone           = case when p_json ? 'vc_timezone'           then _vc_timezone else b.vc_timezone end,
-    id_main               = case when coalesce((p_json ->> 'id_main')::boolean, false) then true else b.id_main end
+    id_main               = case when coalesce((p_json ->> 'id_main')::boolean, false) then true else b.id_main end,
+    vc_phone_extra        = case when p_json ? 'vc_phone_extra'        then _phone_extra else b.vc_phone_extra end,
+    vc_technical_name     = case when p_json ? 'vc_technical_name'     then left(nullif(trim(p_json ->> 'vc_technical_name'), ''), 120)    else b.vc_technical_name end,
+    vc_technical_cro      = case when p_json ? 'vc_technical_cro'      then left(nullif(trim(p_json ->> 'vc_technical_cro'), ''), 20)      else b.vc_technical_cro end,
+    vc_technical_cro_state = case when p_json ? 'vc_technical_cro_state' then _cro_state else b.vc_technical_cro_state end,
+    vc_forum_city         = case when p_json ? 'vc_forum_city'         then left(nullif(trim(p_json ->> 'vc_forum_city'), ''), 60)         else b.vc_forum_city end
   where b.nr_company = _nr_company
     and b.nr_branch  = _nr_branch
   returning b.* into _row;

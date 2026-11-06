@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 05/11/2026 - limite no mesmo horario e fora do expediente     ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda: cria ou altera uma consulta ou um compromisso.
@@ -49,7 +49,13 @@
     APPOINTMENT_REQUIRED, APPOINTMENT_NOT_FOUND, APPOINTMENT_VALUE_INVALID, APPOINTMENT_TYPE_INVALID,
     APPOINTMENT_PATIENT_REQUIRED, APPOINTMENT_PATIENT_INVALID, APPOINTMENT_PROFESSIONAL_REQUIRED,
     APPOINTMENT_PROFESSIONAL_INVALID, APPOINTMENT_PROCEDURE_INVALID, APPOINTMENT_TITLE_REQUIRED,
-    APPOINTMENT_PERIOD_INVALID, APPOINTMENT_STATUS_INVALID, APPOINTMENT_CONFLICT {Time}
+    APPOINTMENT_PERIOD_INVALID, APPOINTMENT_STATUS_INVALID, APPOINTMENT_CONFLICT {Time},
+    APPOINTMENT_OUTSIDE_HOURS
+    Configuracoes da filial (od.branch_setting): qt_max_parallel consultas do
+    mesmo profissional podem ocupar o mesmo horario (padrao 1); sem
+    id_allow_outside_hours, a consulta do profissional precisa caber num
+    horario de atendimento dele (se ele tiver horarios cadastrados). Encaixe
+    (id_fit_in) passa por cima das duas regras.
 */
 create or replace function ad.appointment_save(p_json jsonb)
 returns jsonb
@@ -68,6 +74,10 @@ declare
   _new            od.appointment%rowtype;
   _tz             text;
   _conflict       timestamptz;
+  _parallel       integer;
+  _outside_ok     boolean;
+  _local_start    timestamp;
+  _local_end      timestamp;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_save');
 
@@ -179,6 +189,12 @@ begin
           or _new.nr_professional is distinct from _cur.nr_professional
           or _new.it_type <> _cur.it_type or _cur.id_fit_in
           or _cur.it_status in (7, 90)) then
+    select coalesce(s.qt_max_parallel, 1), coalesce(s.id_allow_outside_hours, true)
+      into _parallel, _outside_ok
+      from (select 1) x
+      left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+    -- compromisso da clinica (sem profissional) sempre conflita; o mesmo
+    -- profissional so a partir do limite de consultas no mesmo horario
     select a.dh_start into _conflict
       from od.appointment a
      where a.nr_company = _nr_company and a.nr_branch = _nr_branch
@@ -186,14 +202,49 @@ begin
        and a.it_status not in (7, 90)
        and not a.id_fit_in
        and a.dh_start < _new.dh_end and _new.dh_start < a.dh_end
-       and (a.nr_professional is null or _new.nr_professional is null
-            or a.nr_professional = _new.nr_professional)
+       and (a.nr_professional is null or _new.nr_professional is null)
      order by a.dh_start
      limit 1;
-    if found then
+    if not found and _new.nr_professional is not null and (
+         select count(*) from od.appointment a
+          where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+            and a.nr_appointment is distinct from _nr_appointment
+            and a.it_status not in (7, 90)
+            and not a.id_fit_in
+            and a.dh_start < _new.dh_end and _new.dh_start < a.dh_end
+            and a.nr_professional = _new.nr_professional) >= _parallel then
+      select min(a.dh_start) into _conflict
+        from od.appointment a
+       where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+         and a.nr_appointment is distinct from _nr_appointment
+         and a.it_status not in (7, 90)
+         and not a.id_fit_in
+         and a.dh_start < _new.dh_end and _new.dh_start < a.dh_end
+         and a.nr_professional = _new.nr_professional;
+    end if;
+    if _conflict is not null then
       select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
       raise exception '%', ad.fn_message('APPOINTMENT_CONFLICT',
         jsonb_build_object('Time', to_char(_conflict at time zone _tz, 'DD/MM HH24:MI')));
+    end if;
+
+    -- fora do horario de atendimento do profissional
+    if not _outside_ok and _new.nr_professional is not null and _new.it_type = 1 and not _new.id_all_day
+       and exists (select 1 from od.professional_schedule ps
+                    where ps.nr_company = _nr_company and ps.nr_branch = _nr_branch
+                      and ps.nr_professional = _new.nr_professional) then
+      select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+      _local_start := _new.dh_start at time zone _tz;
+      _local_end   := _new.dh_end at time zone _tz;
+      if _local_start::date <> (_local_end - interval '1 second')::date or not exists (
+           select 1 from od.professional_schedule ps
+            where ps.nr_company = _nr_company and ps.nr_branch = _nr_branch
+              and ps.nr_professional = _new.nr_professional
+              and ps.it_weekday = extract(dow from _local_start)::smallint
+              and ps.qt_minute_start <= extract(hour from _local_start) * 60 + extract(minute from _local_start)
+              and ps.qt_minute_end >= extract(epoch from (_local_end - _local_start::date)) / 60) then
+        raise exception '%', ad.fn_message('APPOINTMENT_OUTSIDE_HOURS');
+      end if;
     end if;
   end if;
 
