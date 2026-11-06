@@ -36,6 +36,7 @@ Objetos principais:
 | `ad.access_profile_screen` | permissão do perfil por tela: linha = ler; `id_create`, `id_update` |
 | `ad.event_log` / `ad.fn_event_log` | log de atividades (o que aconteceu, em qual tela); gravado pelas RPCs |
 | `ad.screen_list` / `ad.event_log_list` | catálogo de telas; pesquisa do log de atividades |
+| `ad.company.it_mfa_policy` | 2FA obrigatória (app autenticador / TOTP do Supabase Auth): 0 não, 1 administradores, 2 todos; sem `aal2` no JWT a empresa sai de `private.fn_my_branches` e o `session_context` mostra `SESSION_MFA_REQUIRED` |
 | `ad.user_create_check` + Edge Function `user-create` | cadastro de usuário pela empresa (cria no Auth com service_role e vincula) |
 | `ad.session_context(jsonb)` | login no app: usuário, empresas → filiais → perfis → **permissions** (telas × ler/criar/alterar), bloqueios |
 | `ad.company_create` / `ad.company_update` | empresa (onboarding e cadastro) |
@@ -430,6 +431,8 @@ sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 1. Dashboard → **Project Settings → API → Exposed schemas**: adicionar `ad` (senão o PostgREST não enxerga).
    Nunca `private` nem `od`: o app só chega aos dados de negócio por RPC em `ad`.
 2. **Authentication → URL Configuration**: Site URL e Redirect URLs do app.
+   Em **Authentication → Multi-Factor**, deixar **TOTP (app autenticador)** habilitado: a 2FA
+   obrigatória por empresa (`ad.company.it_mfa_policy`) depende dele.
 3. Rodar o workflow de deploy (ou `./flyway/scripts/deploy.sh staging` com as env vars).
 4. Conferir **Database → Advisors**: não pode haver aviso de RLS desligada nem `search_path mutable`.
 

@@ -7,7 +7,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - 2FA obrigatoria (SESSION_MFA_REQUIRED)           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     "Login" do app depois que o Supabase Auth ja autenticou. Devolve, numa
@@ -36,12 +36,17 @@
                                   "it_level", "profiles": [{"nr_profile","vc_name","it_level"}],
                                   "permissions": [{"uu_screen","vc_code","vc_name",
                                                    "id_read","id_create","id_update"}]}]}],
-     "blocked": [{"nr_company", "vc_name", "vc_reason_key", "vc_reason"}]}
+     "blocked": [{"nr_company", "vc_name", "vc_reason_key", "vc_reason"}],
+     "mfa": {"vc_aal": "aal1" | "aal2"}}
+    Empresa que exige 2FA (ad.company.it_mfa_policy) sem o segundo fator
+    confirmado na sessao vem em blocked com SESSION_MFA_REQUIRED: o app pede
+    para cadastrar ou confirmar o app autenticador e chama de novo.
 
   Errors: VERSION_MISMATCH, SESSION_USER_NOT_FOUND, SESSION_USER_INACTIVE,
     SESSION_USER_BLOCKED {Reason}
   Reason keys em blocked: SESSION_COMPANY_BLOCKED, SESSION_COMPANY_INACTIVE,
-    SESSION_USER_COMPANY_BLOCKED, SESSION_USER_COMPANY_INACTIVE, SESSION_WITHOUT_PROFILE
+    SESSION_USER_COMPANY_BLOCKED, SESSION_USER_COMPANY_INACTIVE, SESSION_MFA_REQUIRED,
+    SESSION_WITHOUT_PROFILE
 */
 
 create or replace function ad.session_context(p_json jsonb default '{}'::jsonb)
@@ -185,6 +190,15 @@ begin
                when c.it_status <> 1  then 'SESSION_COMPANY_INACTIVE'
                when cu.it_status = 80 then 'SESSION_USER_COMPANY_BLOCKED'
                when cu.it_status <> 1 then 'SESSION_USER_COMPANY_INACTIVE'
+               when coalesce(auth.jwt() ->> 'aal', 'aal1') <> 'aal2'
+                    and (c.it_mfa_policy = 2
+                         or (c.it_mfa_policy = 1 and exists (
+                               select 1
+                                 from ad.branch_user_profile b2
+                                 join ad.access_profile p2 on p2.nr_company = b2.nr_company and p2.nr_profile = b2.nr_profile
+                                where b2.nr_company = cu.nr_company and b2.nr_user = cu.nr_user
+                                  and p2.it_level >= 100 and p2.it_status = 1)))
+                    then 'SESSION_MFA_REQUIRED'
                else                        'SESSION_WITHOUT_PROFILE'
              end as vc_key,
              case
@@ -225,7 +239,8 @@ begin
       'it_level',      _u.it_level,
       'dh_last_login', _u.dh_last_login),
     'companies', _companies,
-    'blocked',   _blocked
+    'blocked',   _blocked,
+    'mfa',       jsonb_build_object('vc_aal', coalesce(auth.jwt() ->> 'aal', 'aal1'))
   );
 end;
 $$;

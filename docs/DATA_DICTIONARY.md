@@ -166,6 +166,7 @@ erDiagram
     boolean id_blocked
     timestamptz dh_blocked
     varchar vc_block_reason
+    smallint it_mfa_policy
   }
   branch {
     bigint nr_company PK, FK
@@ -773,6 +774,7 @@ Empresa (tenant principal). Toda informação de negócio pertence a uma empresa
 | `id_blocked` | `boolean` |  | NOT NULL | `false` | Empresa bloqueada pela plataforma (inadimplência, abuso). Bloqueada = ninguém entra; o motivo aparece em session_context.blocked. |
 | `dh_blocked` | `timestamptz` |  | NULL |  | Data/hora do bloqueio. |
 | `vc_block_reason` | `varchar(200)` |  | NULL |  | Motivo do bloqueio, exibido ao usuário. |
+| `it_mfa_policy` | `smallint` |  | NOT NULL | `0` | Autenticação em dois fatores (app autenticador) obrigatória: sem o segundo fator confirmado na sessão, quem precisa dele fica sem acesso à empresa. Só o administrador altera, e para ligar precisa estar com 2FA. Valores: 0 = Não exige; 1 = Exige dos administradores; 2 = Exige de todos os usuários. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -1839,9 +1841,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 
 | Function | Grant | Descrição |
 |---|---|---|
-| `ad.session_context(p_json jsonb)` | authenticated | Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login. Cada filial traz permissions: telas que o usuário pode ler/criar/alterar (nível 100 tem todas; DASHBOARD sempre). |
+| `ad.session_context(p_json jsonb)` | authenticated | Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login. Cada filial traz permissions: telas que o usuário pode ler/criar/alterar (nível 100 tem todas; DASHBOARD sempre). Empresa que exige 2FA de quem está sem o segundo fator confirmado vem em blocked com SESSION_MFA_REQUIRED; mfa.vc_aal informa o nível da sessão. |
 | `ad.company_create(p_json jsonb)` | authenticated | Onboarding: cria empresa, matriz (filial 1), perfis Administrador/Usuário e vincula o criador como administrador. Qualquer usuário ativo pode criar. |
-| `ad.company_update(p_json jsonb)` | authenticated | Atualização parcial dos dados cadastrais da empresa. Somente administrador. Situação/bloqueio só por service_role. |
+| `ad.company_update(p_json jsonb)` | authenticated | Atualização parcial dos dados cadastrais da empresa. Somente administrador. Situação/bloqueio só por service_role. Aceita it_mfa_policy (2FA obrigatória: 0 não, 1 administradores, 2 todos); para ligar, quem altera precisa estar com 2FA na sessão (JWT aal2). |
 | `ad.branch_create(p_json jsonb)` | authenticated | Cria filial (numeração sequencial por empresa, serializada com FOR UPDATE na empresa) e vincula o criador com o seu perfil de maior nível. Somente administrador. |
 | `ad.branch_update(p_json jsonb)` | authenticated | Atualização parcial da filial, inclusive transferência de matriz (id_main). Somente administrador. Também telefone adicional, responsável técnico (nome, CRO e UF) e cidade do foro. |
 | `ad.access_profile_save(p_json jsonb)` | authenticated | Cria (I) ou atualiza (U) perfis de acesso da empresa; screens (opcional) substitui as permissões por tela (ler/criar/alterar). Guarda contra deixar a empresa sem administrador ativo. Grava event_log. Somente administrador. |
@@ -1906,7 +1908,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). |
 | `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. |
@@ -1922,7 +1924,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 |---|---|---|
 | `ad.fn_event_log(p_nr_user bigint, p_nr_company bigint, p_nr_branch bigint, p_vc_screen text, p_vc_action text, p_vc_entity text, p_vc_key text, p_vc_summary text, p_js_detail jsonb)` | interna | Grava uma linha em event_log (quem, empresa, filial, tela por código, ação, entidade, chave, resumo, detalhe). Chamada pelas RPCs que alteram dados. |
 | `private.fn_current_user_nr()` | authenticated (usada nas policies; schema private, fora da API) | auth.uid() → ad.app_user.nr_user do usuário logado e ativo; NULL sem sessão ou bloqueado. STABLE, SECURITY DEFINER. |
-| `private.fn_my_branches()` | authenticated (usada nas policies; schema private, fora da API) | Pares (nr_company, nr_branch) acessíveis agora: vínculo com perfil ativo, usuário ativo na empresa, empresa e filial ativas e não bloqueadas. |
+| `private.fn_my_branches()` | authenticated (usada nas policies; schema private, fora da API) | Pares (nr_company, nr_branch) acessíveis agora: vínculo com perfil ativo, usuário ativo na empresa, empresa e filial ativas e não bloqueadas. Sem o segundo fator confirmado (JWT aal2), deixa de fora as empresas que exigem 2FA do usuário (ad.company.it_mfa_policy). |
 | `private.fn_my_companies()` | authenticated (usada nas policies; schema private, fora da API) | Empresas com pelo menos uma filial acessível (derivada de fn_my_branches). |
 | `private.fn_is_company_admin(p_nr_company bigint)` | authenticated (usada nas policies; schema private, fora da API) | TRUE se o usuário logado tem perfil ativo de nível ≥ 100 em alguma filial acessível da empresa. |
 | `private.fn_is_admin_of_user(p_nr_user bigint)` | authenticated (usada nas policies; schema private, fora da API) | TRUE se o usuário logado administra alguma empresa em que p_nr_user está vinculado (policy de app_user). |
@@ -2038,6 +2040,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `COMPANY_UPDATE_COMPANY_REQUIRED` | `company_update` |  |
 | `COMPANY_UPDATE_EMAIL_INVALID` | `company_update` | Email |
 | `COMPANY_UPDATE_FORBIDDEN` | `company_update` |  |
+| `COMPANY_UPDATE_MFA_FIRST` | `company_update` |  |
+| `COMPANY_UPDATE_MFA_INVALID` | `company_update` |  |
 | `COMPANY_UPDATE_NAME_REQUIRED` | `company_update` |  |
 | `COMPANY_USER_ACTION_INVALID` | `company_user_save` |  |
 | `COMPANY_USER_ALREADY_LINKED` | `company_user_save`, `user_create_check` |  |

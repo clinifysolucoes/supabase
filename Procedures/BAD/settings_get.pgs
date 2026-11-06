@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - aliquotas do DRE e numeracao dos recibos         ::
+  ::  Change      : 06/11/2026 - 2FA da empresa (security)                        ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracoes da filial: dados da clinica (ad.branch), preferencias da
@@ -32,6 +32,7 @@
                   "pc_late_fee", "pc_late_interest", "pc_dre_revenue_tax", "pc_dre_income_tax", "pc_dre_csll",
                   "vc_receipt_prefix", "nr_next_receipt"},
      "hours": [{"it_weekday", "qt_minute_start", "qt_minute_end"}],
+     "security": {"it_mfa_policy"},          (2FA da empresa: 0 nao | 1 admins | 2 todos)
      "permission": {"id_update", "id_clinic"}}
 
   Errors: VERSION_MISMATCH, SETTINGS_BRANCH_REQUIRED, SETTINGS_FORBIDDEN
@@ -96,6 +97,8 @@ begin
                                           'qt_minute_end', h.qt_minute_end)
                        order by h.it_weekday, h.qt_minute_start)
         from od.branch_hour h where h.nr_company = _nr_company and h.nr_branch = _nr_branch), '[]'::jsonb),
+    'security', jsonb_build_object(
+      'it_mfa_policy', (select c.it_mfa_policy from ad.company c where c.nr_company = _nr_company)),
     'permission', jsonb_build_object(
       'id_update', coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false),
       'id_clinic', private.fn_is_company_admin(_nr_company)));

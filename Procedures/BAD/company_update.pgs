@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - 2FA obrigatoria (it_mfa_policy)                  ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Atualizacao parcial dos dados cadastrais da empresa. Somente administrador
@@ -22,12 +22,15 @@
     vc_name, vc_cnpj, vc_email, vc_phone, it_size,
     vc_address, vc_address_number, vc_address_extra, vc_district, vc_city,
     vc_state, vc_zip_code                              opcionais (parciais)
+    it_mfa_policy  integer  opcional 0 nao exige | 1 administradores | 2 todos
+                   (2FA; para ligar, o administrador precisa estar com 2FA na sessao)
 
   Output jsonb: linha completa de ad.company.
 
   Errors: VERSION_MISMATCH, COMPANY_UPDATE_COMPANY_REQUIRED, COMPANY_UPDATE_FORBIDDEN,
     COMPANY_UPDATE_NAME_REQUIRED, COMPANY_UPDATE_CNPJ_INVALID {Cnpj},
-    COMPANY_UPDATE_CNPJ_IN_USE {Cnpj}, COMPANY_UPDATE_EMAIL_INVALID {Email}
+    COMPANY_UPDATE_CNPJ_IN_USE {Cnpj}, COMPANY_UPDATE_EMAIL_INVALID {Email},
+    COMPANY_UPDATE_MFA_INVALID, COMPANY_UPDATE_MFA_FIRST
 */
 
 create or replace function ad.company_update(p_json jsonb)
@@ -42,6 +45,7 @@ declare
   _vc_cnpj    varchar(14);
   _vc_email   varchar(200);
   _row        ad.company%rowtype;
+  _mfa        smallint;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'company_update');
 
@@ -78,6 +82,21 @@ begin
     end if;
   end if;
 
+  if p_json ? 'it_mfa_policy' then
+    begin
+      _mfa := (p_json ->> 'it_mfa_policy')::smallint;
+    exception when others then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_MFA_INVALID');
+    end;
+    if _mfa is null or _mfa not in (0, 1, 2) then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_MFA_INVALID');
+    end if;
+    -- para exigir 2FA, quem liga ja precisa estar com 2FA (senao se tranca)
+    if _mfa > 0 and coalesce(auth.jwt() ->> 'aal', 'aal1') <> 'aal2' then
+      raise exception '%', ad.fn_message('COMPANY_UPDATE_MFA_FIRST');
+    end if;
+  end if;
+
   update ad.company c set
     vc_name           = case when p_json ? 'vc_name'           then _vc_name  else c.vc_name end,
     vc_cnpj           = case when p_json ? 'vc_cnpj'           then _vc_cnpj  else c.vc_cnpj end,
@@ -90,6 +109,7 @@ begin
     vc_district       = case when p_json ? 'vc_district'       then left(nullif(trim(p_json ->> 'vc_district'), ''), 30)       else c.vc_district end,
     vc_city           = case when p_json ? 'vc_city'           then left(nullif(trim(p_json ->> 'vc_city'), ''), 30)           else c.vc_city end,
     vc_state          = case when p_json ? 'vc_state'          then upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2))    else c.vc_state end,
+    it_mfa_policy     = case when p_json ? 'it_mfa_policy'     then _mfa else c.it_mfa_policy end,
     vc_zip_code       = case when p_json ? 'vc_zip_code'       then nullif(regexp_replace(coalesce(p_json ->> 'vc_zip_code', ''), '[^0-9]', '', 'g'), '') else c.vc_zip_code end
   where c.nr_company = _nr_company
   returning c.* into _row;
