@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 06/11/2026 - 2FA obrigatoria por empresa                      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Pares (nr_company, nr_branch) que o usuario logado pode acessar AGORA.
@@ -17,6 +17,10 @@
       - filial ativa e nao bloqueada
     Toda tabela de negocio futura (agenda, pacientes...) usa:
       using ((nr_company, nr_branch) in (select nr_company, nr_branch from private.fn_my_branches()))
+    2FA (ad.company.it_mfa_policy): sem o segundo fator confirmado na sessao
+    (auth.jwt() ->> 'aal' = 'aal2'), ficam de fora as empresas que exigem 2FA
+    de todos (2) e, para quem e administrador nelas, as que exigem dos
+    administradores (1).
 */
 
 create or replace function private.fn_my_branches()
@@ -36,7 +40,15 @@ as $$
      and cu.it_status = 1
      and c.it_status  = 1 and not c.id_blocked
      and b.it_status  = 1 and not b.id_blocked
-     and p.it_status  = 1;
+     and p.it_status  = 1
+     and (c.it_mfa_policy = 0
+          or coalesce(auth.jwt() ->> 'aal', 'aal1') = 'aal2'
+          or (c.it_mfa_policy = 1 and not exists (
+                select 1
+                  from ad.branch_user_profile b2
+                  join ad.access_profile p2 on p2.nr_company = b2.nr_company and p2.nr_profile = b2.nr_profile
+                 where b2.nr_company = bup.nr_company and b2.nr_user = bup.nr_user
+                   and p2.it_level >= 100 and p2.it_status = 1)));
 $$;
 
 revoke all on function private.fn_my_branches() from public, anon;
