@@ -137,3 +137,11 @@ create or replace trigger branch_hour_audit
 create or replace trigger fin_receipt_audit
   before insert or update on od.fin_receipt
   for each row execute function ad.trg_audit();
+
+create or replace trigger budget_audit
+  before insert or update on od.budget
+  for each row execute function ad.trg_audit();
+
+create or replace trigger budget_item_audit
+  before insert or update on od.budget_item
+  for each row execute function ad.trg_audit();

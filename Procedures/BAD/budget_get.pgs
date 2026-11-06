@@ -1,0 +1,114 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.budget_get(jsonb)                                          ::
+  ::  UsedBy      : Flutter -> rpc('budget_get') (Orcamentos, PDF)                ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Um orcamento com os itens, as contas a receber geradas, o paciente, o
+    emitente (dados da clinica) para o PDF, o desconto maximo da filial e as
+    permissoes. Exige LER na tela BUDGETS.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_budget  bigint  obrigatorios
+
+  Output jsonb:
+    {"budget": {"nr_budget", "nr_patient", "vc_patient", "vc_patient_cpf", "vc_patient_mobile",
+                "nr_professional", "vc_professional", "vc_title", "dt_budget", "dt_valid", "id_expired",
+                "vl_gross", "vl_discount", "pc_discount", "vl_total", "qt_installments", "it_payment_method",
+                "vc_notes", "it_status", "id_discount_approved", "vc_user_discount", "dh_discount",
+                "dh_accepted", "vc_user", "dh_created"},
+     "items": [{"nr_item", "nr_procedure", "vc_description", "vc_tooth", "qt_quantity", "vl_unit", "vl_total"}],
+     "entries": [{"nr_entry", "vc_description", "vl_amount", "dt_due", "it_status", "dt_paid"}],
+     "issuer": {... como em ad.fin_receipt_get},
+     "pc_max_discount",
+     "permission": {"id_update", "id_approve_discount", "id_accept"}}
+
+  Errors: VERSION_MISMATCH, BUDGET_BRANCH_REQUIRED, BUDGET_FORBIDDEN, BUDGET_NOT_FOUND
+*/
+create or replace function ad.budget_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _b          od.budget%rowtype;
+  _br         ad.branch%rowtype;
+  _perm       jsonb;
+  _today      date;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'budget_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('BUDGET_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('BUDGET_FORBIDDEN');
+  end if;
+  select * into _b from od.budget b
+   where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = (p_json ->> 'nr_budget')::bigint;
+  if not found then
+    raise exception '%', ad.fn_message('BUDGET_NOT_FOUND');
+  end if;
+  select * into _br from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _today := (now() at time zone _br.vc_timezone)::date;
+
+  return jsonb_build_object(
+    'budget', (select jsonb_build_object(
+        'nr_budget', _b.nr_budget, 'nr_patient', _b.nr_patient, 'vc_patient', p.vc_name, 'vc_patient_cpf', p.vc_cpf,
+        'vc_patient_mobile', p.vc_mobile, 'nr_professional', _b.nr_professional, 'vc_professional', pr.vc_name,
+        'vc_title', _b.vc_title, 'dt_budget', _b.dt_budget, 'dt_valid', _b.dt_valid,
+        'id_expired', _b.it_status in (1, 2) and _b.dt_valid < _today,
+        'vl_gross', _b.vl_gross, 'vl_discount', _b.vl_discount,
+        'pc_discount', case when _b.vl_gross = 0 then 0 else round(_b.vl_discount / _b.vl_gross * 100, 2) end,
+        'vl_total', _b.vl_total, 'qt_installments', _b.qt_installments, 'it_payment_method', _b.it_payment_method,
+        'vc_notes', _b.vc_notes, 'it_status', _b.it_status, 'id_discount_approved', _b.id_discount_approved,
+        'vc_user_discount', ud.vc_name, 'dh_discount', _b.dh_discount, 'dh_accepted', _b.dh_accepted,
+        'vc_user', uc.vc_name, 'dh_created', _b.dh_created)
+      from od.patient p
+      left join od.professional pr on pr.nr_company = _nr_company and pr.nr_branch = _nr_branch
+                                  and pr.nr_professional = _b.nr_professional
+      left join ad.app_user ud on ud.nr_user = _b.nr_user_discount
+      left join ad.app_user uc on uc.nr_user = _b.nr_user_created
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _b.nr_patient),
+    'items', coalesce((select jsonb_agg(jsonb_build_object(
+        'nr_item', i.nr_item, 'nr_procedure', i.nr_procedure, 'vc_description', i.vc_description,
+        'vc_tooth', i.vc_tooth, 'qt_quantity', i.qt_quantity, 'vl_unit', i.vl_unit, 'vl_total', i.vl_total)
+        order by i.nr_item)
+      from od.budget_item i
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _b.nr_budget), '[]'::jsonb),
+    'entries', coalesce((select jsonb_agg(jsonb_build_object(
+        'nr_entry', e.nr_entry, 'vc_description', e.vc_description, 'vl_amount', e.vl_amount,
+        'dt_due', e.dt_due, 'it_status', e.it_status, 'dt_paid', e.dt_paid)
+        order by e.dt_due, e.nr_entry)
+      from od.fin_entry e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_budget = _b.nr_budget), '[]'::jsonb),
+    'issuer', jsonb_build_object(
+      'vc_name', _br.vc_name, 'vc_legal_name', _br.vc_legal_name, 'vc_cnpj', _br.vc_cnpj,
+      'vc_phone', _br.vc_phone, 'vc_email', _br.vc_email, 'vc_zip_code', _br.vc_zip_code,
+      'vc_address', _br.vc_address, 'vc_address_number', _br.vc_address_number,
+      'vc_address_extra', _br.vc_address_extra, 'vc_district', _br.vc_district, 'vc_city', _br.vc_city,
+      'vc_state', _br.vc_state, 'vc_technical_name', _br.vc_technical_name,
+      'vc_technical_cro', _br.vc_technical_cro, 'vc_technical_cro_state', _br.vc_technical_cro_state),
+    'pc_max_discount', coalesce((select s.pc_budget_max_discount from od.branch_setting s
+                                  where s.nr_company = _nr_company and s.nr_branch = _nr_branch), 10),
+    'permission', jsonb_build_object(
+      'id_update', coalesce((_perm ->> 'id_update')::boolean, false),
+      'id_approve_discount', private.fn_is_company_admin(_nr_company),
+      'id_accept', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.budget_get(jsonb) from public, anon;
+grant execute on function ad.budget_get(jsonb) to authenticated;

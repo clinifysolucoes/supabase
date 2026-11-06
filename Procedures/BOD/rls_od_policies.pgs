@@ -197,3 +197,15 @@ drop policy if exists fin_receipt_select on od.fin_receipt;
 create policy fin_receipt_select on od.fin_receipt
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.budget
+drop policy if exists budget_select on od.budget;
+create policy budget_select on od.budget
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.budget_item
+drop policy if exists budget_item_select on od.budget_item;
+create policy budget_item_select on od.budget_item
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

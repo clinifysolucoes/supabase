@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 06/11/2026 - aliquotas do DRE e numeracao dos recibos         ::
+  ::  Change      : 06/11/2026 - desconto maximo e validade dos orcamentos        ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava as preferencias da filial (od.branch_setting, criada na primeira
@@ -38,13 +38,15 @@
     pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll  numeric  opcionais 0..50 (aliquotas do DRE)
     vc_receipt_prefix       text     opcional ate 10 (prefixo do numero do recibo: letras, numeros, - / .)
     nr_next_receipt         bigint   opcional >= 1 (proximo numero de recibo)
+    pc_budget_max_discount  numeric  opcional 0..100 (desconto maximo do orcamento sem aprovacao)
+    qt_budget_valid_days    integer  opcional 1..365 (validade padrao do orcamento)
 
   Output jsonb: o mesmo de ad.settings_get
 
   Errors: VERSION_MISMATCH, SETTINGS_BRANCH_REQUIRED, SETTINGS_FORBIDDEN, SETTINGS_VALUE_INVALID,
     SETTINGS_SLOT_INVALID, SETTINGS_PARALLEL_INVALID, SETTINGS_RECORD_INVALID, SETTINGS_HOURS_INVALID,
     SETTINGS_DEBT_INVALID, SETTINGS_METHODS_INVALID, SETTINGS_LATE_INVALID, SETTINGS_DRE_INVALID,
-    SETTINGS_RECEIPT_INVALID
+    SETTINGS_RECEIPT_INVALID, SETTINGS_BUDGET_INVALID
 */
 create or replace function ad.settings_save(p_json jsonb)
 returns jsonb
@@ -94,6 +96,8 @@ begin
     _cur.pc_dre_csll := 0;
     _cur.vc_receipt_prefix := '';
     _cur.nr_next_receipt := 1;
+    _cur.pc_budget_max_discount := 10;
+    _cur.qt_budget_valid_days := 30;
   end if;
 
   begin
@@ -122,6 +126,8 @@ begin
     _new.pc_dre_csll        := case when p_json ? 'pc_dre_csll'        then round((p_json ->> 'pc_dre_csll')::numeric, 2)        else _cur.pc_dre_csll end;
     _new.vc_receipt_prefix      := case when p_json ? 'vc_receipt_prefix'      then upper(coalesce(trim(p_json ->> 'vc_receipt_prefix'), '')) else _cur.vc_receipt_prefix end;
     _new.nr_next_receipt        := case when p_json ? 'nr_next_receipt'        then (p_json ->> 'nr_next_receipt')::bigint         else _cur.nr_next_receipt end;
+    _new.pc_budget_max_discount := case when p_json ? 'pc_budget_max_discount' then round((p_json ->> 'pc_budget_max_discount')::numeric, 2) else _cur.pc_budget_max_discount end;
+    _new.qt_budget_valid_days   := case when p_json ? 'qt_budget_valid_days'   then (p_json ->> 'qt_budget_valid_days')::smallint else _cur.qt_budget_valid_days end;
     if p_json ? 'it_payment_methods' then
       if jsonb_typeof(p_json -> 'it_payment_methods') <> 'array' then
         raise exception '%', ad.fn_message('SETTINGS_METHODS_INVALID');
@@ -162,6 +168,10 @@ begin
      or length(_new.vc_receipt_prefix) > 10 or _new.vc_receipt_prefix !~ '^[A-Z0-9./-]*$' then
     raise exception '%', ad.fn_message('SETTINGS_RECEIPT_INVALID');
   end if;
+  if _new.pc_budget_max_discount is null or _new.pc_budget_max_discount not between 0 and 100
+     or _new.qt_budget_valid_days is null or _new.qt_budget_valid_days not between 1 and 365 then
+    raise exception '%', ad.fn_message('SETTINGS_BUDGET_INVALID');
+  end if;
   if coalesce(_new.pc_dre_revenue_tax, -1) not between 0 and 50 or coalesce(_new.pc_dre_income_tax, -1) not between 0 and 50
      or coalesce(_new.pc_dre_csll, -1) not between 0 and 50 then
     raise exception '%', ad.fn_message('SETTINGS_DRE_INVALID');
@@ -176,12 +186,14 @@ begin
                                  id_auto_record_number, nr_next_record, vc_patient_required,
                                  it_debt_rule, qt_debt_days, id_cash_enabled, it_payment_methods, pc_late_fee,
                                  pc_late_interest, pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll,
-                                 vc_receipt_prefix, nr_next_receipt, nr_operator)
+                                 vc_receipt_prefix, nr_next_receipt, pc_budget_max_discount, qt_budget_valid_days,
+                                 nr_operator)
   values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
           _new.id_auto_record_number, _new.nr_next_record, _new.vc_patient_required,
           _new.it_debt_rule, _new.qt_debt_days, _new.id_cash_enabled, _new.it_payment_methods, _new.pc_late_fee,
           _new.pc_late_interest, _new.pc_dre_revenue_tax, _new.pc_dre_income_tax, _new.pc_dre_csll,
-          _new.vc_receipt_prefix, _new.nr_next_receipt, _nr_user)
+          _new.vc_receipt_prefix, _new.nr_next_receipt, _new.pc_budget_max_discount, _new.qt_budget_valid_days,
+          _nr_user)
   on conflict (nr_company, nr_branch) do update set
     qt_slot_minutes        = excluded.qt_slot_minutes,
     qt_max_parallel        = excluded.qt_max_parallel,
@@ -199,7 +211,9 @@ begin
     pc_dre_income_tax      = excluded.pc_dre_income_tax,
     pc_dre_csll            = excluded.pc_dre_csll,
     vc_receipt_prefix      = excluded.vc_receipt_prefix,
-    nr_next_receipt        = excluded.nr_next_receipt;
+    nr_next_receipt        = excluded.nr_next_receipt,
+    pc_budget_max_discount = excluded.pc_budget_max_discount,
+    qt_budget_valid_days   = excluded.qt_budget_valid_days;
 
   if p_json ? 'hours' then
     if jsonb_typeof(p_json -> 'hours') <> 'array' then

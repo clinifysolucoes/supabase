@@ -1,0 +1,201 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.budget_status(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> rpc('budget_status') (Orcamentos)                  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Situacao do orcamento (permissao ALTERAR na tela BUDGETS):
+      APPROVE_DISCOUNT  aguardando (2) -> em aberto (1): so o administrador
+                        da empresa aprova o desconto acima do maximo
+      ACCEPT            em aberto (1) -> aprovado pelo paciente (3), dentro da
+                        validade: gera as contas a receber (categoria
+                        Tratamentos) em qt_installments parcelas mensais a
+                        partir de dt_first_due, ligadas ao orcamento
+      REFUSE            em aberto/aguardando -> recusado (4)
+      CANCEL            em aberto/aguardando/recusado -> cancelado (90); o
+                        aprovado tambem, se nenhuma conta foi paga (cancela as
+                        contas em aberto)
+      REOPEN            recusado/cancelado -> em aberto (ou aguardando, se o
+                        desconto passa do maximo e nao foi aprovado)
+    Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch, nr_budget  bigint  obrigatorios
+    vc_action    text     obrigatorio (acima)
+    qt_installments    integer  ACCEPT opcional 1..24 (padrao a do orcamento ou 1)
+    dt_first_due       date     ACCEPT opcional (padrao hoje)
+    it_payment_method  integer  ACCEPT opcional (padrao a do orcamento)
+
+  Output jsonb: o mesmo de ad.budget_get, mais "qt_entries" (contas geradas no ACCEPT)
+
+  Errors: VERSION_MISMATCH, BUDGET_BRANCH_REQUIRED, BUDGET_FORBIDDEN, BUDGET_REQUIRED, BUDGET_NOT_FOUND,
+    BUDGET_ACTION_INVALID, BUDGET_STATUS_INVALID, BUDGET_DISCOUNT_FORBIDDEN, BUDGET_EXPIRED,
+    BUDGET_VALUE_INVALID, BUDGET_EMPTY, BUDGET_HAS_PAYMENTS
+*/
+create or replace function ad.budget_status(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _b          od.budget%rowtype;
+  _tz         text;
+  _today      date;
+  _n          integer;
+  _first      date;
+  _method     smallint;
+  _category   bigint;
+  _group      uuid;
+  _nr_entry   bigint;
+  _part       numeric;
+  _i          integer;
+  _qt         integer := 0;
+  _max        numeric;
+  _status     smallint;
+  _desc       text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'budget_status');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('BUDGET_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('BUDGET_FORBIDDEN');
+  end if;
+  if _action not in ('APPROVE_DISCOUNT', 'ACCEPT', 'REFUSE', 'CANCEL', 'REOPEN') then
+    raise exception '%', ad.fn_message('BUDGET_ACTION_INVALID');
+  end if;
+  if (p_json ->> 'nr_budget') is null then
+    raise exception '%', ad.fn_message('BUDGET_REQUIRED');
+  end if;
+  select * into _b from od.budget b
+   where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = (p_json ->> 'nr_budget')::bigint
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('BUDGET_NOT_FOUND');
+  end if;
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _today := (now() at time zone _tz)::date;
+
+  if _action = 'APPROVE_DISCOUNT' then
+    if not private.fn_is_company_admin(_nr_company) then
+      raise exception '%', ad.fn_message('BUDGET_DISCOUNT_FORBIDDEN');
+    end if;
+    if _b.it_status <> 2 then
+      raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+    update od.budget b set it_status = 1, id_discount_approved = true, nr_user_discount = _nr_user, dh_discount = now()
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;
+
+  elsif _action = 'ACCEPT' then
+    if _b.it_status <> 1 then
+      raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+    if _b.dt_valid < _today then
+      raise exception '%', ad.fn_message('BUDGET_EXPIRED');
+    end if;
+    if _b.vl_total <= 0 then
+      raise exception '%', ad.fn_message('BUDGET_EMPTY');
+    end if;
+    begin
+      _n      := coalesce((p_json ->> 'qt_installments')::integer, _b.qt_installments, 1);
+      _first  := coalesce((p_json ->> 'dt_first_due')::date, _today);
+      _method := coalesce((p_json ->> 'it_payment_method')::smallint, _b.it_payment_method);
+    exception when others then
+      raise exception '%', ad.fn_message('BUDGET_VALUE_INVALID');
+    end;
+    if _n not between 1 and 24 or (_method is not null and _method not in (1, 2, 3, 4, 5, 6, 7, 9)) then
+      raise exception '%', ad.fn_message('BUDGET_VALUE_INVALID');
+    end if;
+    _category := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Tratamentos', 1::smallint, null, _nr_user);
+    _group := case when _n > 1 then gen_random_uuid() end;
+    _desc := left(coalesce(_b.vc_title, 'Orçamento ' || _b.nr_budget), 110);
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(e.nr_entry), 0) into _nr_entry
+      from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    for _i in 1 .. _n loop
+      _part := case when _n = 1 then _b.vl_total
+                    when _i < _n then trunc(_b.vl_total / _n, 2)
+                    else _b.vl_total - trunc(_b.vl_total / _n, 2) * (_n - 1) end;
+      insert into od.fin_entry (
+        nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_patient, nr_professional, nr_budget,
+        vc_description, vl_amount, dt_due, dt_competence, it_payment_method, it_status,
+        uu_group, nr_installment, qt_installments, nr_user_created, nr_operator)
+      values (
+        _nr_company, _nr_branch, _nr_entry + _i, 1, _category, _b.nr_patient, _b.nr_professional, _b.nr_budget,
+        case when _n > 1 then _desc || format(' (%s/%s)', _i, _n) else _desc end,
+        _part, (_first + make_interval(months => _i - 1))::date, _today, _method, 1,
+        _group, _i, _n, _nr_user, _nr_user);
+    end loop;
+    _qt := _n;
+    update od.budget b set it_status = 3, dh_accepted = now(), qt_installments = _n, it_payment_method = _method
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;
+
+  elsif _action = 'REFUSE' then
+    if _b.it_status not in (1, 2) then
+      raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+    update od.budget b set it_status = 4
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;
+
+  elsif _action = 'CANCEL' then
+    if _b.it_status = 90 then
+      raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+    if _b.it_status = 3 then
+      if exists (select 1 from od.fin_entry e
+                  where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+                    and e.nr_budget = _b.nr_budget and e.it_status = 2) then
+        raise exception '%', ad.fn_message('BUDGET_HAS_PAYMENTS');
+      end if;
+      update od.fin_entry e set it_status = 90
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+         and e.nr_budget = _b.nr_budget and e.it_status = 1;
+      get diagnostics _qt = row_count;
+    end if;
+    update od.budget b set it_status = 90
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;
+
+  else /* REOPEN */
+    if _b.it_status not in (4, 90) then
+      raise exception '%', ad.fn_message('BUDGET_STATUS_INVALID');
+    end if;
+    select coalesce(s.pc_budget_max_discount, 10) into _max
+      from (select 1) x
+      left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+    _status := case when _b.vl_gross > 0 and _b.vl_discount / _b.vl_gross * 100 > _max + 0.005
+                         and not _b.id_discount_approved then 2 else 1 end;
+    update od.budget b set it_status = _status, dh_accepted = null
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _b.nr_budget;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'BUDGETS', 'UPDATE',
+    'budget', _nr_company::text || '/' || _nr_branch::text || '/' || _b.nr_budget::text,
+    format('Orçamento %s: %s', _b.nr_budget,
+           case _action when 'APPROVE_DISCOUNT' then 'desconto aprovado' when 'ACCEPT' then 'aprovado pelo paciente'
+                        when 'REFUSE' then 'recusado' when 'CANCEL' then 'cancelado' else 'reaberto' end),
+    jsonb_build_object('vc_action', _action, 'vl_total', _b.vl_total, 'qt_entries', _qt));
+
+  return ad.budget_get(jsonb_build_object('nr_version', 1, 'nr_company', _nr_company, 'nr_branch', _nr_branch,
+                                          'nr_budget', _b.nr_budget))
+         || jsonb_build_object('qt_entries', _qt);
+end;
+$$;
+
+revoke all on function ad.budget_status(jsonb) from public, anon;
+grant execute on function ad.budget_status(jsonb) to authenticated;

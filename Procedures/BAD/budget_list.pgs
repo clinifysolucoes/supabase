@@ -1,0 +1,128 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.budget_list(jsonb)                                         ::
+  ::  UsedBy      : Flutter -> rpc('budget_list') (Orcamentos, ficha do paciente) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 06/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Orcamentos da filial (mais recentes primeiro), de um paciente ou de todos,
+    por situacao e periodo, com busca pelo paciente ou titulo; totais por
+    situacao. Exige LER na tela BUDGETS.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_patient   bigint   opcional
+    vc_status    text     opcional open | pending | accepted | refused | cancelled | expired | all (padrao all)
+    dt_from, dt_to  date  opcionais (data do orcamento)
+    vc_search    text     opcional
+    qt_limit     integer  opcional 1..500 (padrao 200)
+
+  Output jsonb:
+    {"budgets": [{"nr_budget", "nr_patient", "vc_patient", "nr_professional", "vc_professional",
+                  "vc_title", "dt_budget", "dt_valid", "id_expired", "vl_gross", "vl_discount", "vl_total",
+                  "it_status", "qt_items"}],
+     "totals": {"qt_open", "qt_pending", "qt_accepted", "vl_open", "vl_accepted"},
+     "pc_max_discount"}
+
+  Errors: VERSION_MISMATCH, BUDGET_BRANCH_REQUIRED, BUDGET_FORBIDDEN, BUDGET_FILTER_INVALID
+*/
+create or replace function ad.budget_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _patient    bigint;
+  _status     text := lower(coalesce(nullif(trim(p_json ->> 'vc_status'), ''), 'all'));
+  _from       date;
+  _to         date;
+  _search     text := nullif(trim(p_json ->> 'vc_search'), '');
+  _limit      integer;
+  _today      date;
+  _rows       jsonb;
+  _totals     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'budget_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('BUDGET_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('BUDGET_FORBIDDEN');
+  end if;
+  begin
+    _patient := (p_json ->> 'nr_patient')::bigint;
+    _from    := (p_json ->> 'dt_from')::date;
+    _to      := (p_json ->> 'dt_to')::date;
+    _limit   := least(greatest(coalesce((p_json ->> 'qt_limit')::integer, 200), 1), 500);
+  exception when others then
+    raise exception '%', ad.fn_message('BUDGET_FILTER_INVALID');
+  end;
+  if _status not in ('open', 'pending', 'accepted', 'refused', 'cancelled', 'expired', 'all') then
+    raise exception '%', ad.fn_message('BUDGET_FILTER_INVALID');
+  end if;
+  select (now() at time zone b.vc_timezone)::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  with f as (
+    select b.*, p.vc_name as vc_patient, pr.vc_name as vc_professional,
+           (b.it_status in (1, 2) and b.dt_valid < _today) as id_expired
+      from od.budget b
+      join od.patient p on p.nr_company = b.nr_company and p.nr_branch = b.nr_branch and p.nr_patient = b.nr_patient
+      left join od.professional pr on pr.nr_company = b.nr_company and pr.nr_branch = b.nr_branch
+                                  and pr.nr_professional = b.nr_professional
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch
+       and (_patient is null or b.nr_patient = _patient)
+       and (_from is null or b.dt_budget >= _from)
+       and (_to is null or b.dt_budget <= _to)
+       and (_search is null or p.vc_name ilike '%' || _search || '%' or b.vc_title ilike '%' || _search || '%')
+  )
+  select
+    (select coalesce(jsonb_agg(jsonb_build_object(
+        'nr_budget', x.nr_budget, 'nr_patient', x.nr_patient, 'vc_patient', x.vc_patient,
+        'nr_professional', x.nr_professional, 'vc_professional', x.vc_professional, 'vc_title', x.vc_title,
+        'dt_budget', x.dt_budget, 'dt_valid', x.dt_valid, 'id_expired', x.id_expired,
+        'vl_gross', x.vl_gross, 'vl_discount', x.vl_discount, 'vl_total', x.vl_total, 'it_status', x.it_status,
+        'qt_items', (select count(*) from od.budget_item i where i.nr_company = x.nr_company
+                       and i.nr_branch = x.nr_branch and i.nr_budget = x.nr_budget))
+        order by x.dt_budget desc, x.nr_budget desc), '[]'::jsonb)
+       from (select * from f
+              where case _status
+                      when 'open' then f.it_status = 1 and not f.id_expired
+                      when 'pending' then f.it_status = 2
+                      when 'accepted' then f.it_status = 3
+                      when 'refused' then f.it_status = 4
+                      when 'cancelled' then f.it_status = 90
+                      when 'expired' then f.id_expired
+                      else true
+                    end
+              order by f.dt_budget desc, f.nr_budget desc
+              limit _limit) x),
+    jsonb_build_object(
+      'qt_open', count(*) filter (where f.it_status = 1 and not f.id_expired),
+      'qt_pending', count(*) filter (where f.it_status = 2),
+      'qt_accepted', count(*) filter (where f.it_status = 3),
+      'vl_open', coalesce(sum(f.vl_total) filter (where f.it_status in (1, 2) and not f.id_expired), 0),
+      'vl_accepted', coalesce(sum(f.vl_total) filter (where f.it_status = 3), 0))
+    into _rows, _totals
+    from f;
+
+  return jsonb_build_object('budgets', _rows, 'totals', _totals,
+    'pc_max_discount', coalesce((select s.pc_budget_max_discount from od.branch_setting s
+                                  where s.nr_company = _nr_company and s.nr_branch = _nr_branch), 10));
+end;
+$$;
+
+revoke all on function ad.budget_list(jsonb) from public, anon;
+grant execute on function ad.budget_list(jsonb) to authenticated;
