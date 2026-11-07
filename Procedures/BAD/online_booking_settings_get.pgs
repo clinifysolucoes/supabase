@@ -1,0 +1,88 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.online_booking_settings_get(jsonb)                         ::
+  ::  UsedBy      : Flutter -> rpc('online_booking_settings_get') (Configuracoes) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Configuracao do agendamento online da filial (LER na tela SETTINGS): se
+    esta ligado, endereco da pagina (slug; sem configuracao sugere um a partir
+    do nome da filial), janela de dias, antecedencia minima, mensagem e os
+    profissionais ativos com a marcacao de quem aparece na pagina.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+
+  Output jsonb:
+    {"settings": {"id_enabled", "vc_slug", "qt_days_ahead", "qt_min_hours", "vc_message", "id_saved"},
+     "professionals": [{"nr_professional", "vc_name", "vc_council", "qt_slot_minutes", "id_online"}],
+     "permission": {"id_update"}}
+
+  Errors: VERSION_MISMATCH, ONLINE_BOOKING_BRANCH_REQUIRED, ONLINE_BOOKING_FORBIDDEN
+*/
+create or replace function ad.online_booking_settings_get(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _o          od.online_booking;
+  _slug       text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'online_booking_settings_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if _nr_user is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_FORBIDDEN');
+  end if;
+
+  select * into _o from od.online_booking o where o.nr_company = _nr_company and o.nr_branch = _nr_branch;
+  if found then
+    _slug := _o.vc_slug;
+  else
+    select left(trim(both '-' from regexp_replace(
+             translate(lower(b.vc_name), 'áàâãäéèêëíìîïóòôõöúùûüçñ', 'aaaaaeeeeiiiiooooouuuucn'),
+             '[^a-z0-9]+', '-', 'g')), 30)
+      into _slug
+      from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+    if _slug is null or length(_slug) < 3 then
+      _slug := 'clinica';
+    end if;
+    if exists (select 1 from od.online_booking o where o.vc_slug = _slug) then
+      _slug := left(_slug, 30) || '-' || _nr_company::text || '-' || _nr_branch::text;
+    end if;
+  end if;
+
+  return jsonb_build_object(
+    'settings', jsonb_build_object(
+      'id_enabled', coalesce(_o.id_enabled, false), 'vc_slug', _slug,
+      'qt_days_ahead', coalesce(_o.qt_days_ahead, 30), 'qt_min_hours', coalesce(_o.qt_min_hours, 2),
+      'vc_message', _o.vc_message, 'id_saved', _o.nr_company is not null),
+    'professionals', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_professional', p.nr_professional, 'vc_name', p.vc_name, 'vc_council', p.vc_council,
+               'qt_slot_minutes', p.qt_slot_minutes, 'id_online', p.id_online)
+             order by p.vc_name)
+        from od.professional p
+       where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.it_status = 1), '[]'::jsonb),
+    'permission', jsonb_build_object('id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.online_booking_settings_get(jsonb) from public, anon;
+grant execute on function ad.online_booking_settings_get(jsonb) to authenticated;
