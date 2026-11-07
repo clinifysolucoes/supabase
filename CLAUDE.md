@@ -424,6 +424,7 @@ sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 | `user-create` | cria a conta no Auth (service_role) e vincula à empresa | nenhum extra |
 | `material-price-lookup` | pesquisa preço de mercado de um material (Claude + web search); valida acesso com `ad.pricing_param_get`; não grava nada | `ANTHROPIC_API_KEY` (obrigatório), `PRICE_LOOKUP_MODEL` (opcional) |
 | `fin-attachment` | anexos do financeiro: valida com `ad.fin_attachment_save`/`ad.fin_attachment_list` (JWT do usuário) e gera URL assinada de upload/download no bucket privado `finance` (criado na primeira chamada) | nenhum extra |
+| `patient-file` | fotos e exames do prontuário: valida com `ad.patient_file_save`/`ad.patient_file_list` (JWT do usuário) e gera URLs assinadas de upload, visualização (lote) e download no bucket privado `patient` (criado na primeira chamada, até 20 MB) | nenhum extra |
 | `user-password-reset` | o administrador define uma senha nova para um usuário da empresa: valida com `ad.user_password_reset_check` (JWT do admin; conta compartilhada com outra empresa fica de fora) e troca no Auth com service_role | nenhum extra |
 
 ### Setup do projeto Supabase (uma vez por ambiente)

@@ -72,6 +72,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.medication`](#odmedication) | Medicamento | Catálogo de medicamentos da filial para o receituário, com posologia de referência. A lista inicial dos usuais na odontologia é criada na primeira consulta (od.fn_medication_default). |
 | [`od.patient_document`](#odpatientdocument) | Documento do paciente | Documento emitido para o paciente: título e texto final já preenchidos (o modelo pode mudar sem alterar o emitido), data e profissional; o PDF é gerado no app a partir daqui. Exclusão lógica. |
 | [`od.patient_document_item`](#odpatientdocumentitem) | Medicamento do receituário | Medicamentos do receituário emitido, com cópia dos dados do catálogo (ou digitados). |
+| [`od.patient_file`](#odpatientfile) | Foto ou exame do paciente | Fotos (intraorais, extraorais, antes/depois) e exames (radiografias, tomografias, laudos) do prontuário. O arquivo fica no Storage (bucket privado patient); upload, visualização e download só por URL assinada da Edge Function patient-file, que valida antes pelas RPCs patient_file_save / patient_file_list com o JWT do usuário. |
 | [`od.fin_cash_session`](#odfincashsession) | Sessão de caixa | Caixa do dia por pessoa: abertura (valor contado) e fechamento (contado × esperado) numa conta do tipo caixa. Uma sessão aberta por conta e por usuário; recebimentos, pagamentos e transferências feitos na conta enquanto aberta entram no fechamento. nr_session é sequencial por filial. |
 | [`od.fin_transfer`](#odfintransfer) | Transferência entre contas | Dinheiro que passa de uma conta da filial para outra (não é receita nem despesa): transferência, sangria (do caixa para outra conta) ou suprimento (de outra conta para o caixa). Entra no saldo e no extrato das duas contas. nr_transfer é sequencial por filial. |
 | [`od.fin_card_rate`](#odfincardrate) | Taxa de recebimento | Taxa da filial por forma de pagamento (cartão de crédito, débito, boleto, cheque) e faixa de parcelas: percentual, tarifa fixa, prazo em dias para o dinheiro cair e a conta destino. Com taxa cadastrada, a baixa nessa forma gera recebíveis. nr_rate é sequencial por filial. |
@@ -157,6 +158,7 @@ erDiagram
   document_template ||--o{ patient_document : "emitido"
   patient_document ||--o{ patient_document_item : "medicamentos"
   medication ||--o{ patient_document_item : "receitado"
+  patient ||--o{ patient_file : "fotos e exames"
   procedure ||--o{ budget_item : "orçado"
   budget ||--o{ fin_entry : "gera contas"
   fin_entry ||--o{ fin_receipt : "recibos"
@@ -650,6 +652,23 @@ erDiagram
     varchar vc_quantity
     smallint it_use
     boolean id_controlled
+  }
+  patient_file {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_file PK
+    smallint it_type
+    smallint it_category
+    varchar vc_path
+    varchar vc_name
+    varchar vc_mime
+    bigint qt_bytes
+    date dt_file
+    varchar vc_tooth
+    varchar vc_description
+    smallint it_status
+    bigint nr_user FK
   }
   fin_cash_session {
     bigint nr_company PK, FK
@@ -1859,6 +1878,35 @@ Medicamentos do receituário emitido, com cópia dos dados do catálogo (ou digi
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.patient_file
+
+**Foto ou exame do paciente**
+
+Fotos (intraorais, extraorais, antes/depois) e exames (radiografias, tomografias, laudos) do prontuário. O arquivo fica no Storage (bucket privado patient); upload, visualização e download só por URL assinada da Edge Function patient-file, que valida antes pelas RPCs patient_file_save / patient_file_list com o JWT do usuário.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_file_save (tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_file` | `bigint` | PK4 | NOT NULL |  | Número sequencial do arquivo do paciente. |
+| `it_type` | `smallint` |  | NOT NULL |  | Tipo de arquivo. Valores: 1 = Foto; 2 = Exame. |
+| `it_category` | `smallint` |  | NOT NULL | `99` | Categoria (as de foto só em fotos, as de exame só em exames). Valores: 1 = Intraoral; 2 = Extraoral; 3 = Antes; 4 = Depois; 10 = Radiografia periapical; 11 = Radiografia panorâmica; 12 = Tomografia; 13 = Exame laboratorial; 14 = Laudo; 99 = Outro. |
+| `vc_path` | `varchar(300)` |  | NOT NULL |  | Caminho no bucket privado patient (empresa/filial/paciente/uuid.ext), único. |
+| `vc_name` | `varchar(200)` |  | NOT NULL |  | Nome original do arquivo. |
+| `vc_mime` | `varchar(100)` |  | NOT NULL |  | Tipo do arquivo: JPEG, PNG, WEBP, HEIC, PDF ou DICOM (só exames). |
+| `qt_bytes` | `bigint` |  | NOT NULL |  | Tamanho em bytes (até 20 MB). |
+| `dt_file` | `date` |  | NOT NULL |  | Data da foto ou do exame (não pode ser futura). |
+| `vc_tooth` | `varchar(40)` |  | NULL |  | Dente ou região. |
+| `vc_description` | `varchar(300)` |  | NULL |  | Descrição. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação (excluído apaga o arquivo do Storage). Valores: 1 = Ativo; 90 = Excluído. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que anexou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.fin_cash_session
 
 **Sessão de caixa**
@@ -2419,6 +2467,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.patient_document_render(p_json jsonb)` | authenticated | Pré-visualização de um documento: preenche os campos {{...}} do modelo ou do texto com os dados do paciente, do profissional, da clínica e os extras (dias, CID, horários, valor, texto). Não grava. Exige ler na tela PATIENTS. |
 | `ad.patient_document_save(p_json jsonb)` | authenticated | Emite (I, criar ou alterar) ou exclui (D, alterar) um documento do paciente na tela PATIENTS: guarda o texto final e, no receituário, os medicamentos (completados pelo catálogo). Grava event_log sem o texto. |
 | `ad.patient_document_list(p_json jsonb)` | authenticated | Documentos emitidos do paciente (ler na tela PATIENTS) com os medicamentos, o paciente e o emitente para o PDF, e as permissões. |
+| `ad.patient_file_save(p_json jsonb)` | authenticated | Registro das fotos e exames do paciente na tela PATIENTS, chamado pela Edge Function patient-file antes da URL assinada: I (criar ou alterar) reserva o caminho no bucket patient (até 20 MB; imagem, PDF ou DICOM em exame), U (alterar) muda categoria, data, dente e descrição, DELETE (alterar) devolve o caminho para apagar o arquivo. Grava event_log só com o nome do arquivo. |
+| `ad.patient_file_list(p_json jsonb)` | authenticated | Fotos e exames do paciente (ler na tela PATIENTS), por tipo ou por lista de nr_file, com as permissões; a Edge Function patient-file usa para validar antes das URLs assinadas. |
 | `ad.budget_list(p_json jsonb)` | authenticated | Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS. |
 | `ad.budget_get(p_json jsonb)` | authenticated | Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. |
 | `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. |
@@ -2840,15 +2890,21 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_DOCUMENT_VALUE_INVALID` | `patient_document_save` |  |
 | `PATIENT_EMAIL_INVALID` | `patient_save` |  |
 | `PATIENT_FIELD_REQUIRED` | `patient_save` |  |
+| `PATIENT_FILE_ACTION_INVALID` | `patient_file_save` |  |
+| `PATIENT_FILE_FORBIDDEN` | `patient_file_save` |  |
+| `PATIENT_FILE_NOT_FOUND` | `patient_file_save` |  |
+| `PATIENT_FILE_TOO_LARGE` | `patient_file_save` |  |
+| `PATIENT_FILE_TYPE_INVALID` | `patient_file_save` |  |
+| `PATIENT_FILE_VALUE_INVALID` | `patient_file_save`, `patient_file_list` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
-| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
 | `PATIENT_NOTE_FORBIDDEN` | `patient_note_save` |  |
 | `PATIENT_NOTE_NOT_FOUND` | `patient_note_save` |  |
 | `PATIENT_NOTE_REQUIRED` | `patient_note_save` |  |
 | `PATIENT_PHONE_INVALID` | `patient_save` |  |
-| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_STATE_INVALID` | `patient_save` |  |
 | `PATIENT_STATUS_INVALID` | `patient_save` |  |
 | `PATIENT_VALUE_INVALID` | `patient_save` |  |
@@ -2894,8 +2950,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROFESSIONAL_STATUS_INVALID` | `professional_save` |  |
 | `PROFESSIONAL_USER_IN_USE` | `professional_save` |  |
 | `PROFESSIONAL_USER_INVALID` | `professional_save` |  |
-| `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list` |  |
-| `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list` |  |
+| `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list` |  |
+| `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list`, `patient_file_list` |  |
 | `SCREEN_LIST_FORBIDDEN` | `screen_list` |  |
 | `SESSION_COMPANY_BLOCKED` | `session_context` |  |
 | `SESSION_COMPANY_INACTIVE` | `session_context` |  |
@@ -2946,5 +3002,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 
