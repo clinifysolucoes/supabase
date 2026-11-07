@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 07/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 08/11/2026 - qt_signatures (assinatura eletronica)            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Documentos emitidos do paciente (LER na tela PATIENTS), mais recentes
@@ -19,7 +19,7 @@
 
   Output jsonb:
     {"documents": [{"nr_document", "it_kind", "nr_template", "vc_title", "vc_body", "dt_document",
-                    "nr_professional", "vc_professional", "vc_council", "vc_user", "dh_created",
+                    "nr_professional", "vc_professional", "vc_council", "vc_user", "dh_created", "qt_signatures",
                     "items": [{"nr_item", "nr_medication", "vc_name", "vc_presentation", "vc_dosage",
                                "vc_quantity", "it_use", "id_controlled"}]}],
      "patient": {"vc_name", "vc_cpf", "dt_birth", "vc_address"},
@@ -72,6 +72,8 @@ begin
                'vc_title', d.vc_title, 'vc_body', d.vc_body, 'dt_document', d.dt_document,
                'nr_professional', d.nr_professional, 'vc_professional', pr.vc_name, 'vc_council', pr.vc_council,
                'vc_user', u.vc_name, 'dh_created', d.dh_created,
+               'qt_signatures', (select count(*) from od.signature g where g.nr_company = d.nr_company and g.nr_branch = d.nr_branch
+                                   and g.nr_patient = d.nr_patient and g.nr_document = d.nr_document),
                'items', coalesce((select jsonb_agg(jsonb_build_object(
                     'nr_item', i.nr_item, 'nr_medication', i.nr_medication, 'vc_name', i.vc_name,
                     'vc_presentation', i.vc_presentation, 'vc_dosage', i.vc_dosage, 'vc_quantity', i.vc_quantity,

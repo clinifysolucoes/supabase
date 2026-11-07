@@ -1,0 +1,70 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_signature_hash(bigint x2, smallint, bigint x2)          ::
+  ::  UsedBy      : ad.signature_save, ad.signature_list                          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Hash SHA-256 (hex) do conteudo assinado, calculado do mesmo jeito na
+    assinatura e na conferencia: comparar os dois diz se o conteudo mudou
+    depois de assinado. Helper interno (sem grant).
+      p_it_target 1 documento: titulo, texto, data e medicamentos do receituario
+      p_it_target 2 orcamento: paciente, datas, itens, desconto, total e condicao
+    Devolve null se o documento/orcamento nao existir.
+  Input:
+    p_nr_company, p_nr_branch, p_it_target, p_nr_patient (documento),
+    p_nr_key (nr_document ou nr_budget)
+  Output: text (64 hex)
+*/
+create or replace function od.fn_signature_hash(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_it_target  smallint,
+  p_nr_patient bigint,
+  p_nr_key     bigint)
+returns text
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _content jsonb;
+begin
+  if p_it_target = 1 then
+    select jsonb_build_object(
+             'title', d.vc_title, 'body', d.vc_body, 'date', d.dt_document, 'kind', d.it_kind,
+             'items', coalesce((select jsonb_agg(jsonb_build_array(i.vc_name, i.vc_presentation, i.vc_dosage,
+                                                                   i.vc_quantity, i.it_use) order by i.nr_item)
+                                  from od.patient_document_item i
+                                 where i.nr_company = d.nr_company and i.nr_branch = d.nr_branch
+                                   and i.nr_patient = d.nr_patient and i.nr_document = d.nr_document), '[]'::jsonb))
+      into _content
+      from od.patient_document d
+     where d.nr_company = p_nr_company and d.nr_branch = p_nr_branch
+       and d.nr_patient = p_nr_patient and d.nr_document = p_nr_key;
+  elsif p_it_target = 2 then
+    select jsonb_build_object(
+             'patient', b.nr_patient, 'title', b.vc_title, 'date', b.dt_budget, 'valid', b.dt_valid,
+             'gross', b.vl_gross, 'discount', b.vl_discount, 'total', b.vl_total,
+             'installments', b.qt_installments, 'method', b.it_payment_method,
+             'items', coalesce((select jsonb_agg(jsonb_build_array(i.vc_description, i.vc_tooth, i.qt_quantity,
+                                                                   i.vl_unit, i.vl_total) order by i.nr_item)
+                                  from od.budget_item i
+                                 where i.nr_company = b.nr_company and i.nr_branch = b.nr_branch
+                                   and i.nr_budget = b.nr_budget), '[]'::jsonb))
+      into _content
+      from od.budget b
+     where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch and b.nr_budget = p_nr_key;
+  end if;
+  if _content is null then
+    return null;
+  end if;
+  return encode(pg_catalog.sha256(convert_to(_content::text, 'UTF8')), 'hex');
+end;
+$$;
+
+revoke all on function od.fn_signature_hash(bigint, bigint, smallint, bigint, bigint) from public, anon, authenticated;
