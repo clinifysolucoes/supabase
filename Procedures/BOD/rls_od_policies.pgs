@@ -281,3 +281,9 @@ drop policy if exists online_booking_select on od.online_booking;
 create policy online_booking_select on od.online_booking
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.signature
+drop policy if exists signature_select on od.signature;
+create policy signature_select on od.signature
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

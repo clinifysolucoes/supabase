@@ -74,6 +74,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.patient_document_item`](#odpatientdocumentitem) | Medicamento do receituário | Medicamentos do receituário emitido, com cópia dos dados do catálogo (ou digitados). |
 | [`od.patient_file`](#odpatientfile) | Foto ou exame do paciente | Fotos (intraorais, extraorais, antes/depois) e exames (radiografias, tomografias, laudos) do prontuário. O arquivo fica no Storage (bucket privado patient); upload, visualização e download só por URL assinada da Edge Function patient-file, que valida antes pelas RPCs patient_file_save / patient_file_list com o JWT do usuário. |
 | [`od.online_booking`](#odonlinebooking) | Agendamento online | Configuração da página pública de agendamento da filial. A página chama a Edge Function online-booking (sem login), que usa ad.online_booking_public com service_role; a consulta entra como Agendado com it_origin 2 e a ficha do paciente é achada pelo CPF ou criada. |
+| [`od.signature`](#odsignature) | Assinatura eletrônica | Assinatura eletrônica simples (Lei 14.063/2020) de documentos do paciente e de orçamentos, coletada na tela do app com o aceite de quem assina: imagem do traço, assinante, hash do conteúdo, código de verificação, data/hora, IP e navegador. Não se altera nem se exclui. |
 | [`od.fin_cash_session`](#odfincashsession) | Sessão de caixa | Caixa do dia por pessoa: abertura (valor contado) e fechamento (contado × esperado) numa conta do tipo caixa. Uma sessão aberta por conta e por usuário; recebimentos, pagamentos e transferências feitos na conta enquanto aberta entram no fechamento. nr_session é sequencial por filial. |
 | [`od.fin_transfer`](#odfintransfer) | Transferência entre contas | Dinheiro que passa de uma conta da filial para outra (não é receita nem despesa): transferência, sangria (do caixa para outra conta) ou suprimento (de outra conta para o caixa). Entra no saldo e no extrato das duas contas. nr_transfer é sequencial por filial. |
 | [`od.fin_card_rate`](#odfincardrate) | Taxa de recebimento | Taxa da filial por forma de pagamento (cartão de crédito, débito, boleto, cheque) e faixa de parcelas: percentual, tarifa fixa, prazo em dias para o dinheiro cair e a conta destino. Com taxa cadastrada, a baixa nessa forma gera recebíveis. nr_rate é sequencial por filial. |
@@ -161,6 +162,8 @@ erDiagram
   medication ||--o{ patient_document_item : "receitado"
   patient ||--o{ patient_file : "fotos e exames"
   branch ||--o| online_booking : "agendamento online"
+  patient_document ||--o{ signature : "assinaturas"
+  budget ||--o{ signature : "assinaturas"
   procedure ||--o{ budget_item : "orçado"
   budget ||--o{ fin_entry : "gera contas"
   fin_entry ||--o{ fin_receipt : "recibos"
@@ -682,6 +685,25 @@ erDiagram
     smallint qt_days_ahead
     smallint qt_min_hours
     varchar vc_message
+  }
+  signature {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_signature PK
+    smallint it_target
+    bigint nr_patient FK
+    bigint nr_document FK
+    bigint nr_budget FK
+    smallint it_signer
+    varchar vc_signer_name
+    varchar vc_signer_cpf
+    text tx_image
+    varchar vc_hash
+    uuid uu_code
+    timestamptz dh_signed
+    varchar vc_ip
+    varchar vc_user_agent
+    bigint nr_user FK
   }
   fin_cash_session {
     bigint nr_company PK, FK
@@ -1943,6 +1965,37 @@ Configuração da página pública de agendamento da filial. A página chama a E
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.signature
+
+**Assinatura eletrônica**
+
+Assinatura eletrônica simples (Lei 14.063/2020) de documentos do paciente e de orçamentos, coletada na tela do app com o aceite de quem assina: imagem do traço, assinante, hash do conteúdo, código de verificação, data/hora, IP e navegador. Não se altera nem se exclui.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via signature_save (PATIENTS para documentos, BUDGETS para orçamentos).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_signature` | `bigint` | PK3 | NOT NULL |  | Número sequencial da assinatura na filial. |
+| `it_target` | `smallint` |  | NOT NULL |  | O que foi assinado. Valores: 1 = Documento do paciente (nr_document); 2 = Orçamento (nr_budget). |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente do documento ou do orçamento. |
+| `nr_document` | `bigint` | FK → `patient_document.nr_document` | NULL |  | Documento assinado (it_target 1). |
+| `nr_budget` | `bigint` | FK → `budget.nr_budget` | NULL |  | Orçamento assinado (it_target 2). |
+| `it_signer` | `smallint` |  | NOT NULL |  | Quem assinou. Valores: 1 = Paciente; 2 = Responsável legal; 3 = Profissional; 4 = Testemunha. |
+| `vc_signer_name` | `varchar(120)` |  | NOT NULL |  | Nome de quem assinou. |
+| `vc_signer_cpf` | `varchar(11)` |  | NULL |  | CPF de quem assinou (só dígitos, validado). |
+| `tx_image` | `text` |  | NOT NULL |  | Imagem do traço da assinatura (PNG em data URL, até ~300 KB). |
+| `vc_hash` | `varchar(64)` |  | NOT NULL |  | SHA-256 do conteúdo no momento da assinatura (od.fn_signature_hash); diferente do atual = conteúdo alterado depois. |
+| `uu_code` | `uuid` |  | NOT NULL | `gen_random_uuid()` | Código de verificação impresso no PDF (único). |
+| `dh_signed` | `timestamptz` |  | NOT NULL | `now()` | Data e hora da assinatura. |
+| `vc_ip` | `varchar(64)` |  | NULL |  | IP de origem (header x-forwarded-for do PostgREST). |
+| `vc_user_agent` | `varchar(300)` |  | NULL |  | Navegador/aparelho (header user-agent). |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário da clínica que coletou a assinatura. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.fin_cash_session
 
 **Sessão de caixa**
@@ -2502,7 +2555,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.medication_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um medicamento do catálogo (inativar = it_status 90). Exige alterar na tela SETTINGS. Grava event_log. |
 | `ad.patient_document_render(p_json jsonb)` | authenticated | Pré-visualização de um documento: preenche os campos {{...}} do modelo ou do texto com os dados do paciente, do profissional, da clínica e os extras (dias, CID, horários, valor, texto). Não grava. Exige ler na tela PATIENTS. |
 | `ad.patient_document_save(p_json jsonb)` | authenticated | Emite (I, criar ou alterar) ou exclui (D, alterar) um documento do paciente na tela PATIENTS: guarda o texto final e, no receituário, os medicamentos (completados pelo catálogo). Grava event_log sem o texto. |
-| `ad.patient_document_list(p_json jsonb)` | authenticated | Documentos emitidos do paciente (ler na tela PATIENTS) com os medicamentos, o paciente e o emitente para o PDF, e as permissões. |
+| `ad.patient_document_list(p_json jsonb)` | authenticated | Documentos emitidos do paciente (ler na tela PATIENTS) com os medicamentos, o paciente e o emitente para o PDF, e as permissões. Cada documento traz qt_signatures. |
+| `ad.signature_save(p_json jsonb)` | authenticated | Registra uma assinatura eletrônica simples coletada na tela: documento (criar ou alterar em PATIENTS) ou orçamento em aberto/aprovado (alterar em BUDGETS). Exige o aceite; guarda imagem, assinante, hash do conteúdo, código de verificação, IP e navegador. Grava event_log sem a imagem. |
+| `ad.signature_list(p_json jsonb)` | authenticated | Assinaturas de um documento (ler em PATIENTS) ou orçamento (ler em BUDGETS) com a imagem e id_valid (o conteúdo atual tem o mesmo hash da assinatura). |
 | `ad.patient_file_save(p_json jsonb)` | authenticated | Registro das fotos e exames do paciente na tela PATIENTS, chamado pela Edge Function patient-file antes da URL assinada: I (criar ou alterar) reserva o caminho no bucket patient (até 20 MB; imagem, PDF ou DICOM em exame), U (alterar) muda categoria, data, dente e descrição, DELETE (alterar) devolve o caminho para apagar o arquivo. Grava event_log só com o nome do arquivo. |
 | `ad.patient_file_list(p_json jsonb)` | authenticated | Fotos e exames do paciente (ler na tela PATIENTS), por tipo ou por lista de nr_file, com as permissões; a Edge Function patient-file usa para validar antes das URLs assinadas. |
 | `ad.online_booking_settings_get(p_json jsonb)` | authenticated | Configuração do agendamento online da filial (ler na tela SETTINGS): ligado, endereço (sugere um pelo nome da filial), janela, antecedência, mensagem e profissionais ativos com id_online. |
@@ -2553,6 +2608,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_document_render(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_professional bigint, p_body text, p_extra jsonb)` | interna | Preenche os campos {{...}} de um texto com os dados do paciente, do profissional, da clínica, a data no fuso da filial e os extras (dias, cid, hora_inicio, hora_fim, valor, texto). |
 | `od.fn_medication_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)` | interna | Cria a lista inicial de 30 medicamentos usuais na odontologia com posologia de referência quando a filial ainda não tem nenhum; usado por medication_list. |
 | `od.fn_online_slots(p_nr_company bigint, p_nr_branch bigint, p_nr_professional bigint, p_date date, p_min_hours integer)` | interna | Horários livres de um profissional num dia (fuso da filial) na duração qt_slot_minutes: dentro do horário dele (ou da clínica), a partir de agora + antecedência, sem compromisso da clínica e abaixo de qt_max_parallel; encaixes não ocupam. |
+| `od.fn_signature_hash(p_nr_company bigint, p_nr_branch bigint, p_it_target smallint, p_nr_patient bigint, p_nr_key bigint)` | interna | SHA-256 (hex) do conteúdo assinável: documento (título, texto, data, medicamentos) ou orçamento (paciente, datas, itens, desconto, total, condição). Mesmo cálculo na assinatura e na conferência. |
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
@@ -3032,6 +3088,16 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SETTINGS_RECORD_INVALID` | `settings_save` |  |
 | `SETTINGS_SLOT_INVALID` | `settings_save` |  |
 | `SETTINGS_VALUE_INVALID` | `settings_save` |  |
+| `SIGNATURE_BRANCH_REQUIRED` | `signature_save`, `signature_list` |  |
+| `SIGNATURE_CONSENT_REQUIRED` | `signature_save` |  |
+| `SIGNATURE_CPF_INVALID` | `signature_save` |  |
+| `SIGNATURE_FORBIDDEN` | `signature_save`, `signature_list` |  |
+| `SIGNATURE_IMAGE_INVALID` | `signature_save` |  |
+| `SIGNATURE_NAME_REQUIRED` | `signature_save` |  |
+| `SIGNATURE_NOT_FOUND` | `signature_save` |  |
+| `SIGNATURE_SIGNER_INVALID` | `signature_save` |  |
+| `SIGNATURE_STATUS_INVALID` | `signature_save` |  |
+| `SIGNATURE_TARGET_INVALID` | `signature_save`, `signature_list` |  |
 | `SPECIALTY_ACTION_INVALID` | `specialty_save` |  |
 | `SPECIALTY_FORBIDDEN` | `specialty_save` |  |
 | `SPECIALTY_NAME_IN_USE` | `specialty_save` |  |
@@ -3060,5 +3126,5 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 

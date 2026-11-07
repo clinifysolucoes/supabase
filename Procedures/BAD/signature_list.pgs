@@ -1,0 +1,89 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.signature_list(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> rpc('signature_list') (PDF, detalhes)              ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Assinaturas de um documento do paciente (LER na tela PATIENTS) ou de um
+    orcamento (LER na tela BUDGETS), em ordem, com a imagem e id_valid: o hash
+    do conteudo atual e igual ao da assinatura (false = mudou depois).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_target   integer  1 documento | 2 orcamento
+    nr_patient, nr_document  (1)  |  nr_budget (2)
+
+  Output jsonb:
+    {"signatures": [{"nr_signature", "it_signer", "vc_signer_name", "vc_signer_cpf", "tx_image", "vc_hash",
+                     "uu_code", "dh_signed", "vc_ip", "vc_user", "id_valid"}],
+     "vc_hash_current"}
+
+  Errors: VERSION_MISMATCH, SIGNATURE_BRANCH_REQUIRED, SIGNATURE_TARGET_INVALID, SIGNATURE_FORBIDDEN
+*/
+create or replace function ad.signature_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _target     smallint;
+  _patient    bigint;
+  _key        bigint;
+  _hash       text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'signature_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('SIGNATURE_BRANCH_REQUIRED');
+  end if;
+  begin
+    _target  := (p_json ->> 'it_target')::smallint;
+    _patient := (p_json ->> 'nr_patient')::bigint;
+    _key := case _target when 1 then (p_json ->> 'nr_document')::bigint when 2 then (p_json ->> 'nr_budget')::bigint end;
+  exception when others then
+    raise exception '%', ad.fn_message('SIGNATURE_TARGET_INVALID');
+  end;
+  if _target is null or _target not in (1, 2) or _key is null or (_target = 1 and _patient is null) then
+    raise exception '%', ad.fn_message('SIGNATURE_TARGET_INVALID');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch,
+       case when _target = 1 then 'PATIENTS' else 'BUDGETS' end) ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('SIGNATURE_FORBIDDEN');
+  end if;
+  if _target = 2 then
+    select b.nr_patient into _patient from od.budget b
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _key;
+  end if;
+  _hash := od.fn_signature_hash(_nr_company, _nr_branch, _target, _patient, _key);
+
+  return jsonb_build_object(
+    'signatures', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_signature', s.nr_signature, 'it_signer', s.it_signer, 'vc_signer_name', s.vc_signer_name,
+               'vc_signer_cpf', s.vc_signer_cpf, 'tx_image', s.tx_image, 'vc_hash', s.vc_hash, 'uu_code', s.uu_code,
+               'dh_signed', s.dh_signed, 'vc_ip', s.vc_ip, 'vc_user', u.vc_name,
+               'id_valid', s.vc_hash = _hash)
+             order by s.dh_signed, s.nr_signature)
+        from od.signature s
+        left join ad.app_user u on u.nr_user = s.nr_user
+       where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.it_target = _target
+         and ((_target = 1 and s.nr_patient = _patient and s.nr_document = _key)
+              or (_target = 2 and s.nr_budget = _key))), '[]'::jsonb),
+    'vc_hash_current', _hash);
+end;
+$$;
+
+revoke all on function ad.signature_list(jsonb) from public, anon;
+grant execute on function ad.signature_list(jsonb) to authenticated;

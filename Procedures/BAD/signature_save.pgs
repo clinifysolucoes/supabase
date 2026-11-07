@@ -1,0 +1,161 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.signature_save(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> rpc('signature_save') (documentos, orcamentos)     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Registra uma assinatura eletronica simples coletada na tela do app:
+      it_target 1  documento do paciente   -> CRIAR ou ALTERAR na tela PATIENTS
+      it_target 2  orcamento               -> ALTERAR na tela BUDGETS
+                   (em aberto ou aprovado; recusado/cancelado nao)
+    Exige o aceite (id_consent) de quem assina. Guarda a imagem do traco
+    (PNG em data URL, ate ~300 KB), o hash SHA-256 do conteudo
+    (od.fn_signature_hash), o codigo de verificacao, IP e navegador (headers
+    do PostgREST) e o usuario que coletou. Grava ad.event_log sem a imagem.
+
+  Input p_json:
+    nr_version      integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_target       integer  1 | 2
+    nr_patient      bigint   obrigatorio em 1
+    nr_document     bigint   obrigatorio em 1
+    nr_budget       bigint   obrigatorio em 2
+    it_signer       integer  1 paciente | 2 responsavel legal | 3 profissional | 4 testemunha
+    vc_signer_name  text     obrigatorio (ate 120)
+    vc_signer_cpf   text     opcional (validado)
+    tx_image        text     obrigatorio: 'data:image/png;base64,...'
+    id_consent      boolean  obrigatorio = true
+
+  Output jsonb: {"nr_signature", "uu_code", "vc_hash", "dh_signed"}
+
+  Errors: VERSION_MISMATCH, SIGNATURE_BRANCH_REQUIRED, SIGNATURE_TARGET_INVALID, SIGNATURE_FORBIDDEN,
+    SIGNATURE_NOT_FOUND, SIGNATURE_STATUS_INVALID, SIGNATURE_SIGNER_INVALID, SIGNATURE_NAME_REQUIRED,
+    SIGNATURE_CPF_INVALID, SIGNATURE_IMAGE_INVALID, SIGNATURE_CONSENT_REQUIRED
+*/
+create or replace function ad.signature_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _target     smallint;
+  _signer     smallint;
+  _perm       jsonb;
+  _patient    bigint;
+  _key        bigint;
+  _status     smallint;
+  _title      text;
+  _name       text := left(nullif(regexp_replace(trim(coalesce(p_json ->> 'vc_signer_name', '')), '\s+', ' ', 'g'), ''), 120);
+  _cpf        text := nullif(regexp_replace(coalesce(p_json ->> 'vc_signer_cpf', ''), '\D', '', 'g'), '');
+  _image      text := p_json ->> 'tx_image';
+  _hash       text;
+  _headers    jsonb;
+  _nr         bigint;
+  _code       uuid;
+  _dh         timestamptz;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'signature_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('SIGNATURE_BRANCH_REQUIRED');
+  end if;
+  begin
+    _target := (p_json ->> 'it_target')::smallint;
+    _signer := (p_json ->> 'it_signer')::smallint;
+    _patient := (p_json ->> 'nr_patient')::bigint;
+    _key := case _target when 1 then (p_json ->> 'nr_document')::bigint when 2 then (p_json ->> 'nr_budget')::bigint end;
+  exception when others then
+    raise exception '%', ad.fn_message('SIGNATURE_TARGET_INVALID');
+  end;
+  if _target is null or _target not in (1, 2) or _key is null or (_target = 1 and _patient is null) then
+    raise exception '%', ad.fn_message('SIGNATURE_TARGET_INVALID');
+  end if;
+
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, case when _target = 1 then 'PATIENTS' else 'BUDGETS' end);
+  if _nr_user is null
+     or (_target = 1 and not (coalesce((_perm ->> 'id_create')::boolean, false) or coalesce((_perm ->> 'id_update')::boolean, false)))
+     or (_target = 2 and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('SIGNATURE_FORBIDDEN');
+  end if;
+
+  if _target = 1 then
+    select d.it_status, d.vc_title into _status, _title
+      from od.patient_document d
+     where d.nr_company = _nr_company and d.nr_branch = _nr_branch and d.nr_patient = _patient and d.nr_document = _key
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('SIGNATURE_NOT_FOUND');
+    end if;
+    if _status <> 1 then
+      raise exception '%', ad.fn_message('SIGNATURE_STATUS_INVALID');
+    end if;
+  else
+    select b.it_status, b.nr_patient, 'Orçamento ' || b.nr_budget into _status, _patient, _title
+      from od.budget b
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _key
+       for update;
+    if not found then
+      raise exception '%', ad.fn_message('SIGNATURE_NOT_FOUND');
+    end if;
+    if _status not in (1, 2, 3) then
+      raise exception '%', ad.fn_message('SIGNATURE_STATUS_INVALID');
+    end if;
+  end if;
+
+  if _signer is null or _signer not in (1, 2, 3, 4) then
+    raise exception '%', ad.fn_message('SIGNATURE_SIGNER_INVALID');
+  end if;
+  if _name is null or length(_name) < 3 then
+    raise exception '%', ad.fn_message('SIGNATURE_NAME_REQUIRED');
+  end if;
+  if _cpf is not null and not ad.fn_cpf_is_valid(_cpf) then
+    raise exception '%', ad.fn_message('SIGNATURE_CPF_INVALID');
+  end if;
+  if _image is null or _image not like 'data:image/png;base64,%' or length(_image) > 400000
+     or length(_image) < 200 or substr(_image, 23) !~ '^[A-Za-z0-9+/]+=*$' then
+    raise exception '%', ad.fn_message('SIGNATURE_IMAGE_INVALID');
+  end if;
+  if not coalesce((p_json ->> 'id_consent')::boolean, false) then
+    raise exception '%', ad.fn_message('SIGNATURE_CONSENT_REQUIRED');
+  end if;
+
+  _hash := od.fn_signature_hash(_nr_company, _nr_branch, _target, _patient, _key);
+  _headers := coalesce(nullif(current_setting('request.headers', true), '')::jsonb, '{}'::jsonb);
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select coalesce(max(s.nr_signature), 0) + 1 into _nr
+    from od.signature s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+  insert into od.signature (nr_company, nr_branch, nr_signature, it_target, nr_patient, nr_document, nr_budget,
+                            it_signer, vc_signer_name, vc_signer_cpf, tx_image, vc_hash, vc_ip, vc_user_agent,
+                            nr_user, nr_operator)
+  values (_nr_company, _nr_branch, _nr, _target, _patient,
+          case when _target = 1 then _key end, case when _target = 2 then _key end,
+          _signer, _name, _cpf, _image, _hash,
+          left(nullif(trim(split_part(coalesce(_headers ->> 'x-forwarded-for', _headers ->> 'cf-connecting-ip', ''), ',', 1)), ''), 64),
+          left(_headers ->> 'user-agent', 300), _nr_user, _nr_user)
+  returning uu_code, dh_signed into _code, _dh;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, case when _target = 1 then 'PATIENTS' else 'BUDGETS' end, 'CREATE',
+    'signature', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('%s assinado por %s', _title, _name),
+    jsonb_build_object('it_target', _target, 'nr_patient', _patient, 'nr_key', _key, 'it_signer', _signer,
+                       'uu_code', _code, 'vc_hash', _hash));
+
+  return jsonb_build_object('nr_signature', _nr, 'uu_code', _code, 'vc_hash', _hash, 'dh_signed', _dh);
+end;
+$$;
+
+revoke all on function ad.signature_save(jsonb) from public, anon;
+grant execute on function ad.signature_save(jsonb) to authenticated;
