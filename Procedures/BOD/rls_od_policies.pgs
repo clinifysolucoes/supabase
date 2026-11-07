@@ -269,3 +269,9 @@ drop policy if exists patient_document_item_select on od.patient_document_item;
 create policy patient_document_item_select on od.patient_document_item
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_file
+drop policy if exists patient_file_select on od.patient_file;
+create policy patient_file_select on od.patient_file
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

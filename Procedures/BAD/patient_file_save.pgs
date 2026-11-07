@@ -1,0 +1,182 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_file_save(jsonb)                                   ::
+  ::  UsedBy      : Edge Function patient-file; Flutter (U)                       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Registro das fotos e exames do paciente (tela PATIENTS). O arquivo fica no
+    Storage (bucket privado "patient"); a Edge Function patient-file chama esta
+    RPC com o JWT do usuario ANTES de gerar a URL assinada.
+      vc_action = 'I'       registra e devolve o caminho reservado
+                            (company/branch/patient/uuid.ext) -> CRIAR ou ALTERAR
+      vc_action = 'U'       altera categoria, data, dente e descricao -> ALTERAR
+      vc_action = 'DELETE'  marca como excluido e devolve o caminho para a
+                            Edge Function apagar o arquivo -> ALTERAR
+    Ate 20 MB; imagem (JPEG, PNG, WEBP, HEIC) ou PDF; exame aceita tambem DICOM.
+    Grava ad.event_log (so o nome do arquivo).
+
+  Input p_json:
+    nr_version      integer  obrigatorio = 1
+    vc_action       text     obrigatorio I | U | DELETE
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_file         bigint   obrigatorio em U e DELETE
+    it_type         integer  obrigatorio em I: 1 foto | 2 exame
+    it_category     integer  opcional: 1 intraoral, 2 extraoral, 3 antes, 4 depois (fotos);
+                             10 radiografia periapical, 11 panoramica, 12 tomografia,
+                             13 exame laboratorial, 14 laudo (exames); 99 outro (padrao)
+    vc_name, vc_mime, qt_bytes  obrigatorios em I
+    dt_file         date     opcional (padrao hoje; nao pode ser futura)
+    vc_tooth        text     opcional (ate 40)
+    vc_description  text     opcional (ate 300)
+
+  Output jsonb: {"nr_file", "vc_path"}
+
+  Errors: VERSION_MISMATCH, PATIENT_FILE_ACTION_INVALID, RECORD_BRANCH_REQUIRED, PATIENT_FILE_FORBIDDEN,
+    PATIENT_REQUIRED, PATIENT_NOT_FOUND, PATIENT_FILE_VALUE_INVALID, PATIENT_FILE_TYPE_INVALID,
+    PATIENT_FILE_TOO_LARGE, PATIENT_FILE_NOT_FOUND
+*/
+create or replace function ad.patient_file_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_file    bigint;
+  _perm       jsonb;
+  _vc_name    text;
+  _f          od.patient_file;
+  _type       smallint;
+  _cat        smallint;
+  _dt         date;
+  _name       text := left(nullif(trim(p_json ->> 'vc_name'), ''), 200);
+  _mime       text := lower(nullif(trim(p_json ->> 'vc_mime'), ''));
+  _bytes      bigint;
+  _ext        text;
+  _path       text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_file_save');
+  if _action not in ('I', 'U', 'DELETE') then
+    raise exception '%', ad.fn_message('PATIENT_FILE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not ((_perm ->> 'id_create')::boolean or (_perm ->> 'id_update')::boolean))
+     or (_action in ('U', 'DELETE') and not (_perm ->> 'id_update')::boolean) then
+    raise exception '%', ad.fn_message('PATIENT_FILE_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _vc_name
+    from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+     for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+
+  if _action in ('U', 'DELETE') then
+    select * into _f from od.patient_file t
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient
+       and t.nr_file = (p_json ->> 'nr_file')::bigint and t.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('PATIENT_FILE_NOT_FOUND');
+    end if;
+    _nr_file := _f.nr_file;
+    _type    := _f.it_type;
+  end if;
+
+  begin
+    if _action = 'I' then
+      _type := (p_json ->> 'it_type')::smallint;
+    end if;
+    _cat   := case when p_json ? 'it_category' then coalesce((p_json ->> 'it_category')::smallint, 99)
+                   else coalesce(_f.it_category, 99) end;
+    _dt    := case when p_json ? 'dt_file' then coalesce((p_json ->> 'dt_file')::date, current_date)
+                   else coalesce(_f.dt_file, current_date) end;
+    _bytes := (p_json ->> 'qt_bytes')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('PATIENT_FILE_VALUE_INVALID');
+  end;
+  if _action <> 'DELETE' and (_type is null or _type not in (1, 2) or _dt > current_date
+       or _cat not in (1, 2, 3, 4, 10, 11, 12, 13, 14, 99)
+       or (_type = 1 and _cat between 10 and 14) or (_type = 2 and _cat between 1 and 4)) then
+    raise exception '%', ad.fn_message('PATIENT_FILE_VALUE_INVALID');
+  end if;
+
+  if _action = 'DELETE' then
+    update od.patient_file t set it_status = 90
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient and t.nr_file = _nr_file;
+    _path := _f.vc_path;
+    _name := _f.vc_name;
+  elsif _action = 'U' then
+    update od.patient_file t set
+      it_category    = _cat,
+      dt_file        = _dt,
+      vc_tooth       = case when p_json ? 'vc_tooth' then left(nullif(trim(p_json ->> 'vc_tooth'), ''), 40) else t.vc_tooth end,
+      vc_description = case when p_json ? 'vc_description' then left(nullif(trim(p_json ->> 'vc_description'), ''), 300)
+                            else t.vc_description end
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient and t.nr_file = _nr_file;
+    _path := _f.vc_path;
+    _name := _f.vc_name;
+  else
+    if _name is null or _bytes is null or _bytes < 0 then
+      raise exception '%', ad.fn_message('PATIENT_FILE_VALUE_INVALID');
+    end if;
+    _ext := case _mime
+              when 'application/pdf' then 'pdf'
+              when 'image/jpeg' then 'jpg'
+              when 'image/png' then 'png'
+              when 'image/webp' then 'webp'
+              when 'image/heic' then 'heic'
+              when 'application/dicom' then case when _type = 2 then 'dcm' end
+            end;
+    if _ext is null then
+      raise exception '%', ad.fn_message('PATIENT_FILE_TYPE_INVALID');
+    end if;
+    if _bytes > 20971520 then
+      raise exception '%', ad.fn_message('PATIENT_FILE_TOO_LARGE');
+    end if;
+    select coalesce(max(t.nr_file), 0) + 1 into _nr_file
+      from od.patient_file t
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient;
+    _path := format('%s/%s/%s/%s.%s', _nr_company, _nr_branch, _nr_patient, gen_random_uuid(), _ext);
+    insert into od.patient_file (nr_company, nr_branch, nr_patient, nr_file, it_type, it_category, vc_path, vc_name,
+                                 vc_mime, qt_bytes, dt_file, vc_tooth, vc_description, nr_user, nr_operator)
+    values (_nr_company, _nr_branch, _nr_patient, _nr_file, _type, _cat, _path, _name, _mime, _bytes, _dt,
+            left(nullif(trim(p_json ->> 'vc_tooth'), ''), 40), left(nullif(trim(p_json ->> 'vc_description'), ''), 300),
+            _nr_user, _nr_user);
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS',
+    case _action when 'I' then 'CREATE' when 'U' then 'UPDATE' else 'DELETE' end,
+    'patient_file', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_file::text,
+    format('%s %s %s do paciente %s', case when _type = 1 then 'Foto' else 'Exame' end, left(_name, 60),
+           case _action when 'I' then 'anexado' when 'U' then 'alterado' else 'excluído' end, _vc_name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_file', _nr_file, 'it_type', _type, 'qt_bytes', _bytes));
+
+  return jsonb_build_object('nr_file', _nr_file, 'vc_path', _path);
+end;
+$$;
+
+revoke all on function ad.patient_file_save(jsonb) from public, anon;
+grant execute on function ad.patient_file_save(jsonb) to authenticated;

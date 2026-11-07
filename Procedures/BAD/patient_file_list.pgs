@@ -1,0 +1,94 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_file_list(jsonb)                                   ::
+  ::  UsedBy      : Flutter (fotos/exames); Edge Function patient-file            ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Fotos e exames do paciente (LER na tela PATIENTS), mais recentes primeiro.
+    A Edge Function patient-file usa esta RPC (com o JWT do usuario) antes de
+    gerar as URLs assinadas de visualizacao/download.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    it_type     integer  opcional 1 fotos | 2 exames
+    nr_files    array    opcional: so estes nr_file
+
+  Output jsonb:
+    {"files": [{"nr_file", "it_type", "it_category", "vc_path", "vc_name", "vc_mime", "qt_bytes",
+                "dt_file", "vc_tooth", "vc_description", "vc_user", "dh_created"}],
+     "permission": {"id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND,
+    PATIENT_FILE_VALUE_INVALID
+*/
+create or replace function ad.patient_file_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _perm       jsonb;
+  _type       smallint;
+  _files      bigint[];
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_file_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  if not exists (select 1 from od.patient p where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                              and p.nr_patient = _nr_patient) then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+  begin
+    _type := (p_json ->> 'it_type')::smallint;
+    if jsonb_typeof(p_json -> 'nr_files') = 'array' then
+      select array_agg(x::bigint) into _files from jsonb_array_elements_text(p_json -> 'nr_files') x;
+    end if;
+  exception when others then
+    raise exception '%', ad.fn_message('PATIENT_FILE_VALUE_INVALID');
+  end;
+
+  return jsonb_build_object(
+    'files', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_file', f.nr_file, 'it_type', f.it_type, 'it_category', f.it_category, 'vc_path', f.vc_path,
+               'vc_name', f.vc_name, 'vc_mime', f.vc_mime, 'qt_bytes', f.qt_bytes, 'dt_file', f.dt_file,
+               'vc_tooth', f.vc_tooth, 'vc_description', f.vc_description, 'vc_user', u.vc_name,
+               'dh_created', f.dh_created)
+             order by f.dt_file desc, f.nr_file desc)
+        from od.patient_file f
+        left join ad.app_user u on u.nr_user = f.nr_user
+       where f.nr_company = _nr_company and f.nr_branch = _nr_branch and f.nr_patient = _nr_patient
+         and f.it_status = 1
+         and (_type is null or f.it_type = _type)
+         and (_files is null or f.nr_file = any (_files))), '[]'::jsonb),
+    'permission', jsonb_build_object(
+      'id_create', coalesce((_perm ->> 'id_create')::boolean, false) or coalesce((_perm ->> 'id_update')::boolean, false),
+      'id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.patient_file_list(jsonb) from public, anon;
+grant execute on function ad.patient_file_list(jsonb) to authenticated;
