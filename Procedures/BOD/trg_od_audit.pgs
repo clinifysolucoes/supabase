@@ -189,3 +189,7 @@ create or replace trigger patient_document_item_audit
 create or replace trigger patient_file_audit
   before insert or update on od.patient_file
   for each row execute function ad.trg_audit();
+
+create or replace trigger online_booking_audit
+  before insert or update on od.online_booking
+  for each row execute function ad.trg_audit();

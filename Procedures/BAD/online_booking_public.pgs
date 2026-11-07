@@ -1,0 +1,227 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (so service_role; nao e do app)           ::
+  ::  Object      : ad.online_booking_public(jsonb)                               ::
+  ::  UsedBy      : Edge Function online-booking (pagina publica, sem login)      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Pagina publica de agendamento. So o service_role executa (a Edge Function
+    online-booking); anon e authenticated nao tem EXECUTE. A clinica e achada
+    pelo endereco (vc_slug) e precisa estar com o agendamento ligado.
+      vc_action = 'INFO'   dados publicos da clinica, mensagem, janela de dias e
+                           profissionais marcados
+      vc_action = 'SLOTS'  horarios livres de um profissional num dia
+                           (od.fn_online_slots), dentro da janela
+      vc_action = 'BOOK'   marca: confere o horario de novo (com a filial
+                           travada), acha o paciente pelo CPF na filial ou cria
+                           a ficha (nome, CPF, nascimento, celular, e-mail) e
+                           cria a consulta como Agendado com it_origin 2. Ate 2
+                           consultas online futuras por CPF.
+    Nao expoe dados de pacientes nem de outras consultas: SLOTS so devolve
+    horarios livres e BOOK so o resumo da propria consulta.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     INFO | SLOTS | BOOK
+    vc_slug          text     obrigatorio
+    nr_professional  bigint   SLOTS e BOOK
+    dt_day           date     SLOTS (dia local)
+    dh_start         text     BOOK: inicio local 'YYYY-MM-DD HH24:MI' (um horario de SLOTS)
+    vc_name, vc_cpf, dt_birth, vc_mobile  BOOK obrigatorios; vc_email, vc_notes opcionais
+
+  Output jsonb:
+    INFO:  {"clinic": {"vc_name", "vc_address", "vc_phone", "vc_city", "vc_state"}, "vc_message",
+            "qt_days_ahead", "dt_today", "dt_last",
+            "professionals": [{"nr_professional", "vc_name", "vc_council", "qt_slot_minutes"}]}
+    SLOTS: {"dt_day", "slots": ["HH24:MI", ...]}
+    BOOK:  {"nr_appointment", "dh_start" (local), "vc_professional", "vc_clinic"}
+
+  Errors: VERSION_MISMATCH, ONLINE_BOOKING_ACTION_INVALID, ONLINE_BOOKING_NOT_FOUND,
+    ONLINE_BOOKING_PROFESSIONAL_INVALID, ONLINE_BOOKING_DATE_INVALID, ONLINE_BOOKING_SLOT_TAKEN,
+    ONLINE_BOOKING_NAME_REQUIRED, ONLINE_BOOKING_CPF_INVALID, ONLINE_BOOKING_BIRTH_INVALID,
+    ONLINE_BOOKING_MOBILE_INVALID, ONLINE_BOOKING_EMAIL_INVALID, ONLINE_BOOKING_LIMIT,
+    ONLINE_BOOKING_PATIENT_INACTIVE
+*/
+create or replace function ad.online_booking_public(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _action   text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _o        od.online_booking;
+  _b        ad.branch;
+  _today    date;
+  _prof     od.professional;
+  _day      date;
+  _start    timestamp;
+  _s0       timestamptz;
+  _s1       timestamptz;
+  _name     text;
+  _cpf      text;
+  _birth    date;
+  _mobile   text;
+  _email    text;
+  _pa       od.patient;
+  _nr_pat   bigint;
+  _nr_app   bigint;
+  _set      od.branch_setting;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'online_booking_public');
+  if _action not in ('INFO', 'SLOTS', 'BOOK') then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_ACTION_INVALID');
+  end if;
+  select o.* into _o
+    from od.online_booking o
+    join ad.branch b on b.nr_company = o.nr_company and b.nr_branch = o.nr_branch
+    join ad.company c on c.nr_company = o.nr_company
+   where o.vc_slug = lower(trim(coalesce(p_json ->> 'vc_slug', ''))) and o.id_enabled
+     and b.it_status = 1 and not b.id_blocked and c.it_status = 1 and not c.id_blocked;
+  if not found then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_NOT_FOUND');
+  end if;
+  select * into _b from ad.branch b where b.nr_company = _o.nr_company and b.nr_branch = _o.nr_branch;
+  _today := (now() at time zone _b.vc_timezone)::date;
+
+  if _action = 'INFO' then
+    return jsonb_build_object(
+      'clinic', jsonb_build_object(
+        'vc_name', _b.vc_name,
+        'vc_address', nullif(concat_ws(', ', _b.vc_address, _b.vc_address_number, _b.vc_address_extra, _b.vc_district), ''),
+        'vc_phone', _b.vc_phone, 'vc_city', _b.vc_city, 'vc_state', _b.vc_state),
+      'vc_message', _o.vc_message,
+      'qt_days_ahead', _o.qt_days_ahead,
+      'dt_today', _today,
+      'dt_last', _today + _o.qt_days_ahead,
+      'professionals', coalesce((
+        select jsonb_agg(jsonb_build_object(
+                 'nr_professional', p.nr_professional, 'vc_name', p.vc_name, 'vc_council', p.vc_council,
+                 'qt_slot_minutes', p.qt_slot_minutes) order by p.vc_name)
+          from od.professional p
+         where p.nr_company = _o.nr_company and p.nr_branch = _o.nr_branch and p.it_status = 1 and p.id_online),
+        '[]'::jsonb));
+  end if;
+
+  select * into _prof from od.professional p
+   where p.nr_company = _o.nr_company and p.nr_branch = _o.nr_branch
+     and p.nr_professional = (p_json ->> 'nr_professional')::bigint and p.it_status = 1 and p.id_online;
+  if not found then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_PROFESSIONAL_INVALID');
+  end if;
+
+  if _action = 'SLOTS' then
+    begin
+      _day := (p_json ->> 'dt_day')::date;
+    exception when others then
+      raise exception '%', ad.fn_message('ONLINE_BOOKING_DATE_INVALID');
+    end;
+    if _day is null or _day < _today or _day > _today + _o.qt_days_ahead then
+      raise exception '%', ad.fn_message('ONLINE_BOOKING_DATE_INVALID');
+    end if;
+    return jsonb_build_object(
+      'dt_day', _day,
+      'slots', coalesce((
+        select jsonb_agg(to_char(s.dh_start at time zone _b.vc_timezone, 'HH24:MI') order by s.dh_start)
+          from od.fn_online_slots(_o.nr_company, _o.nr_branch, _prof.nr_professional, _day, _o.qt_min_hours) s),
+        '[]'::jsonb));
+  end if;
+
+  /* BOOK -------------------------------------------------------------------*/
+  _name   := left(nullif(regexp_replace(trim(coalesce(p_json ->> 'vc_name', '')), '\s+', ' ', 'g'), ''), 120);
+  _cpf    := nullif(regexp_replace(coalesce(p_json ->> 'vc_cpf', ''), '\D', '', 'g'), '');
+  _mobile := nullif(regexp_replace(coalesce(p_json ->> 'vc_mobile', ''), '\D', '', 'g'), '');
+  _email  := lower(nullif(trim(p_json ->> 'vc_email'), ''));
+  if _name is null or length(_name) < 3 then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_NAME_REQUIRED');
+  end if;
+  if _cpf is null or not ad.fn_cpf_is_valid(_cpf) then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_CPF_INVALID');
+  end if;
+  begin
+    _birth := (p_json ->> 'dt_birth')::date;
+  exception when others then
+    _birth := null;
+  end;
+  if _birth is null or _birth > _today or _birth < _today - interval '120 years' then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_BIRTH_INVALID');
+  end if;
+  if _mobile is null or _mobile !~ '^[0-9]{10,11}$' then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_MOBILE_INVALID');
+  end if;
+  if _email is not null and (_email !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' or length(_email) > 120) then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_EMAIL_INVALID');
+  end if;
+  begin
+    _start := to_timestamp(p_json ->> 'dh_start', 'YYYY-MM-DD HH24:MI')::timestamp;
+  exception when others then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_DATE_INVALID');
+  end;
+  _day := _start::date;
+  if _day < _today or _day > _today + _o.qt_days_ahead then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_DATE_INVALID');
+  end if;
+
+  -- a filial travada serializa as reservas: o horario e conferido de novo aqui
+  perform 1 from ad.branch b where b.nr_company = _o.nr_company and b.nr_branch = _o.nr_branch for update;
+  _s0 := _start at time zone _b.vc_timezone;
+  select s.dh_start, s.dh_end into _s0, _s1
+    from od.fn_online_slots(_o.nr_company, _o.nr_branch, _prof.nr_professional, _day, _o.qt_min_hours) s
+   where s.dh_start = _s0;
+  if not found then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_SLOT_TAKEN');
+  end if;
+
+  select * into _pa from od.patient p
+   where p.nr_company = _o.nr_company and p.nr_branch = _o.nr_branch and p.vc_cpf = _cpf;
+  if found then
+    if _pa.it_status <> 1 then
+      raise exception '%', ad.fn_message('ONLINE_BOOKING_PATIENT_INACTIVE');
+    end if;
+    _nr_pat := _pa.nr_patient;
+    if (select count(*) from od.appointment a
+         where a.nr_company = _o.nr_company and a.nr_branch = _o.nr_branch and a.nr_patient = _nr_pat
+           and a.it_origin = 2 and a.it_status not in (7, 90) and a.dh_start > now()) >= 2 then
+      raise exception '%', ad.fn_message('ONLINE_BOOKING_LIMIT');
+    end if;
+    -- completa o que faltar na ficha (nunca sobrescreve)
+    update od.patient p set
+      vc_mobile = coalesce(p.vc_mobile, _mobile),
+      vc_email  = coalesce(p.vc_email, _email)
+     where p.nr_company = _o.nr_company and p.nr_branch = _o.nr_branch and p.nr_patient = _nr_pat;
+  else
+    select * into _set from od.branch_setting s where s.nr_company = _o.nr_company and s.nr_branch = _o.nr_branch;
+    select coalesce(max(p.nr_patient), 0) + 1 into _nr_pat
+      from od.patient p where p.nr_company = _o.nr_company and p.nr_branch = _o.nr_branch;
+    insert into od.patient (nr_company, nr_branch, nr_patient, vc_name, vc_cpf, dt_birth, vc_mobile, vc_email,
+                            it_source, vc_record_number)
+    values (_o.nr_company, _o.nr_branch, _nr_pat, _name, _cpf, _birth, _mobile, _email, 99,
+            case when coalesce(_set.id_auto_record_number, false) then _set.nr_next_record::text end);
+    if coalesce(_set.id_auto_record_number, false) then
+      update od.branch_setting s set nr_next_record = s.nr_next_record + 1
+       where s.nr_company = _o.nr_company and s.nr_branch = _o.nr_branch;
+    end if;
+  end if;
+
+  select coalesce(max(a.nr_appointment), 0) + 1 into _nr_app
+    from od.appointment a where a.nr_company = _o.nr_company and a.nr_branch = _o.nr_branch;
+  insert into od.appointment (nr_company, nr_branch, nr_appointment, it_type, nr_patient, nr_professional,
+                              vc_notes, dh_start, dh_end, it_status, it_origin)
+  values (_o.nr_company, _o.nr_branch, _nr_app, 1, _nr_pat, _prof.nr_professional,
+          nullif(concat_ws(E'\n', 'Agendamento online.', left(nullif(trim(p_json ->> 'vc_notes'), ''), 500)), ''),
+          _s0, _s1, 1, 2);
+
+  return jsonb_build_object(
+    'nr_appointment', _nr_app,
+    'dh_start', to_char(_s0 at time zone _b.vc_timezone, 'YYYY-MM-DD HH24:MI'),
+    'vc_professional', _prof.vc_name,
+    'vc_clinic', _b.vc_name);
+end;
+$$;
+
+revoke all on function ad.online_booking_public(jsonb) from public, anon, authenticated;
+grant execute on function ad.online_booking_public(jsonb) to service_role;

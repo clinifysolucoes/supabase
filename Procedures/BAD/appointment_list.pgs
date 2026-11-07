@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 04/11/2026 - selo financeiro it_fin_status (fase 2)          ::
+  ::  Change      : 07/11/2026 - it_origin (agendamento online)                 ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda da filial num periodo (dia, semana ou mes): consultas e compromissos
@@ -30,7 +30,7 @@
                        "vc_patient_mobile", "nr_professional", "vc_professional_name",
                        "vc_professional_color", "nr_procedure", "vc_procedure_name",
                        "vc_title", "vc_notes", "dh_start", "dh_end", "id_all_day",
-                       "id_fit_in", "it_status", "vc_created_by", "dh_created",
+                       "id_fit_in", "it_status", "it_origin" (1 agenda, 2 online), "vc_created_by", "dh_created",
                        "it_fin_status" (selo do financeiro, so com LER em FINANCE: null sem
                        fechamento esperado, 1 atendido sem recebimento, 2 recebimento em
                        aberto, 3 tudo recebido)}],
@@ -112,6 +112,7 @@ begin
              'id_all_day',            a.id_all_day,
              'id_fit_in',             a.id_fit_in,
              'it_status',             a.it_status,
+             'it_origin',             a.it_origin,
              'vc_created_by',         u.vc_name,
              'dh_created',            a.dh_created,
              'it_fin_status',         case when not _fin then null

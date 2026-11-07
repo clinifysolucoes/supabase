@@ -1,0 +1,84 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_online_slots(bigint, bigint, bigint, date, integer)     ::
+  ::  UsedBy      : ad.online_booking_slots, ad.online_booking_create             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Horarios livres de um profissional num dia (no fuso da filial), na duracao
+    de consulta do profissional (qt_slot_minutes): dentro do horario de
+    atendimento dele (ou, sem horario proprio, do horario da clinica), a partir
+    de agora + p_min_hours, sem compromisso da clinica no periodo e abaixo do
+    limite de consultas no mesmo horario (qt_max_parallel). Encaixes nao
+    ocupam. Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_professional, p_date (dia local), p_min_hours
+  Output: setof (dh_start timestamptz, dh_end timestamptz)
+*/
+create or replace function od.fn_online_slots(
+  p_nr_company      bigint,
+  p_nr_branch       bigint,
+  p_nr_professional bigint,
+  p_date            date,
+  p_min_hours       integer)
+returns table (dh_start timestamptz, dh_end timestamptz)
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _tz       text;
+  _dur      integer;
+  _parallel integer;
+  _dow      smallint := extract(dow from p_date)::smallint;
+  _from     timestamptz := now() + make_interval(hours => coalesce(p_min_hours, 0));
+begin
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch;
+  select p.qt_slot_minutes into _dur from od.professional p
+   where p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.nr_professional = p_nr_professional;
+  if _tz is null or _dur is null or _dur <= 0 then
+    return;
+  end if;
+  select coalesce(max(s.qt_max_parallel), 1) into _parallel
+    from od.branch_setting s where s.nr_company = p_nr_company and s.nr_branch = p_nr_branch;
+
+  return query
+  with win as (
+    select ps.qt_minute_start as m0, ps.qt_minute_end as m1
+      from od.professional_schedule ps
+     where ps.nr_company = p_nr_company and ps.nr_branch = p_nr_branch
+       and ps.nr_professional = p_nr_professional and ps.it_weekday = _dow
+    union all
+    select bh.qt_minute_start, bh.qt_minute_end
+      from od.branch_hour bh
+     where bh.nr_company = p_nr_company and bh.nr_branch = p_nr_branch and bh.it_weekday = _dow
+       and not exists (select 1 from od.professional_schedule ps
+                        where ps.nr_company = p_nr_company and ps.nr_branch = p_nr_branch
+                          and ps.nr_professional = p_nr_professional)
+  ),
+  cand as (
+    select distinct ((p_date + make_interval(mins => g)) at time zone _tz) as s0,
+                    ((p_date + make_interval(mins => g + _dur)) at time zone _tz) as s1
+      from win w, generate_series(w.m0, w.m1 - _dur, _dur) g
+  )
+  select c.s0, c.s1
+    from cand c
+   where c.s0 >= _from
+     and not exists (
+       select 1 from od.appointment a
+        where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch
+          and a.nr_professional is null and a.it_status not in (7, 90) and not a.id_fit_in
+          and a.dh_start < c.s1 and c.s0 < a.dh_end)
+     and (select count(*) from od.appointment a
+           where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch
+             and a.nr_professional = p_nr_professional and a.it_status not in (7, 90) and not a.id_fit_in
+             and a.dh_start < c.s1 and c.s0 < a.dh_end) < _parallel
+   order by c.s0;
+end;
+$$;
+
+revoke all on function od.fn_online_slots(bigint, bigint, bigint, date, integer) from public, anon, authenticated;

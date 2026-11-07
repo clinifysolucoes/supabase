@@ -1,0 +1,129 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.online_booking_settings_save(jsonb)                        ::
+  ::  UsedBy      : Flutter -> rpc('online_booking_settings_save') (Configuracoes) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 07/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava a configuracao do agendamento online da filial (ALTERAR na tela
+    SETTINGS), com update parcial (chave ausente mantem), e quais
+    profissionais aparecem na pagina publica. Ligado exige ao menos um
+    profissional ativo marcado. O endereco (slug) e unico entre todas as
+    clinicas. Grava ad.event_log.
+
+  Input p_json:
+    nr_version     integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    id_enabled     boolean
+    vc_slug        text     3 a 40: letras minusculas, numeros e hifen (normalizado)
+    qt_days_ahead  integer  1 a 180
+    qt_min_hours   integer  0 a 168
+    vc_message     text     ate 500
+    professionals  array    [{"nr_professional", "id_online"}]
+
+  Output jsonb: {"vc_slug", "id_enabled"}
+
+  Errors: VERSION_MISMATCH, ONLINE_BOOKING_BRANCH_REQUIRED, ONLINE_BOOKING_FORBIDDEN,
+    ONLINE_BOOKING_VALUE_INVALID, ONLINE_BOOKING_SLUG_INVALID, ONLINE_BOOKING_SLUG_TAKEN,
+    ONLINE_BOOKING_PROFESSIONAL_INVALID, ONLINE_BOOKING_NO_PROFESSIONAL
+*/
+create or replace function ad.online_booking_settings_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _cur        jsonb;
+  _enabled    boolean;
+  _slug       text;
+  _days       smallint;
+  _hours      smallint;
+  _msg        text;
+  _p          jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'online_booking_settings_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_FORBIDDEN');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  _cur := ad.online_booking_settings_get(jsonb_build_object('nr_version', 1, 'nr_company', _nr_company,
+                                                            'nr_branch', _nr_branch)) -> 'settings';
+  begin
+    _enabled := case when p_json ? 'id_enabled' then coalesce((p_json ->> 'id_enabled')::boolean, false)
+                     else (_cur ->> 'id_enabled')::boolean end;
+    _days    := case when p_json ? 'qt_days_ahead' then (p_json ->> 'qt_days_ahead')::smallint
+                     else (_cur ->> 'qt_days_ahead')::smallint end;
+    _hours   := case when p_json ? 'qt_min_hours' then (p_json ->> 'qt_min_hours')::smallint
+                     else (_cur ->> 'qt_min_hours')::smallint end;
+  exception when others then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_VALUE_INVALID');
+  end;
+  _msg  := case when p_json ? 'vc_message' then left(nullif(trim(p_json ->> 'vc_message'), ''), 500)
+                else _cur ->> 'vc_message' end;
+  _slug := case when p_json ? 'vc_slug' then trim(both '-' from regexp_replace(lower(trim(coalesce(p_json ->> 'vc_slug', ''))),
+                                                                            '[^a-z0-9]+', '-', 'g'))
+                else _cur ->> 'vc_slug' end;
+  if _days is null or _days not between 1 and 180 or _hours is null or _hours not between 0 and 168 then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_VALUE_INVALID');
+  end if;
+  if _slug is null or length(_slug) not between 3 and 40 then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_SLUG_INVALID');
+  end if;
+  if exists (select 1 from od.online_booking o where o.vc_slug = _slug
+                and (o.nr_company, o.nr_branch) <> (_nr_company, _nr_branch)) then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_SLUG_TAKEN');
+  end if;
+
+  if jsonb_typeof(p_json -> 'professionals') = 'array' then
+    for _p in select * from jsonb_array_elements(p_json -> 'professionals') loop
+      begin
+        update od.professional r set id_online = coalesce((_p ->> 'id_online')::boolean, false)
+         where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+           and r.nr_professional = (_p ->> 'nr_professional')::bigint;
+      exception when others then
+        raise exception '%', ad.fn_message('ONLINE_BOOKING_PROFESSIONAL_INVALID');
+      end;
+      if not found then
+        raise exception '%', ad.fn_message('ONLINE_BOOKING_PROFESSIONAL_INVALID');
+      end if;
+    end loop;
+  end if;
+  if _enabled and not exists (select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                                              and r.it_status = 1 and r.id_online) then
+    raise exception '%', ad.fn_message('ONLINE_BOOKING_NO_PROFESSIONAL');
+  end if;
+
+  insert into od.online_booking (nr_company, nr_branch, id_enabled, vc_slug, qt_days_ahead, qt_min_hours, vc_message, nr_operator)
+  values (_nr_company, _nr_branch, _enabled, _slug, _days, _hours, _msg, _nr_user)
+  on conflict (nr_company, nr_branch) do update set
+    id_enabled = excluded.id_enabled, vc_slug = excluded.vc_slug, qt_days_ahead = excluded.qt_days_ahead,
+    qt_min_hours = excluded.qt_min_hours, vc_message = excluded.vc_message;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', 'UPDATE',
+    'online_booking', _nr_company::text || '/' || _nr_branch::text,
+    format('Agendamento online %s (%s)', case when _enabled then 'ligado' else 'desligado' end, _slug),
+    jsonb_build_object('id_enabled', _enabled, 'vc_slug', _slug, 'qt_days_ahead', _days, 'qt_min_hours', _hours));
+
+  return jsonb_build_object('vc_slug', _slug, 'id_enabled', _enabled);
+end;
+$$;
+
+revoke all on function ad.online_booking_settings_save(jsonb) from public, anon;
+grant execute on function ad.online_booking_settings_save(jsonb) to authenticated;

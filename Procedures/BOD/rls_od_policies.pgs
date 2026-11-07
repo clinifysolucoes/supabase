@@ -275,3 +275,9 @@ drop policy if exists patient_file_select on od.patient_file;
 create policy patient_file_select on od.patient_file
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.online_booking
+drop policy if exists online_booking_select on od.online_booking;
+create policy online_booking_select on od.online_booking
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
