@@ -1,0 +1,89 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.whatsapp_message_list(jsonb)                               ::
+  ::  UsedBy      : Flutter -> rpc('whatsapp_message_list') (Configuracoes)       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Historico dos alertas por WhatsApp da filial (LER na tela SETTINGS), mais
+    recentes primeiro, com paciente, consulta, situacao e resposta. Filtro por
+    tipo e situacao; pagina de ate 200.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_kind, it_status   integer  opcionais
+    nr_offset, qt_limit  integer  opcionais (padrao 0 e 50)
+
+  Output jsonb:
+    {"messages": [{"nr_message", "it_kind", "nr_patient", "vc_patient", "nr_appointment", "dh_appointment",
+                   "dt_ref", "vc_to", "vc_template", "it_status", "vc_error", "dh_sent", "dh_status",
+                   "vc_reply", "dh_reply", "dh_created"}], "qt_total"}
+
+  Errors: VERSION_MISMATCH, WHATSAPP_BRANCH_REQUIRED, WHATSAPP_FORBIDDEN, WHATSAPP_VALUE_INVALID
+*/
+create or replace function ad.whatsapp_message_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       smallint;
+  _status     smallint;
+  _offset     integer;
+  _limit      integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'whatsapp_message_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('WHATSAPP_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('WHATSAPP_FORBIDDEN');
+  end if;
+  begin
+    _kind   := (p_json ->> 'it_kind')::smallint;
+    _status := (p_json ->> 'it_status')::smallint;
+    _offset := greatest(coalesce((p_json ->> 'nr_offset')::integer, 0), 0);
+    _limit  := least(greatest(coalesce((p_json ->> 'qt_limit')::integer, 50), 1), 200);
+  exception when others then
+    raise exception '%', ad.fn_message('WHATSAPP_VALUE_INVALID');
+  end;
+
+  return jsonb_build_object(
+    'messages', coalesce((
+      select jsonb_agg(x.j order by x.dh_created desc, x.nr_message desc)
+        from (select m.dh_created, m.nr_message, jsonb_build_object(
+                       'nr_message', m.nr_message, 'it_kind', m.it_kind, 'nr_patient', m.nr_patient,
+                       'vc_patient', p.vc_name, 'nr_appointment', m.nr_appointment, 'dh_appointment', a.dh_start,
+                       'dt_ref', m.dt_ref, 'vc_to', m.vc_to, 'vc_template', m.vc_template, 'it_status', m.it_status,
+                       'vc_error', m.vc_error, 'dh_sent', m.dh_sent, 'dh_status', m.dh_status,
+                       'vc_reply', m.vc_reply, 'dh_reply', m.dh_reply, 'dh_created', m.dh_created) as j
+                from od.whatsapp_message m
+                join od.patient p on p.nr_company = m.nr_company and p.nr_branch = m.nr_branch
+                                 and p.nr_patient = m.nr_patient
+                left join od.appointment a on a.nr_company = m.nr_company and a.nr_branch = m.nr_branch
+                                          and a.nr_appointment = m.nr_appointment
+               where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+                 and (_kind is null or m.it_kind = _kind) and (_status is null or m.it_status = _status)
+               order by m.dh_created desc, m.nr_message desc
+               offset _offset limit _limit) x), '[]'::jsonb),
+    'qt_total', (select count(*) from od.whatsapp_message m
+                  where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+                    and (_kind is null or m.it_kind = _kind) and (_status is null or m.it_status = _status)));
+end;
+$$;
+
+revoke all on function ad.whatsapp_message_list(jsonb) from public, anon;
+grant execute on function ad.whatsapp_message_list(jsonb) to authenticated;

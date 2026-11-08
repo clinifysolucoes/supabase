@@ -426,6 +426,9 @@ sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 | `fin-attachment` | anexos do financeiro: valida com `ad.fin_attachment_save`/`ad.fin_attachment_list` (JWT do usuário) e gera URL assinada de upload/download no bucket privado `finance` (criado na primeira chamada) | nenhum extra |
 | `patient-file` | fotos e exames do prontuário: valida com `ad.patient_file_save`/`ad.patient_file_list` (JWT do usuário) e gera URLs assinadas de upload, visualização (lote) e download no bucket privado `patient` (criado na primeira chamada, até 20 MB) | nenhum extra |
 | `online-booking` | página pública de agendamento (sem login, `verify_jwt = false`): repassa info/horários/reserva para `ad.online_booking_public`, que só o service_role executa e faz todas as validações; campo isca contra robôs | nenhum extra |
+| `whatsapp-config` | configuração do WhatsApp da clínica: valida com `ad.whatsapp_settings_save` (JWT, SETTINGS) e cifra a chave da Meta (AES-GCM) antes de gravar por `ad.whatsapp_dispatch` SECRET; envia o teste `hello_world` | `WHATSAPP_ENC_KEY` (32 bytes base64) |
+| `whatsapp-send` | envio da fila (sem login, `verify_jwt = false`, header `x-cron-secret`): `ad.whatsapp_dispatch` CLAIM → Cloud API da Meta → RESULT; chamada a cada 10 min pelo workflow `whatsapp-cron.yml` | `WHATSAPP_ENC_KEY`, `CRON_SECRET` |
+| `whatsapp-webhook` | retorno da Meta (sem login, `verify_jwt = false`, assinatura `X-Hub-Signature-256`): situações e respostas Confirmar/Remarcar → `ad.whatsapp_dispatch` WEBHOOK | `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` |
 | `user-password-reset` | o administrador define uma senha nova para um usuário da empresa: valida com `ad.user_password_reset_check` (JWT do admin; conta compartilhada com outra empresa fica de fora) e troca no Auth com service_role | nenhum extra |
 
 ### Setup do projeto Supabase (uma vez por ambiente)

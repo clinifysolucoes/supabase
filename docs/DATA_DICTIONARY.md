@@ -75,6 +75,9 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.patient_file`](#odpatientfile) | Foto ou exame do paciente | Fotos (intraorais, extraorais, antes/depois) e exames (radiografias, tomografias, laudos) do prontuário. O arquivo fica no Storage (bucket privado patient); upload, visualização e download só por URL assinada da Edge Function patient-file, que valida antes pelas RPCs patient_file_save / patient_file_list com o JWT do usuário. |
 | [`od.online_booking`](#odonlinebooking) | Agendamento online | Configuração da página pública de agendamento da filial. A página chama a Edge Function online-booking (sem login), que usa ad.online_booking_public com service_role; a consulta entra como Agendado com it_origin 2 e a ficha do paciente é achada pelo CPF ou criada. |
 | [`od.signature`](#odsignature) | Assinatura eletrônica | Assinatura eletrônica simples (Lei 14.063/2020) de documentos do paciente e de orçamentos, coletada na tela do app com o aceite de quem assina: imagem do traço, assinante, hash do conteúdo, código de verificação, data/hora, IP e navegador. Não se altera nem se exclui. |
+| [`od.whatsapp_setting`](#odwhatsappsetting) | Configuração do WhatsApp | WhatsApp Cloud API (Meta) da filial com o número da própria clínica: identificadores do número e da conta, idioma e quais alertas mandar, cada um com o nome do modelo aprovado na Meta. A chave de acesso fica cifrada em whatsapp_secret. |
+| [`od.whatsapp_secret`](#odwhatsappsecret) | Chave do WhatsApp (cifrada) | Chave de acesso da Meta da filial cifrada com AES-GCM pela Edge Function whatsapp-config (a chave de cifra fica só nos secrets das Edge Functions). Sem policy e sem grant para authenticated: ninguém lê pela API. |
+| [`od.whatsapp_message`](#odwhatsappmessage) | Mensagem de WhatsApp | Fila e histórico dos alertas por WhatsApp: enfileirados por od.fn_whatsapp_enqueue (um por consulta ou por paciente e dia), enviados pela Edge Function whatsapp-send e atualizados pelo webhook (entregue, lida, resposta dos botões). |
 | [`od.fin_cash_session`](#odfincashsession) | Sessão de caixa | Caixa do dia por pessoa: abertura (valor contado) e fechamento (contado × esperado) numa conta do tipo caixa. Uma sessão aberta por conta e por usuário; recebimentos, pagamentos e transferências feitos na conta enquanto aberta entram no fechamento. nr_session é sequencial por filial. |
 | [`od.fin_transfer`](#odfintransfer) | Transferência entre contas | Dinheiro que passa de uma conta da filial para outra (não é receita nem despesa): transferência, sangria (do caixa para outra conta) ou suprimento (de outra conta para o caixa). Entra no saldo e no extrato das duas contas. nr_transfer é sequencial por filial. |
 | [`od.fin_card_rate`](#odfincardrate) | Taxa de recebimento | Taxa da filial por forma de pagamento (cartão de crédito, débito, boleto, cheque) e faixa de parcelas: percentual, tarifa fixa, prazo em dias para o dinheiro cair e a conta destino. Com taxa cadastrada, a baixa nessa forma gera recebíveis. nr_rate é sequencial por filial. |
@@ -164,6 +167,10 @@ erDiagram
   branch ||--o| online_booking : "agendamento online"
   patient_document ||--o{ signature : "assinaturas"
   budget ||--o{ signature : "assinaturas"
+  branch ||--o| whatsapp_setting : "WhatsApp"
+  whatsapp_setting ||--o| whatsapp_secret : "chave cifrada"
+  patient ||--o{ whatsapp_message : "mensagens"
+  appointment ||--o{ whatsapp_message : "lembretes"
   procedure ||--o{ budget_item : "orçado"
   budget ||--o{ fin_entry : "gera contas"
   fin_entry ||--o{ fin_receipt : "recibos"
@@ -704,6 +711,50 @@ erDiagram
     varchar vc_ip
     varchar vc_user_agent
     bigint nr_user FK
+  }
+  whatsapp_setting {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    boolean id_enabled
+    varchar vc_phone_number_id
+    varchar vc_waba_id
+    varchar vc_display_phone
+    varchar vc_language
+    boolean id_reminder
+    smallint qt_reminder_hours
+    varchar vc_tpl_reminder
+    boolean id_booked
+    varchar vc_tpl_booked
+    boolean id_birthday
+    varchar vc_tpl_birthday
+    boolean id_return
+    varchar vc_tpl_return
+    smallint qt_send_hour
+  }
+  whatsapp_secret {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    text vc_token_enc
+    timestamptz dh_saved
+  }
+  whatsapp_message {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_message PK
+    smallint it_kind
+    bigint nr_patient FK
+    bigint nr_appointment FK
+    date dt_ref
+    varchar vc_to
+    varchar vc_template
+    jsonb js_params
+    smallint it_status
+    varchar vc_wa_id
+    varchar vc_error
+    timestamptz dh_sent
+    timestamptz dh_status
+    varchar vc_reply
+    timestamptz dh_reply
   }
   fin_cash_session {
     bigint nr_company PK, FK
@@ -1996,6 +2047,86 @@ Assinatura eletrônica simples (Lei 14.063/2020) de documentos do paciente e de 
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.whatsapp_setting
+
+**Configuração do WhatsApp**
+
+WhatsApp Cloud API (Meta) da filial com o número da própria clínica: identificadores do número e da conta, idioma e quais alertas mandar, cada um com o nome do modelo aprovado na Meta. A chave de acesso fica cifrada em whatsapp_secret.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via whatsapp_settings_save (tela SETTINGS), chamada pela Edge Function whatsapp-config.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `id_enabled` | `boolean` |  | NOT NULL | `false` | Envio ligado (exige número e chave salva). |
+| `vc_phone_number_id` | `varchar(40)` |  | NULL |  | Identificação do número de telefone na Meta (Phone number ID). |
+| `vc_waba_id` | `varchar(40)` |  | NULL |  | Identificação da conta do WhatsApp Business (WABA ID). |
+| `vc_display_phone` | `varchar(20)` |  | NULL |  | Número exibido (só dígitos), informativo. |
+| `vc_language` | `varchar(10)` |  | NOT NULL | `'pt_BR'` | Idioma dos modelos na Meta. |
+| `id_reminder` | `boolean` |  | NOT NULL | `true` | Manda o lembrete das consultas Agendado. |
+| `qt_reminder_hours` | `smallint` |  | NOT NULL | `24` | Quantas horas antes da consulta o lembrete sai (1 a 72). |
+| `vc_tpl_reminder` | `varchar(80)` |  | NOT NULL | `'lembrete_consulta'` | Modelo do lembrete: corpo {{1}} nome, {{2}} clínica, {{3}} data, {{4}} hora, {{5}} profissional; botões de resposta rápida Confirmar e Remarcar. |
+| `id_booked` | `boolean` |  | NOT NULL | `false` | Manda o aviso logo depois do agendamento. |
+| `vc_tpl_booked` | `varchar(80)` |  | NOT NULL | `'consulta_agendada'` | Modelo do aviso de agendamento (mesmos parâmetros do lembrete, sem botões). |
+| `id_birthday` | `boolean` |  | NOT NULL | `false` | Manda parabéns no aniversário. |
+| `vc_tpl_birthday` | `varchar(80)` |  | NOT NULL | `'aniversario_paciente'` | Modelo de aniversário: {{1}} nome, {{2}} clínica. |
+| `id_return` | `boolean` |  | NOT NULL | `false` | Manda o aviso na data do alerta de retorno do paciente. |
+| `vc_tpl_return` | `varchar(80)` |  | NOT NULL | `'retorno_paciente'` | Modelo de retorno: {{1}} nome, {{2}} clínica, {{3}} texto do alerta. |
+| `qt_send_hour` | `smallint` |  | NOT NULL | `9` | A partir de que hora (fuso da filial) saem aniversário e retorno (6 a 20). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.whatsapp_secret
+
+**Chave do WhatsApp (cifrada)**
+
+Chave de acesso da Meta da filial cifrada com AES-GCM pela Edge Function whatsapp-config (a chave de cifra fica só nos secrets das Edge Functions). Sem policy e sem grant para authenticated: ninguém lê pela API.
+
+**RLS:** Sem policy: só as functions security definer (service_role) usam.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `whatsapp_setting.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `whatsapp_setting.nr_branch` | NOT NULL |  | Número da filial. |
+| `vc_token_enc` | `text` |  | NOT NULL |  | Chave cifrada no formato 'v1:<iv base64>:<dados base64>'. |
+| `dh_saved` | `timestamptz` |  | NOT NULL | `now()` | Quando a chave foi salva. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.whatsapp_message
+
+**Mensagem de WhatsApp**
+
+Fila e histórico dos alertas por WhatsApp: enfileirados por od.fn_whatsapp_enqueue (um por consulta ou por paciente e dia), enviados pela Edge Function whatsapp-send e atualizados pelo webhook (entregue, lida, resposta dos botões).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via ad.whatsapp_dispatch (service_role).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_message` | `bigint` | PK3 | NOT NULL |  | Número sequencial da mensagem na filial. |
+| `it_kind` | `smallint` |  | NOT NULL |  | Tipo de alerta. Valores: 1 = Lembrete da consulta (botões Confirmar / Remarcar); 2 = Aviso de agendamento; 3 = Aniversário; 4 = Retorno; 9 = Teste. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_appointment` | `bigint` | FK → `appointment.nr_appointment` | NULL |  | Consulta (lembrete e aviso de agendamento). |
+| `dt_ref` | `date` |  | NOT NULL |  | Dia de referência (da consulta, ou do aniversário/retorno), usado para não repetir. |
+| `vc_to` | `varchar(15)` |  | NOT NULL |  | Celular de destino com 55 (só dígitos). |
+| `vc_template` | `varchar(80)` |  | NOT NULL |  | Modelo usado. |
+| `js_params` | `jsonb` |  | NOT NULL | `'[]'` | Parâmetros do corpo do modelo, em ordem. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Na fila; 2 = Enviada; 3 = Entregue; 4 = Lida; 5 = Enviando; 9 = Erro; 90 = Cancelada. |
+| `vc_wa_id` | `varchar(120)` |  | NULL |  | Identificação da mensagem na Meta (único). |
+| `vc_error` | `varchar(500)` |  | NULL |  | Erro devolvido pela Meta. |
+| `dh_sent` | `timestamptz` |  | NULL |  | Quando foi enviada. |
+| `dh_status` | `timestamptz` |  | NULL |  | Última mudança de situação. |
+| `vc_reply` | `varchar(20)` |  | NULL |  | Resposta do paciente pelos botões. Valores: CONFIRM = Confirmou (a consulta Agendado vira Confirmado); RESCHEDULE = Pediu para remarcar (anotado na consulta). |
+| `dh_reply` | `timestamptz` |  | NULL |  | Quando respondeu. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.fin_cash_session
 
 **Sessão de caixa**
@@ -2558,6 +2689,10 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.patient_document_list(p_json jsonb)` | authenticated | Documentos emitidos do paciente (ler na tela PATIENTS) com os medicamentos, o paciente e o emitente para o PDF, e as permissões. Cada documento traz qt_signatures. |
 | `ad.signature_save(p_json jsonb)` | authenticated | Registra uma assinatura eletrônica simples coletada na tela: documento (criar ou alterar em PATIENTS) ou orçamento em aberto/aprovado (alterar em BUDGETS). Exige o aceite; guarda imagem, assinante, hash do conteúdo, código de verificação, IP e navegador. Grava event_log sem a imagem. |
 | `ad.signature_list(p_json jsonb)` | authenticated | Assinaturas de um documento (ler em PATIENTS) ou orçamento (ler em BUDGETS) com a imagem e id_valid (o conteúdo atual tem o mesmo hash da assinatura). |
+| `ad.whatsapp_settings_get(p_json jsonb)` | authenticated | Configuração do WhatsApp da filial (ler na tela SETTINGS), se a chave já foi salva (nunca a devolve) e o total de mensagens dos últimos 30 dias por situação. |
+| `ad.whatsapp_settings_save(p_json jsonb)` | authenticated | Grava a configuração do WhatsApp (alterar na tela SETTINGS), update parcial; id_check_only só valida a permissão. Chamada pela Edge Function whatsapp-config (a chave da Meta não passa por aqui). Ligar exige número e chave; desligar cancela a fila. Grava event_log. |
+| `ad.whatsapp_message_list(p_json jsonb)` | authenticated | Histórico dos alertas por WhatsApp da filial (ler na tela SETTINGS), mais recentes primeiro, com paciente, consulta, situação e resposta; filtro por tipo e situação, paginado. |
+| `ad.whatsapp_dispatch(p_json jsonb)` | service_role | Lado servidor do WhatsApp, só service_role (Edge Functions): CLAIM (enfileira e pega um lote com número e chave cifrada), RESULT (enviada/erro), WEBHOOK (situações e respostas: Confirmar confirma a consulta, Remarcar anota), SECRET (grava a chave cifrada) e CONFIG (dados para o teste). |
 | `ad.patient_file_save(p_json jsonb)` | authenticated | Registro das fotos e exames do paciente na tela PATIENTS, chamado pela Edge Function patient-file antes da URL assinada: I (criar ou alterar) reserva o caminho no bucket patient (até 20 MB; imagem, PDF ou DICOM em exame), U (alterar) muda categoria, data, dente e descrição, DELETE (alterar) devolve o caminho para apagar o arquivo. Grava event_log só com o nome do arquivo. |
 | `ad.patient_file_list(p_json jsonb)` | authenticated | Fotos e exames do paciente (ler na tela PATIENTS), por tipo ou por lista de nr_file, com as permissões; a Edge Function patient-file usa para validar antes das URLs assinadas. |
 | `ad.online_booking_settings_get(p_json jsonb)` | authenticated | Configuração do agendamento online da filial (ler na tela SETTINGS): ligado, endereço (sugere um pelo nome da filial), janela, antecedência, mensagem e profissionais ativos com id_online. |
@@ -2609,6 +2744,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_medication_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)` | interna | Cria a lista inicial de 30 medicamentos usuais na odontologia com posologia de referência quando a filial ainda não tem nenhum; usado por medication_list. |
 | `od.fn_online_slots(p_nr_company bigint, p_nr_branch bigint, p_nr_professional bigint, p_date date, p_min_hours integer)` | interna | Horários livres de um profissional num dia (fuso da filial) na duração qt_slot_minutes: dentro do horário dele (ou da clínica), a partir de agora + antecedência, sem compromisso da clínica e abaixo de qt_max_parallel; encaixes não ocupam. |
 | `od.fn_signature_hash(p_nr_company bigint, p_nr_branch bigint, p_it_target smallint, p_nr_patient bigint, p_nr_key bigint)` | interna | SHA-256 (hex) do conteúdo assinável: documento (título, texto, data, medicamentos) ou orçamento (paciente, datas, itens, desconto, total, condição). Mesmo cálculo na assinatura e na conferência. |
+| `od.fn_whatsapp_enqueue()` | interna | Enfileira os alertas devidos de todas as filiais com WhatsApp ligado: lembrete (consultas Agendado nas próximas horas), aviso de agendamento (criadas na última hora), aniversário e retorno (a partir da hora de envio, no fuso da filial). Não repete. |
+| `od.fn_whatsapp_phone(p_phone text)` | interna | Celular brasileiro (só dígitos) no formato do WhatsApp (55 + DDD + 9 + número); fixo ou inválido devolve null. |
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
@@ -3126,5 +3263,11 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
+| `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
+| `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
+| `WHATSAPP_NOT_CONFIGURED` | `whatsapp_settings_save`, `whatsapp_dispatch` |  |
+| `WHATSAPP_TEMPLATE_INVALID` | `whatsapp_settings_save` |  |
+| `WHATSAPP_VALUE_INVALID` | `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch` |  |
 
