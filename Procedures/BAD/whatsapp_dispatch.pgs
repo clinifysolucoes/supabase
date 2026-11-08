@@ -1,0 +1,190 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (so service_role; nao e do app)           ::
+  ::  Object      : ad.whatsapp_dispatch(jsonb)                                   ::
+  ::  UsedBy      : Edge Functions whatsapp-send, -webhook, -config               ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lado servidor dos alertas por WhatsApp. So o service_role executa.
+      vc_action = 'CLAIM'    enfileira o devido (od.fn_whatsapp_enqueue), devolve
+                             ate qt_limit mensagens da fila com o numero, a chave
+                             cifrada e o idioma da filial, e as marca "enviando"
+                             (5); "enviando" ha mais de 15 minutos volta para a fila
+      vc_action = 'RESULT'   results: [{nr_company, nr_branch, nr_message,
+                             vc_wa_id | vc_error}] -> enviada (2) ou erro (9)
+      vc_action = 'WEBHOOK'  statuses: [{vc_wa_id, vc_status sent|delivered|read|
+                             failed, vc_error}] (so avanca a situacao) e replies:
+                             [{vc_wa_id (mensagem respondida), vc_payload
+                             CONFIRM|RESCHEDULE}]: Confirmar muda a consulta
+                             Agendado para Confirmado; Remarcar anota na consulta
+      vc_action = 'SECRET'   grava a chave cifrada da filial (a Edge Function
+                             whatsapp-config ja validou o usuario em SETTINGS)
+      vc_action = 'CONFIG'   numero, chave cifrada e idioma de uma filial (teste)
+
+  Output jsonb: CLAIM {"messages": [...], "qt_enqueued"} | RESULT/WEBHOOK {"qt_updated"} |
+                SECRET {"dh_saved"} | CONFIG {"vc_phone_number_id", "vc_token_enc", "vc_language"}
+
+  Errors: VERSION_MISMATCH, WHATSAPP_ACTION_INVALID, WHATSAPP_VALUE_INVALID, WHATSAPP_NOT_CONFIGURED
+*/
+create or replace function ad.whatsapp_dispatch(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _action  text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _limit   integer := least(greatest(coalesce((p_json ->> 'qt_limit')::integer, 50), 1), 200);
+  _n       integer := 0;
+  _k       integer;
+  _q       integer;
+  _x       jsonb;
+  _msgs    jsonb;
+  _status  smallint;
+  _m       od.whatsapp_message;
+  _c       bigint;
+  _b       bigint;
+  _dh      timestamptz;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'whatsapp_dispatch');
+  if _action not in ('CLAIM', 'RESULT', 'WEBHOOK', 'SECRET', 'CONFIG') then
+    raise exception '%', ad.fn_message('WHATSAPP_ACTION_INVALID');
+  end if;
+
+  if _action = 'CLAIM' then
+    update od.whatsapp_message m set it_status = 1
+     where m.it_status = 5 and m.dh_updated < now() - interval '15 minutes';
+    _q := od.fn_whatsapp_enqueue();
+    with pick as (
+      select m.nr_company, m.nr_branch, m.nr_message
+        from od.whatsapp_message m
+        join od.whatsapp_setting w on w.nr_company = m.nr_company and w.nr_branch = m.nr_branch and w.id_enabled
+       where m.it_status = 1
+       order by m.dh_created, m.nr_message
+       limit _limit
+       for update of m skip locked
+    ), upd as (
+      update od.whatsapp_message m set it_status = 5
+        from pick p
+       where m.nr_company = p.nr_company and m.nr_branch = p.nr_branch and m.nr_message = p.nr_message
+      returning m.*
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+             'nr_company', u.nr_company, 'nr_branch', u.nr_branch, 'nr_message', u.nr_message,
+             'it_kind', u.it_kind, 'vc_to', u.vc_to, 'vc_template', u.vc_template, 'js_params', u.js_params,
+             'vc_phone_number_id', w.vc_phone_number_id, 'vc_language', w.vc_language,
+             'vc_token_enc', x.vc_token_enc) order by u.nr_company, u.nr_branch, u.nr_message), '[]'::jsonb)
+      into _msgs
+      from upd u
+      join od.whatsapp_setting w on w.nr_company = u.nr_company and w.nr_branch = u.nr_branch
+      join od.whatsapp_secret x on x.nr_company = u.nr_company and x.nr_branch = u.nr_branch;
+    return jsonb_build_object('messages', _msgs, 'qt_enqueued', _q);
+  end if;
+
+  if _action = 'RESULT' then
+    if jsonb_typeof(p_json -> 'results') <> 'array' then
+      raise exception '%', ad.fn_message('WHATSAPP_VALUE_INVALID');
+    end if;
+    for _x in select * from jsonb_array_elements(p_json -> 'results') loop
+      update od.whatsapp_message m set
+        it_status = case when nullif(_x ->> 'vc_wa_id', '') is not null then 2 else 9 end,
+        vc_wa_id  = nullif(_x ->> 'vc_wa_id', ''),
+        vc_error  = left(_x ->> 'vc_error', 500),
+        dh_sent   = case when nullif(_x ->> 'vc_wa_id', '') is not null then now() end,
+        dh_status = now()
+       where m.nr_company = (_x ->> 'nr_company')::bigint and m.nr_branch = (_x ->> 'nr_branch')::bigint
+         and m.nr_message = (_x ->> 'nr_message')::bigint and m.it_status = 5;
+      get diagnostics _k = row_count;
+      _n := _n + _k;
+    end loop;
+    return jsonb_build_object('qt_updated', _n);
+  end if;
+
+  if _action = 'WEBHOOK' then
+    for _x in select * from jsonb_array_elements(coalesce(p_json -> 'statuses', '[]'::jsonb)) loop
+      _status := case _x ->> 'vc_status' when 'sent' then 2 when 'delivered' then 3 when 'read' then 4
+                                          when 'failed' then 9 end;
+      if _status is null then
+        continue;
+      end if;
+      update od.whatsapp_message m set
+        it_status = _status,
+        vc_error  = case when _status = 9 then left(_x ->> 'vc_error', 500) else m.vc_error end,
+        dh_status = now()
+       where m.vc_wa_id = _x ->> 'vc_wa_id'
+         and (m.it_status in (1, 5) or (m.it_status between 2 and 4 and (_status = 9 or _status > m.it_status)));
+      get diagnostics _k = row_count;
+      _n := _n + _k;
+    end loop;
+    for _x in select * from jsonb_array_elements(coalesce(p_json -> 'replies', '[]'::jsonb)) loop
+      if (_x ->> 'vc_payload') not in ('CONFIRM', 'RESCHEDULE') then
+        continue;
+      end if;
+      update od.whatsapp_message m set vc_reply = _x ->> 'vc_payload', dh_reply = now()
+       where m.vc_wa_id = _x ->> 'vc_wa_id' and m.vc_reply is null
+      returning m.* into _m;
+      if not found then
+        continue;
+      end if;
+      _n := _n + 1;
+      if _m.nr_appointment is not null then
+        if _m.vc_reply = 'CONFIRM' then
+          update od.appointment a set it_status = 2
+           where a.nr_company = _m.nr_company and a.nr_branch = _m.nr_branch
+             and a.nr_appointment = _m.nr_appointment and a.it_status = 1;
+        else
+          update od.appointment a
+             set vc_notes = concat_ws(E'\n', a.vc_notes,
+                   format('Paciente pediu para remarcar pelo WhatsApp em %s.',
+                          to_char(now() at time zone b.vc_timezone, 'DD/MM HH24:MI')))
+            from ad.branch b
+           where b.nr_company = a.nr_company and b.nr_branch = a.nr_branch
+             and a.nr_company = _m.nr_company and a.nr_branch = _m.nr_branch
+             and a.nr_appointment = _m.nr_appointment;
+        end if;
+      end if;
+    end loop;
+    return jsonb_build_object('qt_updated', _n);
+  end if;
+
+  begin
+    _c := (p_json ->> 'nr_company')::bigint;
+    _b := (p_json ->> 'nr_branch')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('WHATSAPP_VALUE_INVALID');
+  end;
+
+  if _action = 'SECRET' then
+    if coalesce(p_json ->> 'vc_token_enc', '') !~ '^v1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$' then
+      raise exception '%', ad.fn_message('WHATSAPP_VALUE_INVALID');
+    end if;
+    if not exists (select 1 from od.whatsapp_setting w where w.nr_company = _c and w.nr_branch = _b) then
+      raise exception '%', ad.fn_message('WHATSAPP_NOT_CONFIGURED');
+    end if;
+    insert into od.whatsapp_secret (nr_company, nr_branch, vc_token_enc)
+    values (_c, _b, p_json ->> 'vc_token_enc')
+    on conflict (nr_company, nr_branch) do update set vc_token_enc = excluded.vc_token_enc, dh_saved = now()
+    returning dh_saved into _dh;
+    return jsonb_build_object('dh_saved', _dh);
+  end if;
+
+  /* CONFIG */
+  select jsonb_build_object('vc_phone_number_id', w.vc_phone_number_id, 'vc_token_enc', x.vc_token_enc,
+                            'vc_language', w.vc_language)
+    into _x
+    from od.whatsapp_setting w
+    join od.whatsapp_secret x on x.nr_company = w.nr_company and x.nr_branch = w.nr_branch
+   where w.nr_company = _c and w.nr_branch = _b and w.vc_phone_number_id is not null;
+  if _x is null then
+    raise exception '%', ad.fn_message('WHATSAPP_NOT_CONFIGURED');
+  end if;
+  return _x;
+end;
+$$;
+
+revoke all on function ad.whatsapp_dispatch(jsonb) from public, anon, authenticated;
+grant execute on function ad.whatsapp_dispatch(jsonb) to service_role;

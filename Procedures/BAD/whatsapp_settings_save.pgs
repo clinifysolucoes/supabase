@@ -1,0 +1,133 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.whatsapp_settings_save(jsonb)                              ::
+  ::  UsedBy      : Edge Function whatsapp-config (JWT do usuario)                ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava a configuracao do WhatsApp da filial (ALTERAR na tela SETTINGS), com
+    update parcial (chave ausente mantem). A chave da Meta NAO passa por aqui:
+    a Edge Function whatsapp-config chama esta RPC com o JWT do usuario (que
+    valida a permissao) e so depois cifra e grava a chave pelo service_role.
+    Ligar exige numero (phone_number_id) e chave salva. Grava ad.event_log.
+
+  Input p_json:
+    nr_version          integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    id_enabled, vc_phone_number_id, vc_waba_id, vc_display_phone, vc_language,
+    id_reminder, qt_reminder_hours (1 a 72), vc_tpl_reminder, id_booked, vc_tpl_booked,
+    id_birthday, vc_tpl_birthday, id_return, vc_tpl_return, qt_send_hour (6 a 20)
+    id_check_only       boolean  opcional: so valida a permissao (nao grava)
+
+  Output jsonb: {"id_enabled", "id_token"}
+
+  Errors: VERSION_MISMATCH, WHATSAPP_BRANCH_REQUIRED, WHATSAPP_FORBIDDEN, WHATSAPP_VALUE_INVALID,
+    WHATSAPP_TEMPLATE_INVALID, WHATSAPP_NOT_CONFIGURED
+*/
+create or replace function ad.whatsapp_settings_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _w          od.whatsapp_setting;
+  _new        od.whatsapp_setting;
+  _js         jsonb;
+  _token      boolean;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'whatsapp_settings_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('WHATSAPP_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('WHATSAPP_FORBIDDEN');
+  end if;
+  _token := exists (select 1 from od.whatsapp_secret x where x.nr_company = _nr_company and x.nr_branch = _nr_branch);
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select * into _w from od.whatsapp_setting w where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+  if not found then
+    insert into od.whatsapp_setting (nr_company, nr_branch, nr_operator) values (_nr_company, _nr_branch, _nr_user)
+    returning * into _w;
+  end if;
+  if coalesce((p_json ->> 'id_check_only')::boolean, false) then
+    return jsonb_build_object('id_enabled', _w.id_enabled, 'id_token', _token);
+  end if;
+
+  -- normaliza: ids e telefone so digitos, modelos minusculos
+  _js := (select coalesce(jsonb_object_agg(k, v), '{}'::jsonb) from jsonb_each(p_json) e(k, v)
+           where k in ('id_enabled', 'vc_phone_number_id', 'vc_waba_id', 'vc_display_phone', 'vc_language',
+                       'id_reminder', 'qt_reminder_hours', 'vc_tpl_reminder', 'id_booked', 'vc_tpl_booked',
+                       'id_birthday', 'vc_tpl_birthday', 'id_return', 'vc_tpl_return', 'qt_send_hour'));
+  _js := _js || (select coalesce(jsonb_object_agg(k,
+                   case when jsonb_typeof(v) = 'string' then
+                          to_jsonb(nullif(case when k in ('vc_phone_number_id', 'vc_waba_id', 'vc_display_phone')
+                                               then regexp_replace(v #>> '{}', '\D', '', 'g')
+                                               when k like 'vc_tpl_%' then lower(trim(v #>> '{}'))
+                                               else trim(v #>> '{}') end, ''))
+                        else v end), '{}'::jsonb)
+                   from jsonb_each(_js) e(k, v) where k like 'vc_%');
+  begin
+    _new := jsonb_populate_record(_w, _js);
+  exception when others then
+    raise exception '%', ad.fn_message('WHATSAPP_VALUE_INVALID');
+  end;
+  if _new.vc_tpl_reminder is null or _new.vc_tpl_booked is null or _new.vc_tpl_birthday is null
+     or _new.vc_tpl_return is null
+     or not (_new.vc_tpl_reminder ~ '^[a-z0-9_]{1,80}$' and _new.vc_tpl_booked ~ '^[a-z0-9_]{1,80}$'
+             and _new.vc_tpl_birthday ~ '^[a-z0-9_]{1,80}$' and _new.vc_tpl_return ~ '^[a-z0-9_]{1,80}$') then
+    raise exception '%', ad.fn_message('WHATSAPP_TEMPLATE_INVALID');
+  end if;
+  if _new.id_enabled is null or _new.id_reminder is null or _new.id_booked is null or _new.id_birthday is null
+     or _new.id_return is null or _new.qt_reminder_hours is null or _new.qt_reminder_hours not between 1 and 72
+     or _new.qt_send_hour is null or _new.qt_send_hour not between 6 and 20
+     or _new.vc_language is null or _new.vc_language !~ '^[a-z]{2}(_[A-Z]{2})?$'
+     or (_new.vc_phone_number_id is not null and _new.vc_phone_number_id !~ '^[0-9]{5,40}$')
+     or (_new.vc_waba_id is not null and _new.vc_waba_id !~ '^[0-9]{5,40}$')
+     or length(coalesce(_new.vc_display_phone, '')) > 20 then
+    raise exception '%', ad.fn_message('WHATSAPP_VALUE_INVALID');
+  end if;
+  if _new.id_enabled and (_new.vc_phone_number_id is null or not _token) then
+    raise exception '%', ad.fn_message('WHATSAPP_NOT_CONFIGURED');
+  end if;
+
+  update od.whatsapp_setting w set
+    id_enabled = _new.id_enabled, vc_phone_number_id = _new.vc_phone_number_id, vc_waba_id = _new.vc_waba_id,
+    vc_display_phone = _new.vc_display_phone, vc_language = _new.vc_language,
+    id_reminder = _new.id_reminder, qt_reminder_hours = _new.qt_reminder_hours, vc_tpl_reminder = _new.vc_tpl_reminder,
+    id_booked = _new.id_booked, vc_tpl_booked = _new.vc_tpl_booked,
+    id_birthday = _new.id_birthday, vc_tpl_birthday = _new.vc_tpl_birthday,
+    id_return = _new.id_return, vc_tpl_return = _new.vc_tpl_return, qt_send_hour = _new.qt_send_hour
+   where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+
+  -- desligar cancela o que ainda estava na fila
+  if not _new.id_enabled then
+    update od.whatsapp_message m set it_status = 90
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.it_status = 1;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', 'UPDATE',
+    'whatsapp_setting', _nr_company::text || '/' || _nr_branch::text,
+    format('WhatsApp %s', case when _new.id_enabled then 'ligado' else 'desligado' end),
+    jsonb_build_object('id_enabled', _new.id_enabled, 'id_reminder', _new.id_reminder, 'id_booked', _new.id_booked,
+                       'id_birthday', _new.id_birthday, 'id_return', _new.id_return));
+
+  return jsonb_build_object('id_enabled', _new.id_enabled, 'id_token', _token);
+end;
+$$;
+
+revoke all on function ad.whatsapp_settings_save(jsonb) from public, anon;
+grant execute on function ad.whatsapp_settings_save(jsonb) to authenticated;

@@ -1,0 +1,122 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_whatsapp_enqueue()                                      ::
+  ::  UsedBy      : ad.whatsapp_dispatch (CLAIM)                                  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Poe na fila (od.whatsapp_message) os alertas devidos de todas as filiais
+    com WhatsApp ligado e chave salva. Roda a cada chamada do agendador; o
+    indice unico impede repetir. Paciente sem celular valido fica de fora.
+      1 lembrete     consulta Agendado (nao confirmada) que comeca nas proximas
+                     qt_reminder_hours horas
+      2 agendamento  consulta Agendado/Confirmado criada na ultima hora e futura
+      3 aniversario  paciente ativo que faz aniversario hoje (29/02 -> 28/02),
+                     a partir de qt_send_hour no fuso da filial
+      4 retorno      dt_return_alert = hoje, a partir de qt_send_hour
+    Parametros do modelo (corpo): 1 primeiro nome, 2 clinica e, no lembrete e
+    no agendamento, 3 data dd/mm, 4 hora, 5 profissional; no retorno 3 o texto
+    do alerta. Helper interno (sem grant).
+  Output: integer (mensagens enfileiradas)
+*/
+create or replace function od.fn_whatsapp_enqueue()
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _s     record;
+  _now   timestamp;
+  _today date;
+  _n     integer := 0;
+  _k     integer;
+begin
+  for _s in
+    select w.*, b.vc_timezone, b.vc_name as vc_clinic
+      from od.whatsapp_setting w
+      join ad.branch b on b.nr_company = w.nr_company and b.nr_branch = w.nr_branch
+      join ad.company c on c.nr_company = w.nr_company
+     where w.id_enabled and w.vc_phone_number_id is not null
+       and b.it_status = 1 and not b.id_blocked and c.it_status = 1 and not c.id_blocked
+       and exists (select 1 from od.whatsapp_secret x where x.nr_company = w.nr_company and x.nr_branch = w.nr_branch)
+  loop
+    perform 1 from ad.branch b where b.nr_company = _s.nr_company and b.nr_branch = _s.nr_branch for update;
+    _now   := now() at time zone _s.vc_timezone;
+    _today := _now::date;
+
+    with cand as (
+      -- lembrete
+      select 1 as kind, a.nr_patient, a.nr_appointment, (a.dh_start at time zone _s.vc_timezone)::date as dt_ref,
+             od.fn_whatsapp_phone(p.vc_mobile) as vc_to, _s.vc_tpl_reminder as tpl,
+             jsonb_build_array(split_part(p.vc_name, ' ', 1), _s.vc_clinic,
+                               to_char(a.dh_start at time zone _s.vc_timezone, 'DD/MM'),
+                               to_char(a.dh_start at time zone _s.vc_timezone, 'HH24:MI'), coalesce(pr.vc_name, '')) as params
+        from od.appointment a
+        join od.patient p on p.nr_company = a.nr_company and p.nr_branch = a.nr_branch and p.nr_patient = a.nr_patient
+        left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                    and pr.nr_professional = a.nr_professional
+       where _s.id_reminder and a.nr_company = _s.nr_company and a.nr_branch = _s.nr_branch
+         and a.it_type = 1 and a.it_status = 1 and not a.id_all_day
+         and a.dh_start > now() and a.dh_start <= now() + make_interval(hours => _s.qt_reminder_hours)
+      union all
+      -- agendamento
+      select 2, a.nr_patient, a.nr_appointment, (a.dh_start at time zone _s.vc_timezone)::date,
+             od.fn_whatsapp_phone(p.vc_mobile), _s.vc_tpl_booked,
+             jsonb_build_array(split_part(p.vc_name, ' ', 1), _s.vc_clinic,
+                               to_char(a.dh_start at time zone _s.vc_timezone, 'DD/MM'),
+                               to_char(a.dh_start at time zone _s.vc_timezone, 'HH24:MI'), coalesce(pr.vc_name, ''))
+        from od.appointment a
+        join od.patient p on p.nr_company = a.nr_company and p.nr_branch = a.nr_branch and p.nr_patient = a.nr_patient
+        left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                    and pr.nr_professional = a.nr_professional
+       where _s.id_booked and a.nr_company = _s.nr_company and a.nr_branch = _s.nr_branch
+         and a.it_type = 1 and a.it_status in (1, 2) and a.dh_start > now()
+         and a.dh_created > now() - interval '1 hour'
+      union all
+      -- aniversario
+      select 3, p.nr_patient, null::bigint, _today, od.fn_whatsapp_phone(p.vc_mobile), _s.vc_tpl_birthday,
+             jsonb_build_array(split_part(p.vc_name, ' ', 1), _s.vc_clinic)
+        from od.patient p
+       where _s.id_birthday and extract(hour from _now) >= _s.qt_send_hour
+         and p.nr_company = _s.nr_company and p.nr_branch = _s.nr_branch and p.it_status = 1
+         and (to_char(p.dt_birth, 'MM-DD') = to_char(_today, 'MM-DD')
+              or (to_char(p.dt_birth, 'MM-DD') = '02-29' and to_char(_today, 'MM-DD') = '02-28'
+                  and not (extract(year from _today)::int % 4 = 0
+                           and (extract(year from _today)::int % 100 <> 0 or extract(year from _today)::int % 400 = 0))))
+      union all
+      -- retorno
+      select 4, p.nr_patient, null::bigint, _today, od.fn_whatsapp_phone(p.vc_mobile), _s.vc_tpl_return,
+             jsonb_build_array(split_part(p.vc_name, ' ', 1), _s.vc_clinic, coalesce(p.vc_return_alert, ''))
+        from od.patient p
+       where _s.id_return and extract(hour from _now) >= _s.qt_send_hour
+         and p.nr_company = _s.nr_company and p.nr_branch = _s.nr_branch and p.it_status = 1
+         and p.dt_return_alert = _today
+    ),
+    novo as (
+      select c.* from cand c
+       where c.vc_to is not null
+         and not exists (select 1 from od.whatsapp_message m
+                          where m.nr_company = _s.nr_company and m.nr_branch = _s.nr_branch and m.it_kind = c.kind
+                            and coalesce(m.nr_appointment, 0) = coalesce(c.nr_appointment, 0)
+                            and m.nr_patient = c.nr_patient and m.dt_ref = c.dt_ref)
+    )
+    insert into od.whatsapp_message (nr_company, nr_branch, nr_message, it_kind, nr_patient, nr_appointment, dt_ref,
+                                     vc_to, vc_template, js_params)
+    select _s.nr_company, _s.nr_branch,
+           (select coalesce(max(m.nr_message), 0) from od.whatsapp_message m
+             where m.nr_company = _s.nr_company and m.nr_branch = _s.nr_branch) + row_number() over (),
+           n.kind, n.nr_patient, n.nr_appointment, n.dt_ref, n.vc_to, n.tpl, n.params
+      from novo n
+    on conflict do nothing;
+    get diagnostics _k = row_count;
+    _n := _n + _k;
+  end loop;
+  return _n;
+end;
+$$;
+
+revoke all on function od.fn_whatsapp_enqueue() from public, anon, authenticated;

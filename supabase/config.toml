@@ -1,0 +1,14 @@
+# Configuracao minima para o `supabase functions deploy` (workflow edge-deploy.yml).
+# So as Edge Functions sem login precisam aparecer aqui: as demais usam o padrao
+# (verify_jwt = true).
+
+project_id = "clinify"
+
+[functions.online-booking]
+verify_jwt = false
+
+[functions.whatsapp-send]
+verify_jwt = false
+
+[functions.whatsapp-webhook]
+verify_jwt = false

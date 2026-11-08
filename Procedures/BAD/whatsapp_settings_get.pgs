@@ -1,0 +1,82 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.whatsapp_settings_get(jsonb)                               ::
+  ::  UsedBy      : Flutter -> rpc('whatsapp_settings_get') (Configuracoes)       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Configuracao do WhatsApp da filial (LER na tela SETTINGS): numero, alertas
+    e modelos (padroes quando ainda nao configurado), se a chave da Meta ja foi
+    salva (nunca devolve a chave) e o resumo dos ultimos 30 dias por situacao.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+
+  Output jsonb:
+    {"settings": {"id_enabled", "vc_phone_number_id", "vc_waba_id", "vc_display_phone", "vc_language",
+                  "id_reminder", "qt_reminder_hours", "vc_tpl_reminder", "id_booked", "vc_tpl_booked",
+                  "id_birthday", "vc_tpl_birthday", "id_return", "vc_tpl_return", "qt_send_hour",
+                  "id_token", "dh_token_saved", "id_saved"},
+     "totals": {"<it_status>": qt, ...}, "permission": {"id_update"}}
+
+  Errors: VERSION_MISMATCH, WHATSAPP_BRANCH_REQUIRED, WHATSAPP_FORBIDDEN
+*/
+create or replace function ad.whatsapp_settings_get(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _w          od.whatsapp_setting;
+  _x          od.whatsapp_secret;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'whatsapp_settings_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('WHATSAPP_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if _nr_user is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('WHATSAPP_FORBIDDEN');
+  end if;
+  select * into _w from od.whatsapp_setting w where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+  select * into _x from od.whatsapp_secret x where x.nr_company = _nr_company and x.nr_branch = _nr_branch;
+
+  return jsonb_build_object(
+    'settings', jsonb_build_object(
+      'id_enabled', coalesce(_w.id_enabled, false),
+      'vc_phone_number_id', _w.vc_phone_number_id, 'vc_waba_id', _w.vc_waba_id,
+      'vc_display_phone', _w.vc_display_phone, 'vc_language', coalesce(_w.vc_language, 'pt_BR'),
+      'id_reminder', coalesce(_w.id_reminder, true), 'qt_reminder_hours', coalesce(_w.qt_reminder_hours, 24),
+      'vc_tpl_reminder', coalesce(_w.vc_tpl_reminder, 'lembrete_consulta'),
+      'id_booked', coalesce(_w.id_booked, false), 'vc_tpl_booked', coalesce(_w.vc_tpl_booked, 'consulta_agendada'),
+      'id_birthday', coalesce(_w.id_birthday, false),
+      'vc_tpl_birthday', coalesce(_w.vc_tpl_birthday, 'aniversario_paciente'),
+      'id_return', coalesce(_w.id_return, false), 'vc_tpl_return', coalesce(_w.vc_tpl_return, 'retorno_paciente'),
+      'qt_send_hour', coalesce(_w.qt_send_hour, 9),
+      'id_token', _x.nr_company is not null, 'dh_token_saved', _x.dh_saved,
+      'id_saved', _w.nr_company is not null),
+    'totals', coalesce((
+      select jsonb_object_agg(t.it_status::text, t.qt)
+        from (select m.it_status, count(*) as qt from od.whatsapp_message m
+               where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+                 and m.dh_created > now() - interval '30 days'
+               group by m.it_status) t), '{}'::jsonb),
+    'permission', jsonb_build_object('id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.whatsapp_settings_get(jsonb) from public, anon;
+grant execute on function ad.whatsapp_settings_get(jsonb) to authenticated;

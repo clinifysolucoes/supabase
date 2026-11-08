@@ -1,0 +1,44 @@
+# Agendador dos alertas por WhatsApp: chama a Edge Function whatsapp-send a
+# cada 10 minutos (ela enfileira o que esta devido e envia).
+#
+# Agendamentos do GitHub rodam so na branch default (staging) -> homologacao.
+# Producao: configurar o mesmo chamado no Supabase de producao (Integrations >
+# Cron > HTTP request para /functions/v1/whatsapp-send com o header
+# x-cron-secret) ou um job equivalente quando a promocao para main existir.
+#
+# Pre-requisitos no environment "staging":
+#   Variable SUPABASE_PROJECT_REF  -> ref do projeto
+#   Secret   CRON_SECRET           -> o mesmo valor do secret CRON_SECRET das Edge Functions
+name: WhatsApp - envio dos alertas
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whatsapp-cron
+  cancel-in-progress: false
+
+jobs:
+  send:
+    name: whatsapp-send -> staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: staging
+    env:
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Chama a Edge Function
+        run: |
+          if [ -z "$PROJECT_REF" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::notice::SUPABASE_PROJECT_REF ou CRON_SECRET ainda nao configurados no environment staging; nada a fazer."
+            exit 0
+          fi
+          curl -fsS --max-time 120 -X POST \
+            "https://${PROJECT_REF}.supabase.co/functions/v1/whatsapp-send" \
+            -H "x-cron-secret: ${CRON_SECRET}" -H "Content-Type: application/json" -d '{}'

@@ -287,3 +287,15 @@ drop policy if exists signature_select on od.signature;
 create policy signature_select on od.signature
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.whatsapp_setting
+drop policy if exists whatsapp_setting_select on od.whatsapp_setting;
+create policy whatsapp_setting_select on od.whatsapp_setting
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.whatsapp_message
+drop policy if exists whatsapp_message_select on od.whatsapp_message;
+create policy whatsapp_message_select on od.whatsapp_message
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

@@ -1,0 +1,37 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_whatsapp_phone(text)                                    ::
+  ::  UsedBy      : od.fn_whatsapp_enqueue                                        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 08/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Celular brasileiro gravado so com digitos (DDD + numero) no formato do
+    WhatsApp (55 + DDD + numero). Fixo (10 digitos sem 9) e invalido devolvem
+    null. Numero que ja vem com 55 e 12/13 digitos e mantido. Helper interno.
+  Input: p_phone
+  Output: text (digitos) ou null
+*/
+create or replace function od.fn_whatsapp_phone(p_phone text)
+returns text
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  _d text := regexp_replace(coalesce(p_phone, ''), '\D', '', 'g');
+begin
+  if _d ~ '^55[1-9][0-9]9[0-9]{8}$' then
+    return _d;
+  end if;
+  if _d ~ '^[1-9][0-9]9[0-9]{8}$' then
+    return '55' || _d;
+  end if;
+  return null;
+end;
+$$;
+
+revoke all on function od.fn_whatsapp_phone(text) from public, anon, authenticated;
