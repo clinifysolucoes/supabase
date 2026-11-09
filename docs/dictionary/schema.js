@@ -8288,7 +8288,7 @@ window.DICTIONARY = {
       "signature": "ad.appointment_list(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. Devolve it_origin (2 = agendamento online).",
+      "description": "Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. Devolve it_origin (2 = agendamento online) e, do lembrete do WhatsApp, it_wa_status e vc_wa_reply (CONFIRM | RESCHEDULE).",
       "errors": [
         "VERSION_MISMATCH",
         "AGENDA_BRANCH_REQUIRED",

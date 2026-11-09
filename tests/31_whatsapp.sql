@@ -147,6 +147,9 @@ begin
      and _r -> 'messages' -> 0 ->> 'vc_reply' = 'CONFIRM', 'historico';
   _r := ad.whatsapp_settings_get(_base);
   assert (_r -> 'settings' ->> 'id_token')::boolean and (_r -> 'totals' ->> '4')::int = 1, 'totais';
+  _r := ad.appointment_list(_base || jsonb_build_object('dt_start', current_date, 'dt_end', current_date + 2));
+  assert (select a ->> 'vc_wa_reply' = 'CONFIRM' and (a ->> 'it_wa_status')::int = 4 from jsonb_array_elements(_r -> 'appointments') a
+           where (a ->> 'nr_appointment')::bigint = current_setting('test.nr_appointment')::bigint), 'agenda mostra a resposta';
   perform ad.whatsapp_settings_save(_base || '{"id_enabled": false}'::jsonb);
   assert not exists (select 1 from od.whatsapp_message where nr_company = current_setting('test.nr_company')::bigint
                         and it_status = 1), 'fila cancelada';
