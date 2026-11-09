@@ -9,7 +9,7 @@ procedimentos** — rodando em **Supabase** (PostgreSQL + Auth + PostgREST). Tr�
 | Schema | Papel | Exposto na API |
 |---|---|---|
 | `ad` (Administrative) | empresas, filiais, usuários, perfis, telas, logs | sim |
-| `od` (Odontologia) | tabelas e helpers do negócio; hoje: precificação (materiais, procedimentos, parâmetros) e pacientes (ficha + notas) | **não** (o app só chega por RPC em `ad`) |
+| `od` (Odontologia) | tabelas e helpers do negócio: precificação, pacientes, prontuário, agenda (e agendamento online), orçamentos, financeiro, documentos, assinatura eletrônica e WhatsApp | **não** (o app só chega por RPC em `ad`) |
 | `private` | helpers de RLS | **nunca** |
 
 **No futuro** o schema `od` recebe agenda, pacientes, prontuário, orçamentos e financeiro, sempre **em cima**
@@ -18,8 +18,8 @@ desta base: toda tabela de negócio tem `(nr_company, nr_branch)`, policy RLS ba
 **Toda RPC exposta ao app fica em `ad`** (único schema na API): assim nenhum módulo novo exige mexer em
 "Exposed schemas" no dashboard. O schema de negócio guarda tabelas, policies e helpers `fn_*`.
 
-O app será um único código **Flutter** (web + Android + iOS) usando `supabase_flutter`.
-As telas ainda não existem neste repo — aqui é só banco.
+O app é um único código **Flutter** (web + Android + iOS) usando `supabase_flutter`, no repositório
+`clinifysolucoes/supabase_frontend` (pasta irmã `../supabase_frontend`). Aqui é só banco e Edge Functions.
 
 Objetos principais:
 
@@ -69,6 +69,14 @@ Objetos principais:
 | `od.patient` / `od.patient_note` | ficha do paciente (cadastro, contato/endereço, complementares, alerta de retorno) e notas gerais |
 | `ad.patient_list` / `ad.patient_get` / `ad.patient_save` / `ad.patient_note_save` | tela Pacientes: busca paginada, ficha completa, cadastro/alteração parcial, notas |
 | Edge Function `material-price-lookup` | pesquisa de preço de mercado de um material (Claude + web search; secret `ANTHROPIC_API_KEY`) |
+| `od.budget` / `od.budget_item` / `ad.budget_list` / `ad.budget_get` / `ad.budget_save` / `ad.budget_status` | orçamentos (tela `BUDGETS`): desconto máximo e aprovação, aprovado pelo paciente gera as contas a receber; `budget_item.dt_done` / `nr_evolution` marcam o item realizado na evolução |
+| `od.anamnesis_model` / `od.anamnesis_question` / `od.patient_anamnesis` / `od.patient_anamnesis_answer` / `ad.anamnesis_model_list` / `ad.anamnesis_model_save` / `ad.patient_anamnesis_save` | prontuário: modelos de anamnese da filial (editados em SETTINGS; "Geral" criado na primeira consulta) e anamnese do paciente com cópia das perguntas; "sim" em pergunta de alerta vira alerta |
+| `od.clinical_evolution` / `od.tooth_mark` / `ad.clinical_evolution_save` / `ad.tooth_mark_save` / `ad.patient_record_get` | prontuário: evolução clínica (realiza item de orçamento aprovado) e odontograma FDI; `patient_record_get` junta tudo (permissão da tela PATIENTS) |
+| `od.document_template` / `od.medication` / `od.patient_document` / `od.patient_document_item` / `ad.document_template_*` / `ad.medication_*` / `ad.patient_document_render/save/list` | documentos do paciente: modelos com campos `{{...}}` (`od.fn_document_render`), catálogo de medicamentos e documentos emitidos com o texto final guardado (PDF no app) |
+| `od.patient_file` / `ad.patient_file_save` / `ad.patient_file_list` + Edge Function `patient-file` | fotos e exames no bucket privado `patient` (até 20 MB), só por URL assinada |
+| `od.online_booking` / `ad.online_booking_settings_get/save` / `ad.online_booking_public` + Edge Function `online-booking` | agendamento online: página pública `/agendar/<slug>` sem login; a RPC pública só aceita service_role; `appointment.it_origin = 2`; horários livres em `od.fn_online_slots` |
+| `od.signature` / `ad.signature_save` / `ad.signature_list` | assinatura eletrônica simples de documentos e orçamentos (traço, assinante, IP, código, hash SHA-256 do conteúdo em `od.fn_signature_hash`; `id_valid` diz se o conteúdo mudou depois) |
+| `od.whatsapp_setting` / `od.whatsapp_secret` / `od.whatsapp_message` / `ad.whatsapp_settings_get/save` / `ad.whatsapp_message_list` / `ad.whatsapp_dispatch` + Edge Functions `whatsapp-*` | alertas pelo WhatsApp Cloud API com o número de cada clínica: chave da Meta cifrada (sem policy), fila `od.fn_whatsapp_enqueue` (lembrete com Confirmar/Remarcar, agendamento, aniversário, retorno), webhook; `appointment_list` devolve `it_wa_status` / `vc_wa_reply` |
 
 ---
 
@@ -471,14 +479,17 @@ final filiais = await sb.schema('ad').from('branch').select('nr_company, nr_bran
 
 ## O que NÃO está neste projeto (próximos passos conhecidos)
 
-- Telas Flutter (login, criar empresa, escolher filial).
-- Transações/telas e permissão por tela: hoje o acesso é só por nível do perfil.
 - Convite por e-mail (`auth.admin.inviteUserByEmail`): hoje a Edge Function `user-create` cria a conta
   com senha inicial definida pelo administrador.
 - Operações de plataforma (bloquear empresa, inativar usuário): fazer por service_role ou futura RPC
   restrita a `app_user.it_level = 100`.
 - Empresa ativa no JWT (Auth Hook de custom claims) para policies sem subquery — só se a performance pedir.
-- Próximos módulos do schema `od`: agenda, prontuário/anamnese/odontograma (em cima de `od.patient`), orçamentos (usando a precificação), financeiro.
+- Secrets ainda não configurados em homologação/produção: `SUPABASE_ACCESS_TOKEN` (deploy automático das Edge
+  Functions), `WHATSAPP_ENC_KEY`, `CRON_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` (WhatsApp) e a conta
+  da Meta de cada clínica. Agendador do WhatsApp em produção (o workflow só agenda a branch default).
+- Hospedagem do app web com fallback de SPA (`index.html` para qualquer caminho), para o link `/agendar/...`.
+- Assinatura com certificado ICP-Brasil (hoje só assinatura eletrônica simples) e envio do documento para
+  assinatura remota por link.
 - Storage para avatar/logo.
 - Deploy da Edge Function `material-price-lookup` em produção (depende do secret `SUPABASE_ACCESS_TOKEN`
   do workflow e do `ANTHROPIC_API_KEY` no projeto).

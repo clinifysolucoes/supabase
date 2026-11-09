@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 07/11/2026 - it_origin (agendamento online)                 ::
+  ::  Change      : 09/11/2026 - lembrete do WhatsApp (it_wa_status, vc_wa_reply) ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda da filial num periodo (dia, semana ou mes): consultas e compromissos
@@ -31,6 +31,8 @@
                        "vc_professional_color", "nr_procedure", "vc_procedure_name",
                        "vc_title", "vc_notes", "dh_start", "dh_end", "id_all_day",
                        "id_fit_in", "it_status", "it_origin" (1 agenda, 2 online), "vc_created_by", "dh_created",
+                       "it_wa_status", "vc_wa_reply" (lembrete do WhatsApp: situacao e resposta
+                       CONFIRM | RESCHEDULE),
                        "it_fin_status" (selo do financeiro, so com LER em FINANCE: null sem
                        fechamento esperado, 1 atendido sem recebimento, 2 recebimento em
                        aberto, 3 tudo recebido)}],
@@ -113,6 +115,8 @@ begin
              'id_fit_in',             a.id_fit_in,
              'it_status',             a.it_status,
              'it_origin',             a.it_origin,
+             'it_wa_status',          wa.it_status,
+             'vc_wa_reply',           wa.vc_reply,
              'vc_created_by',         u.vc_name,
              'dh_created',            a.dh_created,
              'it_fin_status',         case when not _fin then null
@@ -135,6 +139,12 @@ begin
                         where e.nr_company = a.nr_company and e.nr_branch = a.nr_branch
                           and e.nr_appointment = a.nr_appointment and e.it_kind = 1 and e.it_status <> 90
                        having count(*) > 0) fe on true
+    left join lateral (select m.it_status, m.vc_reply
+                         from od.whatsapp_message m
+                        where m.nr_company = a.nr_company and m.nr_branch = a.nr_branch
+                          and m.nr_appointment = a.nr_appointment and m.it_kind = 1
+                        order by m.nr_message desc
+                        limit 1) wa on true
    where a.nr_company = _nr_company
      and a.nr_branch  = _nr_branch
      and a.dh_start  >= _from
