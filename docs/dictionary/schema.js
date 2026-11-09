@@ -9240,6 +9240,20 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "patient_summary_get",
+      "signature": "ad.patient_summary_get(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "RECORD_BRANCH_REQUIRED",
+        "RECORD_FORBIDDEN",
+        "PATIENT_REQUIRED",
+        "PATIENT_NOT_FOUND"
+      ]
+    },
+    {
       "name": "document_template_list",
       "signature": "ad.document_template_list(p_json jsonb)",
       "kind": "rpc",
