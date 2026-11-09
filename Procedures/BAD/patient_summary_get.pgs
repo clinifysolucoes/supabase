@@ -1,0 +1,180 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_summary_get(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> rpc('patient_summary_get') (abas da ficha)         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 09/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha do
+    paciente (LER na tela PATIENTS). Cada parte so vem para quem le a tela
+    dela; sem permissao a parte vem null e permission diz o que ficou de fora:
+      appointments  AGENDA    consultas do paciente (mais recentes primeiro,
+                              ate 300), com profissional, procedimento,
+                              situacao, origem e resposta do WhatsApp
+      finance       FINANCE   contas a receber do paciente (ate 500), totais
+                              (em aberto, vencido, pago) e recibos emitidos
+      plan          BUDGETS   orcamentos aprovados com os itens, quais ja foram
+                              realizados (evolucao) e o progresso
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+
+  Output jsonb:
+    {"appointments": [{"nr_appointment", "dh_start", "dh_end", "it_status", "it_origin", "nr_professional",
+                       "vc_professional", "vc_professional_color", "vc_procedure", "vc_notes",
+                       "it_wa_status", "vc_wa_reply"}] | null,
+     "finance": {"entries": [{"nr_entry", "vc_description", "vl_amount", "vl_paid", "dt_due", "dt_paid",
+                              "it_status", "it_payment_method", "nr_installment", "qt_installments",
+                              "nr_budget", "nr_appointment", "nr_receipt", "vc_receipt_number"}],
+                 "totals": {"vl_open", "vl_overdue", "vl_paid", "qt_overdue"},
+                 "receipts": [{"nr_receipt", "vc_number", "nr_entry", "vl_amount", "dt_paid",
+                               "it_payment_method", "vc_description", "it_status"}]} | null,
+     "plan": [{"nr_budget", "vc_title", "dt_budget", "dh_accepted", "vl_total", "vc_professional",
+               "qt_items", "qt_done", "items": [{"nr_item", "vc_description", "vc_tooth", "qt_quantity",
+               "vl_total", "dt_done", "nr_evolution"}]}] | null,
+     "permission": {"id_agenda", "id_finance", "id_budgets"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND
+*/
+create or replace function ad.patient_summary_get(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _agenda     boolean;
+  _finance    boolean;
+  _budgets    boolean;
+  _today      date;
+  _appts      jsonb;
+  _fin        jsonb;
+  _plan       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_summary_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  if not exists (select 1 from od.patient p where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                              and p.nr_patient = _nr_patient) then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+  _agenda  := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA') ->> 'id_read')::boolean, false);
+  _finance := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false);
+  _budgets := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS') ->> 'id_read')::boolean, false);
+  select (now() at time zone b.vc_timezone)::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  if _agenda then
+    select coalesce(jsonb_agg(x.j order by x.dh_start desc), '[]'::jsonb) into _appts
+      from (select a.dh_start, jsonb_build_object(
+                     'nr_appointment', a.nr_appointment, 'dh_start', a.dh_start, 'dh_end', a.dh_end,
+                     'it_status', a.it_status, 'it_origin', a.it_origin, 'nr_professional', a.nr_professional,
+                     'vc_professional', pr.vc_name, 'vc_professional_color', pr.vc_color,
+                     'vc_procedure', pc.vc_name, 'vc_notes', a.vc_notes,
+                     'it_wa_status', wa.it_status, 'vc_wa_reply', wa.vc_reply) as j
+              from od.appointment a
+              left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                          and pr.nr_professional = a.nr_professional
+              left join od.procedure pc on pc.nr_company = a.nr_company and pc.nr_branch = a.nr_branch
+                                       and pc.nr_procedure = a.nr_procedure
+              left join lateral (select m.it_status, m.vc_reply from od.whatsapp_message m
+                                  where m.nr_company = a.nr_company and m.nr_branch = a.nr_branch
+                                    and m.nr_appointment = a.nr_appointment and m.it_kind = 1
+                                  order by m.nr_message desc limit 1) wa on true
+             where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_patient = _nr_patient
+               and a.it_type = 1
+             order by a.dh_start desc
+             limit 300) x;
+  end if;
+
+  if _finance then
+    select jsonb_build_object(
+             'entries', coalesce((
+               select jsonb_agg(x.j order by x.dt_due desc, x.nr_entry desc)
+                 from (select e.dt_due, e.nr_entry, jsonb_build_object(
+                                'nr_entry', e.nr_entry, 'vc_description', e.vc_description, 'vl_amount', e.vl_amount,
+                                'vl_paid', e.vl_paid, 'dt_due', e.dt_due, 'dt_paid', e.dt_paid, 'it_status', e.it_status,
+                                'it_payment_method', e.it_payment_method, 'nr_installment', e.nr_installment,
+                                'qt_installments', e.qt_installments, 'nr_budget', e.nr_budget,
+                                'nr_appointment', e.nr_appointment, 'nr_receipt', r.nr_receipt,
+                                'vc_receipt_number', r.vc_number) as j
+                         from od.fin_entry e
+                         left join od.fin_receipt r on r.nr_company = e.nr_company and r.nr_branch = e.nr_branch
+                                                   and r.nr_entry = e.nr_entry and r.it_status = 1
+                        where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+                          and e.it_kind = 1 and e.it_status <> 90
+                        order by e.dt_due desc, e.nr_entry desc
+                        limit 500) x), '[]'::jsonb),
+             'totals', (select jsonb_build_object(
+                          'vl_open', coalesce(sum(e.vl_amount) filter (where e.it_status = 1), 0),
+                          'vl_overdue', coalesce(sum(e.vl_amount) filter (where e.it_status = 1 and e.dt_due < _today), 0),
+                          'qt_overdue', count(*) filter (where e.it_status = 1 and e.dt_due < _today),
+                          'vl_paid', coalesce(sum(coalesce(e.vl_paid, e.vl_amount)) filter (where e.it_status = 2), 0))
+                          from od.fin_entry e
+                         where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+                           and e.it_kind = 1 and e.it_status <> 90),
+             'receipts', coalesce((
+               select jsonb_agg(jsonb_build_object(
+                        'nr_receipt', r.nr_receipt, 'vc_number', r.vc_number, 'nr_entry', r.nr_entry,
+                        'vl_amount', r.vl_amount, 'dt_paid', r.dt_paid, 'it_payment_method', r.it_payment_method,
+                        'vc_description', r.vc_description, 'it_status', r.it_status)
+                      order by r.dt_paid desc, r.nr_receipt desc)
+                 from od.fin_receipt r
+                 join od.fin_entry e on e.nr_company = r.nr_company and e.nr_branch = r.nr_branch and e.nr_entry = r.nr_entry
+                where r.nr_company = _nr_company and r.nr_branch = _nr_branch and e.nr_patient = _nr_patient), '[]'::jsonb))
+      into _fin;
+  end if;
+
+  if _budgets then
+    select coalesce(jsonb_agg(jsonb_build_object(
+             'nr_budget', b.nr_budget, 'vc_title', b.vc_title, 'dt_budget', b.dt_budget, 'dh_accepted', b.dh_accepted,
+             'vl_total', b.vl_total, 'vc_professional', pr.vc_name,
+             'qt_items', (select count(*) from od.budget_item i where i.nr_company = b.nr_company
+                            and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget),
+             'qt_done', (select count(*) from od.budget_item i where i.nr_company = b.nr_company
+                           and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget and i.dt_done is not null),
+             'items', coalesce((select jsonb_agg(jsonb_build_object(
+                          'nr_item', i.nr_item, 'vc_description', i.vc_description, 'vc_tooth', i.vc_tooth,
+                          'qt_quantity', i.qt_quantity, 'vl_total', i.vl_total, 'dt_done', i.dt_done,
+                          'nr_evolution', i.nr_evolution) order by i.nr_item)
+                        from od.budget_item i
+                       where i.nr_company = b.nr_company and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget),
+                      '[]'::jsonb))
+           order by b.dh_accepted desc nulls last, b.nr_budget desc), '[]'::jsonb)
+      into _plan
+      from od.budget b
+      left join od.professional pr on pr.nr_company = b.nr_company and pr.nr_branch = b.nr_branch
+                                  and pr.nr_professional = b.nr_professional
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_patient = _nr_patient
+       and b.it_status = 3;
+  end if;
+
+  return jsonb_build_object(
+    'appointments', _appts, 'finance', _fin, 'plan', _plan,
+    'permission', jsonb_build_object('id_agenda', _agenda, 'id_finance', _finance, 'id_budgets', _budgets));
+end;
+$$;
+
+revoke all on function ad.patient_summary_get(jsonb) from public, anon;
+grant execute on function ad.patient_summary_get(jsonb) to authenticated;
