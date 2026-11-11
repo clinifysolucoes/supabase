@@ -1,0 +1,172 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.referral_list(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> rpc('referral_list') (tela Indicacoes)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Controle de Indicacao (LER na tela REFERRALS) dos pacientes cadastrados no
+    periodo:
+      referrals  pacientes indicados (por outro paciente, nr_referrer, ou por
+                 nome livre, vc_referral), se converteram (orcamento aprovado),
+                 o valor aprovado e a recompensa dada a quem indicou
+      referrers  ranking de quem indicou: indicados, convertidos, valor
+                 aprovado e recebido dos indicados, recompensas dadas e
+                 pendentes (convertido sem recompensa)
+      by_source  pacientes novos e convertidos por "como conheceu a clinica"
+    Valores aprovados so para quem le BUDGETS; recebidos so para quem le
+    FINANCE (senao vem null).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    dt_start, dt_end date opcionais (padrao: ultimos 12 meses; ate 2 anos)
+    vc_filter    text     opcional: all (padrao) | pending (convertidos sem recompensa)
+
+  Output jsonb: {"dt_start", "dt_end",
+                 "totals": {qt_new, qt_referred, qt_converted, pc_conversion, qt_pending_reward,
+                            qt_rewarded, vl_rewards},
+                 "referrers": [{vc_key, nr_referrer, vc_referrer, qt_referred, qt_converted,
+                                vl_approved, vl_received, qt_rewarded, qt_pending}],
+                 "referrals": [{nr_patient, vc_patient, dh_created, it_status, nr_referrer, vc_referrer,
+                                id_converted, vl_approved, dt_reward, vc_reward, vl_reward, vc_reward_user}],
+                 "by_source": [{it_source, qt_new, qt_converted}],
+                 "permission": {id_update, id_budgets, id_finance}, "id_truncated"}
+
+  Errors: VERSION_MISMATCH, REFERRAL_BRANCH_REQUIRED, REFERRAL_FORBIDDEN, REFERRAL_PERIOD_INVALID
+*/
+create or replace function ad.referral_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _can_bu     boolean;
+  _can_fi     boolean;
+  _tz         text;
+  _today      date;
+  _d0         date;
+  _d1         date;
+  _from       timestamptz;
+  _to         timestamptz;
+  _pending    boolean := lower(coalesce(p_json ->> 'vc_filter', 'all')) = 'pending';
+  _limit      constant integer := 1000;
+  _result     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'referral_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('REFERRAL_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'REFERRALS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('REFERRAL_FORBIDDEN');
+  end if;
+  _can_bu := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS') ->> 'id_read')::boolean, false);
+  _can_fi := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false);
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _tz    := coalesce(_tz, 'America/Sao_Paulo');
+  _today := (now() at time zone _tz)::date;
+  begin
+    _d1 := coalesce((p_json ->> 'dt_end')::date, _today);
+    _d0 := coalesce((p_json ->> 'dt_start')::date, _d1 - 364);
+  exception when others then
+    raise exception '%', ad.fn_message('REFERRAL_PERIOD_INVALID');
+  end;
+  if _d1 < _d0 or _d1 - _d0 > 731 then
+    raise exception '%', ad.fn_message('REFERRAL_PERIOD_INVALID');
+  end if;
+  _from := _d0::timestamp at time zone _tz;
+  _to   := (_d1 + 1)::timestamp at time zone _tz;
+
+  with np as (                                  -- pacientes novos do periodo
+    select p.nr_patient, p.vc_name, p.dh_created, p.it_status, p.it_source, p.nr_referrer,
+           nullif(trim(p.vc_referral), '') as vc_referral,
+           r.vc_name as vc_referrer_patient,
+           (select coalesce(sum(b.vl_total), 0) from od.budget b
+             where b.nr_company = p.nr_company and b.nr_branch = p.nr_branch
+               and b.nr_patient = p.nr_patient and b.it_status = 3) as vl_approved,
+           exists (select 1 from od.budget b
+                    where b.nr_company = p.nr_company and b.nr_branch = p.nr_branch
+                      and b.nr_patient = p.nr_patient and b.it_status = 3) as id_converted,
+           (select coalesce(sum(e.vl_paid), 0) from od.fin_entry e
+             where e.nr_company = p.nr_company and e.nr_branch = p.nr_branch
+               and e.nr_patient = p.nr_patient and e.it_kind = 1 and e.it_status = 2) as vl_received
+      from od.patient p
+      left join od.patient r on r.nr_company = p.nr_company and r.nr_branch = p.nr_branch
+                            and r.nr_patient = p.nr_referrer
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+       and p.dh_created >= _from and p.dh_created < _to
+  ), ref as (                                   -- so os indicados
+    select np.*,
+           coalesce(np.vc_referrer_patient, np.vc_referral) as vc_referrer,
+           case when np.nr_referrer is not null then 'p' || np.nr_referrer
+                else 't' || lower(np.vc_referral) end as vc_key,
+           rw.dt_reward, rw.vc_reward, rw.vl_reward, u.vc_name as vc_reward_user
+      from np
+      left join od.referral_reward rw on rw.nr_company = _nr_company and rw.nr_branch = _nr_branch
+                                     and rw.nr_patient = np.nr_patient and rw.it_status = 1
+      left join ad.app_user u on u.nr_user = rw.nr_user
+     where np.nr_referrer is not null or np.vc_referral is not null
+  )
+  select jsonb_build_object(
+    'totals', jsonb_build_object(
+       'qt_new',            (select count(*) from np),
+       'qt_referred',       (select count(*) from ref),
+       'qt_converted',      (select count(*) from ref where id_converted),
+       'pc_conversion',     (select case when count(*) = 0 then 0
+                                         else round(100.0 * count(*) filter (where id_converted) / count(*), 1) end from ref),
+       'qt_pending_reward', (select count(*) from ref where id_converted and dt_reward is null),
+       'qt_rewarded',       (select count(*) from ref where dt_reward is not null),
+       'vl_rewards',        (select coalesce(sum(vl_reward), 0) from ref where dt_reward is not null)),
+    'referrers', coalesce((
+       select jsonb_agg(jsonb_build_object(
+                'vc_key', g.vc_key, 'nr_referrer', g.nr_referrer, 'vc_referrer', g.vc_referrer,
+                'qt_referred', g.qt, 'qt_converted', g.qt_conv,
+                'vl_approved', case when _can_bu then g.vl_app end,
+                'vl_received', case when _can_fi then g.vl_rec end,
+                'qt_rewarded', g.qt_rw, 'qt_pending', g.qt_pend)
+                order by g.qt desc, g.qt_conv desc, g.vc_referrer)
+         from (select vc_key, max(nr_referrer) as nr_referrer, min(vc_referrer) as vc_referrer, count(*) as qt,
+                      count(*) filter (where id_converted) as qt_conv, sum(vl_approved) as vl_app,
+                      sum(vl_received) as vl_rec, count(*) filter (where dt_reward is not null) as qt_rw,
+                      count(*) filter (where id_converted and dt_reward is null) as qt_pend
+                 from ref group by vc_key order by count(*) desc limit 200) g), '[]'::jsonb),
+    'referrals', coalesce((
+       select jsonb_agg(jsonb_build_object(
+                'nr_patient', x.nr_patient, 'vc_patient', x.vc_name, 'dh_created', x.dh_created,
+                'it_status', x.it_status, 'nr_referrer', x.nr_referrer, 'vc_referrer', x.vc_referrer,
+                'id_converted', x.id_converted, 'vl_approved', case when _can_bu then x.vl_approved end,
+                'dt_reward', x.dt_reward, 'vc_reward', x.vc_reward, 'vl_reward', x.vl_reward,
+                'vc_reward_user', x.vc_reward_user)
+                order by (x.id_converted and x.dt_reward is null) desc, x.dh_created desc)
+         from (select * from ref
+                where not _pending or (id_converted and dt_reward is null)
+                order by (id_converted and dt_reward is null) desc, dh_created desc limit _limit) x), '[]'::jsonb),
+    'by_source', coalesce((
+       select jsonb_agg(jsonb_build_object('it_source', s.it_source, 'qt_new', s.qt, 'qt_converted', s.qt_conv)
+                        order by s.qt desc, s.it_source nulls last)
+         from (select it_source, count(*) as qt, count(*) filter (where id_converted) as qt_conv
+                 from np group by it_source) s), '[]'::jsonb),
+    'id_truncated', (select count(*) from ref where not _pending or (id_converted and dt_reward is null)) > _limit)
+    into _result;
+
+  return _result || jsonb_build_object(
+    'dt_start', _d0, 'dt_end', _d1,
+    'permission', jsonb_build_object('id_update', coalesce((_perm ->> 'id_update')::boolean, false),
+                                     'id_budgets', _can_bu, 'id_finance', _can_fi));
+end;
+$$;
+
+revoke all on function ad.referral_list(jsonb) from public, anon;
+grant execute on function ad.referral_list(jsonb) to authenticated;

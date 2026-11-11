@@ -98,11 +98,14 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.prosthetic_work_step`](#odprostheticworkstep) | Etapa do trabalho protético | Histórico das etapas do trabalho protético (envio, prova, retorno, instalação, cancelamento), com data, observação e quem registrou. |
 | [`od.stock_item`](#odstockitem) | Item de estoque | Materiais do catálogo (od.material) com controle de estoque: saldo em unidades de uso e estoque mínimo. O saldo só muda por movimento (od.fn_stock_move). |
 | [`od.stock_movement`](#odstockmovement) | Movimento de estoque | Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimentos registrados na evolução clínica (com estorno quando a evolução é excluída). Guarda o saldo depois do movimento. |
+| [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 
 ## Diagrama (ERD)
 
 ```mermaid
 erDiagram
+  patient ||--o{ patient : "indicou"
+  patient ||--o{ referral_reward : "recompensa da indicação"
   material ||--o{ stock_item : "controle de estoque"
   stock_item ||--o{ stock_movement : "movimentos"
   clinical_evolution ||--o{ stock_movement : "baixas de material"
@@ -1004,6 +1007,7 @@ erDiagram
     smallint it_education
     smallint it_source
     varchar vc_referral
+    bigint nr_referrer FK
     text vc_notes
     varchar vc_phone
     varchar vc_mobile
@@ -1109,6 +1113,17 @@ erDiagram
     bigint nr_evolution FK
     bigint nr_movement_ref
     varchar vc_notes
+    bigint nr_user FK
+  }
+  referral_reward {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    varchar vc_referrer
+    date dt_reward
+    varchar vc_reward
+    numeric vl_reward
+    smallint it_status
     bigint nr_user FK
   }
 ```
@@ -2613,6 +2628,7 @@ Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nasciment
 | `it_education` | `smallint` |  | NULL |  | Escolaridade. Valores: 1 = Ensino fundamental; 2 = Ensino médio; 3 = Ensino superior; 4 = Pós-graduação. |
 | `it_source` | `smallint` |  | NULL |  | Como conheceu a clínica. Valores: 1 = Google; 2 = Instagram; 3 = Facebook; 4 = Indicação; 5 = Escola; 6 = Outdoor; 7 = Panfleto; 8 = Placa; 9 = Plano / convênio; 10 = Rádio; 11 = TV; 12 = Revista; 99 = Outros. |
 | `vc_referral` | `varchar(120)` |  | NULL |  | Indicado por (nome de quem indicou). |
+| `nr_referrer` | `bigint` | FK → `patient.nr_patient` | NULL |  | Paciente da filial que indicou este paciente (Controle de Indicação); vc_referral fica para quem indicou e não é paciente. |
 | `vc_notes` | `text` |  | NULL |  | Observações do cadastro. |
 | `vc_phone` | `varchar(11)` |  | NULL |  | Telefone fixo, só dígitos (DDD + número). |
 | `vc_mobile` | `varchar(11)` |  | NULL |  | Celular / WhatsApp, só dígitos (DDD + número). |
@@ -2783,6 +2799,29 @@ Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimen
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.referral_reward
+
+**Recompensa por indicação**
+
+Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via referral_reward_save (permissão na tela REFERRALS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente indicado. |
+| `vc_referrer` | `varchar(120)` |  | NOT NULL |  | Quem indicou (nome no momento da recompensa). |
+| `dt_reward` | `date` |  | NOT NULL |  | Data da recompensa. |
+| `vc_reward` | `varchar(200)` |  | NOT NULL |  | O que foi dado (brinde, desconto, agradecimento...). |
+| `vl_reward` | `numeric(12,2)` |  | NULL |  | Valor da recompensa, quando houver. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação da recompensa. Valores: 1 = Registrada; 90 = Desfeita. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ## Functions
 
 Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema('<schema>').rpc('<nome>', params: {'p_json': {...}})` (`ad` ou `od`, conforme a assinatura).
@@ -2868,6 +2907,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.stock_item_save(p_json jsonb)` | authenticated | Liga/desliga o controle de estoque de um material e define o mínimo (alterar em STOCK). Desligar mantém saldo e histórico e para a baixa automática. |
 | `ad.stock_movement_save(p_json jsonb)` | authenticated | Movimento manual (criar em STOCK): entrada de compra em unidades ou embalagens, com conta a pagar opcional (categoria Materiais, exige criar no Financeiro) e atualização opcional do preço da embalagem (exige alterar na Precificação); saída manual sem deixar saldo negativo; ajuste de inventário pelo saldo contado. |
 | `ad.stock_movement_list(p_json jsonb)` | authenticated | Movimentos de estoque num período (ler em STOCK; padrão 30 dias, até 366), por material e tipo, com fornecedor, paciente e usuário, e o resumo em valor (entradas, saídas, baixas pelos procedimentos, ajustes). |
+| `ad.referral_list(p_json jsonb)` | authenticated | Controle de Indicação (ler em REFERRALS) dos pacientes cadastrados no período (padrão 12 meses, até 2 anos): indicados com conversão (orçamento aprovado), valor aprovado (ler em BUDGETS) e recompensa; ranking de quem indicou com valor recebido dos indicados (ler em FINANCE) e recompensas pendentes; novos e convertidos por origem. |
+| `ad.referral_reward_save(p_json jsonb)` | authenticated | Registra (I) ou desfaz (D) a recompensa dada a quem indicou um paciente (alterar em REFERRALS): o que foi dado, data e valor; uma por paciente indicado. |
 | `ad.patient_summary_get(p_json jsonb)` | authenticated | Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null. |
 | `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional. |
 | `ad.document_template_list(p_json jsonb)` | authenticated | Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
@@ -3344,7 +3385,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_FILE_VALUE_INVALID` | `patient_file_save`, `patient_file_list` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
-| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `stock_movement_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `stock_movement_save`, `referral_reward_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
 | `PATIENT_NOTE_FORBIDDEN` | `patient_note_save` |  |
 | `PATIENT_NOTE_NOT_FOUND` | `patient_note_save` |  |
@@ -3410,6 +3451,15 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROSTHETIC_VALUE_INVALID` | `prosthetic_save`, `prosthetic_stage` |  |
 | `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_summary_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list` |  |
 | `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `patient_summary_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list`, `patient_file_list` |  |
+| `REFERRAL_ACTION_INVALID` | `referral_reward_save` |  |
+| `REFERRAL_ALREADY_REWARDED` | `referral_reward_save` |  |
+| `REFERRAL_BRANCH_REQUIRED` | `referral_list`, `referral_reward_save` |  |
+| `REFERRAL_FORBIDDEN` | `referral_list`, `referral_reward_save` |  |
+| `REFERRAL_NOT_REFERRED` | `referral_reward_save` |  |
+| `REFERRAL_PERIOD_INVALID` | `referral_list` |  |
+| `REFERRAL_REWARD_NOT_FOUND` | `referral_reward_save` |  |
+| `REFERRAL_REWARD_REQUIRED` | `referral_reward_save` |  |
+| `REFERRAL_VALUE_INVALID` | `referral_reward_save` |  |
 | `REPORT_BRANCH_REQUIRED` | `report_get` |  |
 | `REPORT_FORBIDDEN` | `report_get` |  |
 | `REPORT_INVALID` | `report_get` |  |
@@ -3485,7 +3535,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

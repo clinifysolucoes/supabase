@@ -323,3 +323,9 @@ drop policy if exists stock_movement_select on od.stock_movement;
 create policy stock_movement_select on od.stock_movement
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.referral_reward
+drop policy if exists referral_reward_select on od.referral_reward;
+create policy referral_reward_select on od.referral_reward
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

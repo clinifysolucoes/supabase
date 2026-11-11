@@ -225,3 +225,7 @@ create or replace trigger stock_item_audit
 create or replace trigger stock_movement_audit
   before insert or update on od.stock_movement
   for each row execute function ad.trg_audit();
+
+create or replace trigger referral_reward_audit
+  before insert or update on od.referral_reward
+  for each row execute function ad.trg_audit();

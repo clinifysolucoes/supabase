@@ -1,0 +1,126 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.referral_reward_save(jsonb)                                ::
+  ::  UsedBy      : Flutter -> rpc('referral_reward_save') (tela Indicacoes)      ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Registra (I) ou desfaz (D) o retorno dado a quem indicou um paciente
+    (ALTERAR na tela REFERRALS): brinde, desconto, agradecimento... Uma
+    recompensa por paciente indicado; guarda o nome de quem indicou naquele
+    momento. Desfazer marca it_status 90 (registrar de novo reativa).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_action    text     I | D
+    nr_patient   bigint   obrigatorio (paciente indicado)
+    vc_reward    text     obrigatorio em I (ate 200)
+    dt_reward    date     opcional em I (padrao hoje; nao pode ser futura)
+    vl_reward    numeric  opcional em I (>= 0)
+
+  Output jsonb: {"nr_patient", "id_rewarded"}
+
+  Errors: VERSION_MISMATCH, REFERRAL_ACTION_INVALID, REFERRAL_BRANCH_REQUIRED, REFERRAL_FORBIDDEN,
+    PATIENT_NOT_FOUND, REFERRAL_NOT_REFERRED, REFERRAL_REWARD_REQUIRED, REFERRAL_VALUE_INVALID,
+    REFERRAL_ALREADY_REWARDED, REFERRAL_REWARD_NOT_FOUND
+*/
+create or replace function ad.referral_reward_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _patient    bigint;
+  _name       text;
+  _referrer   text;
+  _reward     text := nullif(trim(coalesce(p_json ->> 'vc_reward', '')), '');
+  _dt         date;
+  _vl         numeric;
+  _today      date;
+  _status     smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'referral_reward_save');
+  if _action not in ('I', 'D') then
+    raise exception '%', ad.fn_message('REFERRAL_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('REFERRAL_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'REFERRALS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('REFERRAL_FORBIDDEN');
+  end if;
+  select (now() at time zone coalesce(b.vc_timezone, 'America/Sao_Paulo'))::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  begin
+    _patient := (p_json ->> 'nr_patient')::bigint;
+    _dt      := coalesce((p_json ->> 'dt_reward')::date, _today);
+    _vl      := round((p_json ->> 'vl_reward')::numeric, 2);
+  exception when others then
+    raise exception '%', ad.fn_message('REFERRAL_VALUE_INVALID');
+  end;
+
+  select p.vc_name, coalesce(r.vc_name, nullif(trim(p.vc_referral), '')) into _name, _referrer
+    from od.patient p
+    left join od.patient r on r.nr_company = p.nr_company and r.nr_branch = p.nr_branch
+                          and r.nr_patient = p.nr_referrer
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _patient;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+  select w.it_status into _status from od.referral_reward w
+   where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_patient = _patient
+   for update;
+
+  if _action = 'D' then
+    if _status is distinct from 1 then
+      raise exception '%', ad.fn_message('REFERRAL_REWARD_NOT_FOUND');
+    end if;
+    update od.referral_reward w set it_status = 90
+     where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_patient = _patient;
+  else
+    if _referrer is null then
+      raise exception '%', ad.fn_message('REFERRAL_NOT_REFERRED');
+    end if;
+    if _reward is null then
+      raise exception '%', ad.fn_message('REFERRAL_REWARD_REQUIRED');
+    end if;
+    if length(_reward) > 200 or _dt > _today or _vl < 0 or _vl > 9999999999 then
+      raise exception '%', ad.fn_message('REFERRAL_VALUE_INVALID');
+    end if;
+    if _status = 1 then
+      raise exception '%', ad.fn_message('REFERRAL_ALREADY_REWARDED');
+    end if;
+    insert into od.referral_reward (nr_company, nr_branch, nr_patient, vc_referrer, dt_reward, vc_reward, vl_reward,
+                                    it_status, nr_user)
+    values (_nr_company, _nr_branch, _patient, left(_referrer, 120), _dt, _reward, _vl, 1, _nr_user)
+    on conflict (nr_company, nr_branch, nr_patient) do update set
+      vc_referrer = excluded.vc_referrer, dt_reward = excluded.dt_reward, vc_reward = excluded.vc_reward,
+      vl_reward = excluded.vl_reward, it_status = 1, nr_user = excluded.nr_user;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'REFERRALS', case when _action = 'I' then 'CREATE' else 'DELETE' end,
+    'referral_reward', _nr_company::text || '/' || _nr_branch::text || '/' || _patient::text,
+    format('Recompensa da indicação de %s %s', _name, case when _action = 'I' then 'registrada' else 'desfeita' end),
+    jsonb_build_object('nr_patient', _patient, 'vl_reward', _vl));
+
+  return jsonb_build_object('nr_patient', _patient, 'id_rewarded', _action = 'I');
+end;
+$$;
+
+revoke all on function ad.referral_reward_save(jsonb) from public, anon;
+grant execute on function ad.referral_reward_save(jsonb) to authenticated;
