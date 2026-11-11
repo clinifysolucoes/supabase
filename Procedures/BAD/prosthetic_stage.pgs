@@ -1,0 +1,155 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.prosthetic_stage(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> rpc('prosthetic_stage') (tela Controle Protetico)  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Muda a etapa de um trabalho protetico (ALTERAR em PROSTHETIC) e grava o
+    passo no historico:
+      1 a enviar | 2 enviado ao laboratorio (dt_sent; dt_expected opcional) |
+      3 em prova na clinica | 4 recebido do laboratorio (dt_received) |
+      5 instalado/entregue (dt_installed) | 90 cancelado
+    Trabalho instalado ou cancelado nao muda mais.
+    Ao receber (4) pela primeira vez, com custo e laboratorio cadastrado, gera
+    a conta a pagar do laboratorio (categoria "Laboratório", fornecedor, valor
+    do custo, vencimento dt_due ou a data do recebimento) quando o usuario pode
+    CRIAR no Financeiro; senao devolve id_fin_skipped = true.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_work      bigint   obrigatorio
+    it_stage     smallint obrigatorio (1, 2, 3, 4, 5, 90)
+    dt_step      date     opcional (padrao: hoje; nao pode ser futura)
+    dt_expected  date     opcional (nova previsao de retorno, no envio)
+    dt_due       date     opcional (vencimento da conta a pagar)
+    vc_notes     text     opcional (ate 500)
+
+  Output jsonb: {"nr_work", "it_stage", "nr_entry", "id_fin_skipped"}
+
+  Errors: VERSION_MISMATCH, PROSTHETIC_BRANCH_REQUIRED, PROSTHETIC_FORBIDDEN, PROSTHETIC_NOT_FOUND,
+    PROSTHETIC_STAGE_INVALID, PROSTHETIC_CLOSED, PROSTHETIC_VALUE_INVALID
+*/
+create or replace function ad.prosthetic_stage(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _w          od.prosthetic_work;
+  _stage      smallint;
+  _dt         date;
+  _expected   date;
+  _due        date;
+  _notes      text;
+  _today      date;
+  _step       smallint;
+  _entry      bigint;
+  _cat        bigint;
+  _skipped    boolean := false;
+  _patient    text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'prosthetic_stage');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PROSTHETIC_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PROSTHETIC') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('PROSTHETIC_FORBIDDEN');
+  end if;
+
+  select (now() at time zone coalesce(b.vc_timezone, 'America/Sao_Paulo'))::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  begin
+    _stage    := (p_json ->> 'it_stage')::smallint;
+    _dt       := coalesce((p_json ->> 'dt_step')::date, _today);
+    _expected := (p_json ->> 'dt_expected')::date;
+    _due      := (p_json ->> 'dt_due')::date;
+    _notes    := nullif(trim(coalesce(p_json ->> 'vc_notes', '')), '');
+  exception when others then
+    raise exception '%', ad.fn_message('PROSTHETIC_VALUE_INVALID');
+  end;
+  if _stage is null or _stage not in (1, 2, 3, 4, 5, 90) then
+    raise exception '%', ad.fn_message('PROSTHETIC_STAGE_INVALID');
+  end if;
+  if _dt > _today or length(coalesce(_notes, '')) > 500 then
+    raise exception '%', ad.fn_message('PROSTHETIC_VALUE_INVALID');
+  end if;
+
+  select * into _w from od.prosthetic_work w
+   where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_work = (p_json ->> 'nr_work')::bigint
+   for update;
+  if not found then
+    raise exception '%', ad.fn_message('PROSTHETIC_NOT_FOUND');
+  end if;
+  if _w.it_stage in (5, 90) then
+    raise exception '%', ad.fn_message('PROSTHETIC_CLOSED');
+  end if;
+  if _stage = _w.it_stage then
+    raise exception '%', ad.fn_message('PROSTHETIC_STAGE_INVALID');
+  end if;
+
+  update od.prosthetic_work w set
+    it_stage     = _stage,
+    dt_sent      = case when _stage = 2 then _dt else w.dt_sent end,
+    dt_expected  = case when _stage = 2 and _expected is not null then _expected else w.dt_expected end,
+    dt_received  = case when _stage = 4 or (_stage = 5 and w.dt_received is null) then _dt else w.dt_received end,
+    dt_installed = case when _stage = 5 then _dt else w.dt_installed end
+   where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_work = _w.nr_work;
+
+  select coalesce(max(s.nr_step), 0) + 1 into _step
+    from od.prosthetic_work_step s
+   where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_work = _w.nr_work;
+  insert into od.prosthetic_work_step (nr_company, nr_branch, nr_work, nr_step, it_stage, dt_step, vc_notes, nr_user)
+  values (_nr_company, _nr_branch, _w.nr_work, _step, _stage, _dt, _notes, _nr_user);
+
+  /* conta a pagar do laboratorio no primeiro recebimento                    */
+  if _stage in (4, 5) and _w.nr_entry is null and coalesce(_w.vl_cost, 0) > 0 and _w.nr_supplier is not null then
+    if coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean, false) then
+      _cat := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Laboratório', 2::smallint, 2::smallint, _nr_user);
+      select p.vc_name into _patient from od.patient p
+       where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _w.nr_patient;
+      perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+      select coalesce(max(e.nr_entry), 0) + 1 into _entry
+        from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+      insert into od.fin_entry (
+        nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_supplier, nr_patient, nr_professional,
+        vc_description, vl_amount, dt_due, dt_competence, it_status, nr_installment, qt_installments,
+        nr_user_created, nr_operator)
+      values (
+        _nr_company, _nr_branch, _entry, 2, _cat, _w.nr_supplier, _w.nr_patient, _w.nr_professional,
+        left(format('Laboratório: %s (%s)', _w.vc_description, coalesce(_patient, '')), 140),
+        _w.vl_cost, coalesce(_due, _dt), _dt, 1, 1, 1, _nr_user, _nr_user);
+      update od.prosthetic_work w set nr_entry = _entry
+       where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_work = _w.nr_work;
+    else
+      _skipped := true;
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PROSTHETIC', 'UPDATE',
+    'prosthetic_work', _nr_company::text || '/' || _nr_branch::text || '/' || _w.nr_work::text,
+    format('Trabalho protético %s: etapa %s -> %s', _w.nr_work, _w.it_stage, _stage),
+    jsonb_build_object('nr_patient', _w.nr_patient, 'it_stage_old', _w.it_stage, 'it_stage', _stage,
+                       'dt_step', _dt, 'nr_entry', _entry));
+
+  return jsonb_build_object('nr_work', _w.nr_work, 'it_stage', _stage,
+                            'nr_entry', coalesce(_entry, _w.nr_entry), 'id_fin_skipped', _skipped);
+end;
+$$;
+
+revoke all on function ad.prosthetic_stage(jsonb) from public, anon;
+grant execute on function ad.prosthetic_stage(jsonb) to authenticated;

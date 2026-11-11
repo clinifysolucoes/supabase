@@ -209,3 +209,11 @@ create or replace trigger whatsapp_message_audit
 create or replace trigger whatsapp_secret_audit
   before insert or update on od.whatsapp_secret
   for each row execute function ad.trg_audit();
+
+create or replace trigger prosthetic_work_audit
+  before insert or update on od.prosthetic_work
+  for each row execute function ad.trg_audit();
+
+create or replace trigger prosthetic_work_step_audit
+  before insert or update on od.prosthetic_work_step
+  for each row execute function ad.trg_audit();
