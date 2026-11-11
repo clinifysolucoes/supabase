@@ -1,0 +1,250 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.dashboard_get(jsonb)                                       ::
+  ::  UsedBy      : Flutter -> rpc('dashboard_get') (tela Dashboard)              ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Indicadores da filial num periodo (Dashboard Analitico). O Dashboard e de
+    todo usuario com acesso a filial; cada parte so vem para quem le a tela
+    dela (sem permissao a parte vem null):
+      agenda    AGENDA    consultas do periodo por situacao, taxa de faltas,
+                          consultas de hoje e vindas do agendamento online
+      patients  PATIENTS  pacientes novos (e no periodo anterior), ativos,
+                          aniversariantes de hoje, procedimentos executados,
+                          origem dos novos e procedimentos mais executados
+      budgets   BUDGETS   orcamentos criados e aprovados no periodo, conversao
+                          e orcamentos em aberto
+      finance   FINANCE   recebido e pago no periodo (e recebido no periodo
+                          anterior), resultado, a receber vencido e a pagar
+                          nos proximos 7 dias
+    Periodo anterior = mesmo numero de dias logo antes de dt_start.
+    "series" traz os 6 meses que terminam no mes de dt_end, com os campos de
+    cada parte permitida (attended, new_patients, revenue, expense).
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    dt_start, dt_end date     opcionais (padrao: mes corrente; ate 366 dias)
+
+  Output jsonb: {"dt_start", "dt_end", "dt_prev_start", "dt_prev_end",
+                 "agenda": {qt_appointments, qt_attended, qt_no_show, qt_cancelled, pc_no_show,
+                            qt_online, qt_appointments_prev, qt_today, qt_today_confirmed} | null,
+                 "patients": {qt_new, qt_new_prev, qt_active, qt_birthdays_today, qt_procedures,
+                              by_source: [{it_source, qt}], top_procedures: [{vc_procedure, qt}]} | null,
+                 "budgets": {qt_created, vl_created, qt_accepted, vl_accepted, pc_conversion,
+                             qt_open, vl_open} | null,
+                 "finance": {vl_revenue, vl_expense, vl_result, vl_revenue_prev,
+                             vl_overdue, qt_overdue, vl_payable_week} | null,
+                 "series": [{dt_month, qt_attended?, qt_new_patients?, vl_revenue?, vl_expense?}],
+                 "permission": {id_agenda, id_patients, id_budgets, id_finance}}
+
+  Errors: VERSION_MISMATCH, DASHBOARD_BRANCH_REQUIRED, DASHBOARD_FORBIDDEN, DASHBOARD_PERIOD_INVALID
+*/
+create or replace function ad.dashboard_get(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _tz         text;
+  _today      date;
+  _d0         date;
+  _d1         date;
+  _p0         date;
+  _p1         date;
+  _from       timestamptz;
+  _to         timestamptz;
+  _pfrom      timestamptz;
+  _m0         date;
+  _can_ag     boolean;
+  _can_pa     boolean;
+  _can_bu     boolean;
+  _can_fi     boolean;
+  _agenda     jsonb;
+  _patients   jsonb;
+  _budgets    jsonb;
+  _finance    jsonb;
+  _series     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'dashboard_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('DASHBOARD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not exists (select 1 from private.fn_my_branches() m
+                     where m.nr_company = _nr_company and m.nr_branch = _nr_branch) then
+    raise exception '%', ad.fn_message('DASHBOARD_FORBIDDEN');
+  end if;
+
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _tz    := coalesce(_tz, 'America/Sao_Paulo');
+  _today := (now() at time zone _tz)::date;
+  begin
+    _d0 := coalesce((p_json ->> 'dt_start')::date, date_trunc('month', _today)::date);
+    _d1 := coalesce((p_json ->> 'dt_end')::date, (date_trunc('month', _today) + interval '1 month - 1 day')::date);
+  exception when others then
+    raise exception '%', ad.fn_message('DASHBOARD_PERIOD_INVALID');
+  end;
+  if _d1 < _d0 or _d1 - _d0 > 366 then
+    raise exception '%', ad.fn_message('DASHBOARD_PERIOD_INVALID');
+  end if;
+  _p1    := _d0 - 1;
+  _p0    := _d0 - (_d1 - _d0 + 1);
+  _from  := _d0::timestamp at time zone _tz;
+  _to    := (_d1 + 1)::timestamp at time zone _tz;
+  _pfrom := _p0::timestamp at time zone _tz;
+  _m0    := (date_trunc('month', _d1) - interval '5 months')::date;
+
+  _can_ag := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'AGENDA') ->> 'id_read')::boolean, false);
+  _can_pa := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS') ->> 'id_read')::boolean, false);
+  _can_bu := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS') ->> 'id_read')::boolean, false);
+  _can_fi := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false);
+
+  /* agenda: consultas (it_type 1) do periodo                                 */
+  if _can_ag then
+    select jsonb_build_object(
+             'qt_appointments', count(*) filter (where a.dh_start >= _from and a.it_status <> 90),
+             'qt_attended',     count(*) filter (where a.dh_start >= _from and a.it_status = 5),
+             'qt_no_show',      count(*) filter (where a.dh_start >= _from and a.it_status = 7),
+             'qt_cancelled',    count(*) filter (where a.dh_start >= _from and a.it_status = 90),
+             'pc_no_show',      case when count(*) filter (where a.dh_start >= _from and a.it_status <> 90) = 0 then 0
+                                     else round(100.0 * count(*) filter (where a.dh_start >= _from and a.it_status = 7)
+                                                / count(*) filter (where a.dh_start >= _from and a.it_status <> 90), 1) end,
+             'qt_online',       count(*) filter (where a.dh_start >= _from and a.it_origin = 2 and a.it_status <> 90),
+             'qt_appointments_prev', count(*) filter (where a.dh_start < _from and a.it_status <> 90))
+      into _agenda
+      from od.appointment a
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_type = 1
+       and a.dh_start >= _pfrom and a.dh_start < _to;
+    _agenda := _agenda || (
+      select jsonb_build_object(
+               'qt_today',           count(*) filter (where a.it_status <> 90),
+               'qt_today_confirmed', count(*) filter (where a.it_status in (2, 3, 4, 5)))
+        from od.appointment a
+       where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_type = 1
+         and a.dh_start >= _today::timestamp at time zone _tz
+         and a.dh_start < (_today + 1)::timestamp at time zone _tz);
+  end if;
+
+  /* pacientes: novos pela data de cadastro                                    */
+  if _can_pa then
+    select jsonb_build_object(
+             'qt_new',      count(*) filter (where p.dh_created >= _from and p.dh_created < _to),
+             'qt_new_prev', count(*) filter (where p.dh_created >= _pfrom and p.dh_created < _from),
+             'qt_active',   count(*) filter (where p.it_status = 1),
+             'qt_birthdays_today', count(*) filter (where p.it_status = 1 and p.dt_birth is not null
+                                     and extract(month from p.dt_birth) = extract(month from _today)
+                                     and extract(day from p.dt_birth) = extract(day from _today)),
+             'by_source', coalesce((
+               select jsonb_agg(jsonb_build_object('it_source', s.it_source, 'qt', s.qt) order by s.qt desc, s.it_source nulls last)
+                 from (select x.it_source, count(*) as qt
+                         from od.patient x
+                        where x.nr_company = _nr_company and x.nr_branch = _nr_branch
+                          and x.dh_created >= _from and x.dh_created < _to
+                        group by x.it_source) s), '[]'::jsonb))
+      into _patients
+      from od.patient p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch;
+
+    with ev as (
+      select coalesce(pr.vc_name, bi.vc_description) as vc_procedure
+        from od.clinical_evolution e
+        left join od.procedure pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
+                                 and pr.nr_procedure = e.nr_procedure
+        left join od.budget_item bi on bi.nr_company = e.nr_company and bi.nr_branch = e.nr_branch
+                                   and bi.nr_budget = e.nr_budget and bi.nr_item = e.nr_item
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.it_status = 1
+         and (e.nr_procedure is not null or e.nr_budget is not null)
+         and e.dh_evolution >= _from and e.dh_evolution < _to
+    )
+    select _patients || jsonb_build_object(
+             'qt_procedures', (select count(*) from ev),
+             'top_procedures', coalesce((
+               select jsonb_agg(jsonb_build_object('vc_procedure', t.vc_procedure, 'qt', t.qt) order by t.qt desc, t.vc_procedure)
+                 from (select ev.vc_procedure, count(*) as qt from ev
+                        where ev.vc_procedure is not null
+                        group by ev.vc_procedure order by count(*) desc, ev.vc_procedure limit 5) t), '[]'::jsonb))
+      into _patients;
+  end if;
+
+  /* orcamentos: criados (dt_budget) e aprovados (dh_accepted) no periodo      */
+  if _can_bu then
+    select jsonb_build_object(
+             'qt_created',  count(*) filter (where b.dt_budget between _d0 and _d1 and b.it_status <> 90),
+             'vl_created',  coalesce(sum(b.vl_total) filter (where b.dt_budget between _d0 and _d1 and b.it_status <> 90), 0),
+             'qt_accepted', count(*) filter (where b.it_status = 3 and b.dh_accepted >= _from and b.dh_accepted < _to),
+             'vl_accepted', coalesce(sum(b.vl_total) filter (where b.it_status = 3 and b.dh_accepted >= _from and b.dh_accepted < _to), 0),
+             'pc_conversion', case when count(*) filter (where b.dt_budget between _d0 and _d1 and b.it_status <> 90) = 0 then 0
+                                   else round(100.0 * count(*) filter (where b.dt_budget between _d0 and _d1 and b.it_status = 3)
+                                              / count(*) filter (where b.dt_budget between _d0 and _d1 and b.it_status <> 90), 1) end,
+             'qt_open',     count(*) filter (where b.it_status in (1, 2)),
+             'vl_open',     coalesce(sum(b.vl_total) filter (where b.it_status in (1, 2)), 0))
+      into _budgets
+      from od.budget b
+     where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  end if;
+
+  /* financeiro: pelo pagamento (caixa)                                        */
+  if _can_fi then
+    select jsonb_build_object(
+             'vl_revenue',      coalesce(sum(f.vl_paid) filter (where f.it_kind = 1 and f.it_status = 2 and f.dt_paid between _d0 and _d1), 0),
+             'vl_expense',      coalesce(sum(f.vl_paid) filter (where f.it_kind = 2 and f.it_status = 2 and f.dt_paid between _d0 and _d1), 0),
+             'vl_revenue_prev', coalesce(sum(f.vl_paid) filter (where f.it_kind = 1 and f.it_status = 2 and f.dt_paid between _p0 and _p1), 0),
+             'vl_overdue',      coalesce(sum(f.vl_amount) filter (where f.it_kind = 1 and f.it_status = 1 and f.dt_due < _today), 0),
+             'qt_overdue',      count(*) filter (where f.it_kind = 1 and f.it_status = 1 and f.dt_due < _today),
+             'vl_payable_week', coalesce(sum(f.vl_amount) filter (where f.it_kind = 2 and f.it_status = 1
+                                                                    and f.dt_due between _today and _today + 7), 0))
+      into _finance
+      from od.fin_entry f
+     where f.nr_company = _nr_company and f.nr_branch = _nr_branch;
+    _finance := _finance || jsonb_build_object('vl_result',
+                  (_finance ->> 'vl_revenue')::numeric - (_finance ->> 'vl_expense')::numeric);
+  end if;
+
+  /* serie dos 6 meses                                                         */
+  select coalesce(jsonb_agg(
+           jsonb_build_object('dt_month', m.dt_month)
+           || case when _can_ag then jsonb_build_object('qt_attended', (
+                select count(*) from od.appointment a
+                 where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.it_type = 1 and a.it_status = 5
+                   and a.dh_start >= m.dt_month::timestamp at time zone _tz
+                   and a.dh_start < (m.dt_month + interval '1 month')::timestamp at time zone _tz)) else '{}'::jsonb end
+           || case when _can_pa then jsonb_build_object('qt_new_patients', (
+                select count(*) from od.patient p
+                 where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                   and p.dh_created >= m.dt_month::timestamp at time zone _tz
+                   and p.dh_created < (m.dt_month + interval '1 month')::timestamp at time zone _tz)) else '{}'::jsonb end
+           || case when _can_fi then (
+                select jsonb_build_object(
+                         'vl_revenue', coalesce(sum(f.vl_paid) filter (where f.it_kind = 1), 0),
+                         'vl_expense', coalesce(sum(f.vl_paid) filter (where f.it_kind = 2), 0))
+                  from od.fin_entry f
+                 where f.nr_company = _nr_company and f.nr_branch = _nr_branch and f.it_status = 2
+                   and f.dt_paid >= m.dt_month and f.dt_paid < (m.dt_month + interval '1 month')::date) else '{}'::jsonb end
+           order by m.dt_month), '[]'::jsonb)
+    into _series
+    from (select (_m0 + make_interval(months => g))::date as dt_month from generate_series(0, 5) g) m;
+
+  return jsonb_build_object(
+    'dt_start', _d0, 'dt_end', _d1, 'dt_prev_start', _p0, 'dt_prev_end', _p1,
+    'agenda', _agenda, 'patients', _patients, 'budgets', _budgets, 'finance', _finance,
+    'series', _series,
+    'permission', jsonb_build_object('id_agenda', _can_ag, 'id_patients', _can_pa,
+                                     'id_budgets', _can_bu, 'id_finance', _can_fi));
+end;
+$$;
+
+revoke all on function ad.dashboard_get(jsonb) from public, anon;
+grant execute on function ad.dashboard_get(jsonb) to authenticated;

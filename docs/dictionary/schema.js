@@ -9240,6 +9240,19 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "dashboard_get",
+      "signature": "ad.dashboard_get(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "DASHBOARD_BRANCH_REQUIRED",
+        "DASHBOARD_FORBIDDEN",
+        "DASHBOARD_PERIOD_INVALID"
+      ]
+    },
+    {
       "name": "patient_summary_get",
       "signature": "ad.patient_summary_get(p_json jsonb)",
       "kind": "rpc",
