@@ -16,6 +16,8 @@
       vc_action = 'D'  exclui (it_status 90) e desmarca o item realizado -> ALTERAR
     A evolucao nao e alterada depois de gravada (registro clinico): para corrigir,
     exclui e registra de novo. Grava ad.event_log sem o texto.
+    Estoque: o procedimento registrado baixa os materiais da ficha tecnica com
+    controle de estoque (od.fn_stock_evolution); a exclusao estorna a baixa.
 
   Input p_json:
     nr_version       integer  obrigatorio = 1
@@ -98,6 +100,7 @@ begin
      where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_evolution = _nr_evol
        and exists (select 1 from od.budget b where b.nr_company = i.nr_company and b.nr_branch = i.nr_branch
                                                and b.nr_budget = i.nr_budget and b.nr_patient = _nr_patient);
+    perform od.fn_stock_evolution(_nr_company, _nr_branch, _nr_patient, _nr_evol, _nr_user, true);
   else
     if _text is null then
       raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_TEXT_REQUIRED');
@@ -151,6 +154,7 @@ begin
       update od.budget_item i set dt_done = _dh::date, nr_evolution = _nr_evol
        where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _budget and i.nr_item = _item;
     end if;
+    perform od.fn_stock_evolution(_nr_company, _nr_branch, _nr_patient, _nr_evol, _nr_user, false);
   end if;
 
   perform ad.fn_event_log(

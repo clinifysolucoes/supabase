@@ -1,0 +1,95 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_stock_evolution(bigint, bigint, bigint, bigint, bigint, ::
+  ::                boolean)                                                      ::
+  ::  UsedBy      : ad.clinical_evolution_save                                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Baixa automatica do estoque pela evolucao clinica. Ao registrar a evolucao
+    de um procedimento, baixa (tipo 4) os materiais da ficha tecnica dele
+    (od.procedure_material) que tem controle de estoque ativo, na quantidade
+    usada x a quantidade do item do orcamento (1 sem orcamento). O saldo pode
+    ficar negativo: a evolucao nunca e bloqueada pelo estoque.
+    Com p_reverse = true (evolucao excluida), estorna (tipo 5) as baixas
+    dessa evolucao que ainda nao foram estornadas.
+    Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_patient, p_nr_evolution, p_nr_user, p_reverse
+  Output: integer (quantidade de movimentos gravados)
+*/
+create or replace function od.fn_stock_evolution(
+  p_nr_company   bigint,
+  p_nr_branch    bigint,
+  p_nr_patient   bigint,
+  p_nr_evolution bigint,
+  p_nr_user      bigint,
+  p_reverse      boolean)
+returns integer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _r     record;
+  _n     integer := 0;
+  _dt    date;
+  _tz    text;
+begin
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch;
+  _dt := (now() at time zone coalesce(_tz, 'America/Sao_Paulo'))::date;
+
+  if p_reverse then
+    for _r in
+      select m.nr_movement, m.nr_material, m.qt_quantity, m.vl_unit_cost
+        from od.stock_movement m
+       where m.nr_company = p_nr_company and m.nr_branch = p_nr_branch
+         and m.nr_patient = p_nr_patient and m.nr_evolution = p_nr_evolution and m.it_type = 4
+         and not exists (select 1 from od.stock_movement x
+                          where x.nr_company = m.nr_company and x.nr_branch = m.nr_branch
+                            and x.it_type = 5 and x.nr_movement_ref = m.nr_movement)
+       order by m.nr_movement
+    loop
+      perform od.fn_stock_move(p_nr_company, p_nr_branch, _r.nr_material, 5::smallint, -_r.qt_quantity, _dt,
+                               _r.vl_unit_cost, round(-_r.qt_quantity * coalesce(_r.vl_unit_cost, 0), 2), p_nr_user,
+                               p_nr_patient => p_nr_patient, p_nr_evolution => p_nr_evolution,
+                               p_nr_movement_ref => _r.nr_movement, p_vc_notes => 'Evolução excluída');
+      _n := _n + 1;
+    end loop;
+    return _n;
+  end if;
+
+  for _r in
+    select pm.nr_material,
+           pm.qt_used * coalesce(i.qt_quantity, 1) as qt,
+           case when coalesce(mt.qt_yield, 0) > 0 then mt.vl_package_price / mt.qt_yield end as vl_unit,
+           coalesce(e.dh_evolution at time zone coalesce(_tz, 'America/Sao_Paulo'), now())::date as dt
+      from od.clinical_evolution e
+      join od.procedure_material pm on pm.nr_company = e.nr_company and pm.nr_branch = e.nr_branch
+                                   and pm.nr_procedure = e.nr_procedure
+      join od.stock_item si on si.nr_company = pm.nr_company and si.nr_branch = pm.nr_branch
+                           and si.nr_material = pm.nr_material and si.it_status = 1
+      join od.material mt on mt.nr_company = pm.nr_company and mt.nr_branch = pm.nr_branch
+                         and mt.nr_material = pm.nr_material
+      left join od.budget_item i on i.nr_company = e.nr_company and i.nr_branch = e.nr_branch
+                                and i.nr_budget = e.nr_budget and i.nr_item = e.nr_item
+     where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch
+       and e.nr_patient = p_nr_patient and e.nr_evolution = p_nr_evolution and e.it_status = 1
+       and e.nr_procedure is not null
+     order by pm.nr_material
+  loop
+    continue when coalesce(_r.qt, 0) <= 0;
+    perform od.fn_stock_move(p_nr_company, p_nr_branch, _r.nr_material, 4::smallint, -_r.qt, _r.dt,
+                             _r.vl_unit, round(_r.qt * coalesce(_r.vl_unit, 0), 2), p_nr_user,
+                             p_nr_patient => p_nr_patient, p_nr_evolution => p_nr_evolution);
+    _n := _n + 1;
+  end loop;
+  return _n;
+end;
+$$;
+
+revoke all on function od.fn_stock_evolution(bigint, bigint, bigint, bigint, bigint, boolean)
+  from public, anon, authenticated;

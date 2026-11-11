@@ -1,0 +1,100 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.stock_item_save(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('stock_item_save') (tela Estoque)              ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Liga/desliga o controle de estoque de um material e define o estoque
+    minimo (ALTERAR na tela STOCK). Ligar pela primeira vez cria o item com
+    saldo zero (o saldo inicial entra por ajuste ou entrada). Desligar mantem
+    o saldo e o historico; o material deixa de ser baixado pela evolucao.
+    Update parcial: chave presente altera (qt_min null limpa), ausente mantem.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_material  bigint   obrigatorio
+    id_control   boolean  opcional
+    qt_min       numeric  opcional (>= 0, em unidades de uso)
+
+  Output jsonb: {"nr_material", "id_control", "qt_min", "qt_stock"}
+
+  Errors: VERSION_MISMATCH, STOCK_BRANCH_REQUIRED, STOCK_FORBIDDEN, STOCK_MATERIAL_NOT_FOUND, STOCK_VALUE_INVALID
+*/
+create or replace function ad.stock_item_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _material   bigint;
+  _name       text;
+  _control    boolean;
+  _min        numeric;
+  _item       od.stock_item;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'stock_item_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('STOCK_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'STOCK') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('STOCK_FORBIDDEN');
+  end if;
+  begin
+    _material := (p_json ->> 'nr_material')::bigint;
+    _control  := (p_json ->> 'id_control')::boolean;
+    _min      := (p_json ->> 'qt_min')::numeric;
+  exception when others then
+    raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+  end;
+  if _min < 0 or _min > 99999999999 then
+    raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+  end if;
+  select m.vc_name into _name from od.material m
+   where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_material = _material;
+  if not found then
+    raise exception '%', ad.fn_message('STOCK_MATERIAL_NOT_FOUND');
+  end if;
+
+  select * into _item from od.stock_item s
+   where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_material = _material
+   for update;
+  if not found then
+    insert into od.stock_item (nr_company, nr_branch, nr_material, qt_min, it_status)
+    values (_nr_company, _nr_branch, _material, case when p_json ? 'qt_min' then _min end,
+            case when coalesce(_control, true) then 1 else 90 end)
+    returning * into _item;
+  else
+    update od.stock_item s set
+      it_status = case when p_json ? 'id_control' then case when _control then 1 else 90 end else s.it_status end,
+      qt_min    = case when p_json ? 'qt_min' then _min else s.qt_min end
+     where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_material = _material
+    returning * into _item;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'STOCK', 'UPDATE',
+    'stock_item', _nr_company::text || '/' || _nr_branch::text || '/' || _material::text,
+    format('Estoque de %s: %s', _name, case when _item.it_status = 1 then 'controlado' else 'sem controle' end),
+    jsonb_build_object('it_status', _item.it_status, 'qt_min', _item.qt_min));
+
+  return jsonb_build_object('nr_material', _material, 'id_control', _item.it_status = 1,
+                            'qt_min', _item.qt_min, 'qt_stock', _item.qt_stock);
+end;
+$$;
+
+revoke all on function ad.stock_item_save(jsonb) from public, anon;
+grant execute on function ad.stock_item_save(jsonb) to authenticated;

@@ -1,0 +1,114 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.stock_movement_list(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> rpc('stock_movement_list') (tela Estoque)          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Movimentos de estoque da filial num periodo (LER na tela STOCK), do mais
+    recente para o mais antigo, com o material, o fornecedor, o paciente da
+    baixa/saida e quem lancou. Ate 1000 linhas e o resumo do periodo
+    (entradas, saidas, baixas pelos procedimentos e ajustes, em valor).
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    dt_start, dt_end date opcionais (padrao: ultimos 30 dias; ate 366 dias)
+    nr_material  bigint   opcional
+    it_type      smallint opcional (1 a 5)
+
+  Output jsonb: {"movements": [{nr_movement, dt_movement, nr_material, vc_material, vc_unit, it_type,
+                               qt_quantity, qt_balance, vl_unit_cost, vl_total, vc_supplier, vc_document,
+                               nr_entry, nr_patient, vc_patient, nr_evolution, vc_notes, vc_user}],
+                 "summary": {vl_in, vl_out, vl_procedures, vl_adjust}, "id_truncated"}
+
+  Errors: VERSION_MISMATCH, STOCK_BRANCH_REQUIRED, STOCK_FORBIDDEN, STOCK_PERIOD_INVALID
+*/
+create or replace function ad.stock_movement_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _today      date;
+  _d0         date;
+  _d1         date;
+  _material   bigint;
+  _type       smallint;
+  _limit      constant integer := 1000;
+  _rows       jsonb;
+  _summary    jsonb;
+  _qt         integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'stock_movement_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('STOCK_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'STOCK') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('STOCK_FORBIDDEN');
+  end if;
+  select (now() at time zone coalesce(b.vc_timezone, 'America/Sao_Paulo'))::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  begin
+    _d1       := coalesce((p_json ->> 'dt_end')::date, _today);
+    _d0       := coalesce((p_json ->> 'dt_start')::date, _d1 - 29);
+    _material := (p_json ->> 'nr_material')::bigint;
+    _type     := (p_json ->> 'it_type')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('STOCK_PERIOD_INVALID');
+  end;
+  if _d1 < _d0 or _d1 - _d0 > 366 then
+    raise exception '%', ad.fn_message('STOCK_PERIOD_INVALID');
+  end if;
+
+  with base as (
+    select m.*, mt.vc_name as vc_material, mt.vc_unit, su.vc_name as vc_supplier, pa.vc_name as vc_patient,
+           u.vc_name as vc_user
+      from od.stock_movement m
+      join od.material mt on mt.nr_company = m.nr_company and mt.nr_branch = m.nr_branch and mt.nr_material = m.nr_material
+      left join od.fin_supplier su on su.nr_company = m.nr_company and su.nr_branch = m.nr_branch
+                                  and su.nr_supplier = m.nr_supplier
+      left join od.patient pa on pa.nr_company = m.nr_company and pa.nr_branch = m.nr_branch and pa.nr_patient = m.nr_patient
+      left join ad.app_user u on u.nr_user = m.nr_user
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+       and m.dt_movement between _d0 and _d1
+       and (_material is null or m.nr_material = _material)
+       and (_type is null or m.it_type = _type)
+  ), lim as (
+    select * from base order by dt_movement desc, nr_movement desc limit _limit
+  )
+  select coalesce((select jsonb_agg(jsonb_build_object(
+           'nr_movement', l.nr_movement, 'dt_movement', l.dt_movement, 'nr_material', l.nr_material,
+           'vc_material', l.vc_material, 'vc_unit', l.vc_unit, 'it_type', l.it_type, 'qt_quantity', l.qt_quantity,
+           'qt_balance', l.qt_balance, 'vl_unit_cost', l.vl_unit_cost, 'vl_total', l.vl_total,
+           'vc_supplier', l.vc_supplier, 'vc_document', l.vc_document, 'nr_entry', l.nr_entry,
+           'nr_patient', l.nr_patient, 'vc_patient', l.vc_patient, 'nr_evolution', l.nr_evolution,
+           'vc_notes', l.vc_notes, 'vc_user', l.vc_user) order by l.dt_movement desc, l.nr_movement desc)
+                    from lim l), '[]'::jsonb),
+         (select jsonb_build_object(
+                   'vl_in',         coalesce(sum(b.vl_total) filter (where b.it_type = 1), 0),
+                   'vl_out',        coalesce(sum(b.vl_total) filter (where b.it_type = 2), 0),
+                   'vl_procedures', coalesce(sum(b.vl_total) filter (where b.it_type = 4), 0)
+                                    - coalesce(sum(b.vl_total) filter (where b.it_type = 5), 0),
+                   'vl_adjust',     coalesce(sum(sign(b.qt_quantity) * b.vl_total) filter (where b.it_type = 3), 0))
+            from base b),
+         (select count(*) from base)
+    into _rows, _summary, _qt;
+
+  return jsonb_build_object('dt_start', _d0, 'dt_end', _d1, 'movements', _rows, 'summary', _summary,
+                            'id_truncated', _qt > _limit);
+end;
+$$;
+
+revoke all on function ad.stock_movement_list(jsonb) from public, anon;
+grant execute on function ad.stock_movement_list(jsonb) to authenticated;

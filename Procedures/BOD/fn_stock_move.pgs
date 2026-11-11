@@ -1,0 +1,71 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_stock_move(...)                                         ::
+  ::  UsedBy      : ad.stock_movement_save, od.fn_stock_evolution                 ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava um movimento de estoque e atualiza o saldo do material (trava a
+    linha de od.stock_item; numera o movimento travando a filial). Unica
+    forma de mexer no saldo. Helper interno (sem grant): quem chama ja checou
+    a permissao e as regras do tipo.
+  Input:
+    p_nr_company, p_nr_branch, p_nr_material, p_it_type (1 entrada | 2 saida |
+    3 ajuste | 4 baixa da evolucao | 5 estorno da baixa), p_qt (com sinal, em
+    unidades de uso), p_dt, p_vl_unit_cost, p_vl_total, p_nr_user e os
+    opcionais p_nr_supplier, p_vc_document, p_nr_entry, p_nr_patient,
+    p_nr_evolution, p_nr_movement_ref, p_vc_notes
+  Output: bigint (nr_movement)
+*/
+create or replace function od.fn_stock_move(
+  p_nr_company      bigint,
+  p_nr_branch       bigint,
+  p_nr_material     bigint,
+  p_it_type         smallint,
+  p_qt              numeric,
+  p_dt              date,
+  p_vl_unit_cost    numeric,
+  p_vl_total        numeric,
+  p_nr_user         bigint,
+  p_nr_supplier     bigint default null,
+  p_vc_document     text default null,
+  p_nr_entry        bigint default null,
+  p_nr_patient      bigint default null,
+  p_nr_evolution    bigint default null,
+  p_nr_movement_ref bigint default null,
+  p_vc_notes        text default null)
+returns bigint
+language plpgsql
+set search_path = ''
+as $$
+declare
+  _balance numeric;
+  _nr      bigint;
+begin
+  update od.stock_item s set qt_stock = s.qt_stock + p_qt
+   where s.nr_company = p_nr_company and s.nr_branch = p_nr_branch and s.nr_material = p_nr_material
+  returning s.qt_stock into _balance;
+  if not found then
+    raise exception 'stock_item % / % / % inexistente', p_nr_company, p_nr_branch, p_nr_material;
+  end if;
+  perform 1 from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch for update;
+  select coalesce(max(m.nr_movement), 0) + 1 into _nr
+    from od.stock_movement m where m.nr_company = p_nr_company and m.nr_branch = p_nr_branch;
+  insert into od.stock_movement (
+    nr_company, nr_branch, nr_movement, nr_material, it_type, dt_movement, qt_quantity, qt_balance,
+    vl_unit_cost, vl_total, nr_supplier, vc_document, nr_entry, nr_patient, nr_evolution, nr_movement_ref,
+    vc_notes, nr_user, nr_operator)
+  values (
+    p_nr_company, p_nr_branch, _nr, p_nr_material, p_it_type, p_dt, p_qt, _balance,
+    p_vl_unit_cost, p_vl_total, p_nr_supplier, p_vc_document, p_nr_entry, p_nr_patient, p_nr_evolution,
+    p_nr_movement_ref, p_vc_notes, p_nr_user, p_nr_user);
+  return _nr;
+end;
+$$;
+
+revoke all on function od.fn_stock_move(bigint, bigint, bigint, smallint, numeric, date, numeric, numeric, bigint,
+  bigint, text, bigint, bigint, bigint, bigint, text) from public, anon, authenticated;

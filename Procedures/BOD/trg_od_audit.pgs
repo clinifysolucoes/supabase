@@ -217,3 +217,11 @@ create or replace trigger prosthetic_work_audit
 create or replace trigger prosthetic_work_step_audit
   before insert or update on od.prosthetic_work_step
   for each row execute function ad.trg_audit();
+
+create or replace trigger stock_item_audit
+  before insert or update on od.stock_item
+  for each row execute function ad.trg_audit();
+
+create or replace trigger stock_movement_audit
+  before insert or update on od.stock_movement
+  for each row execute function ad.trg_audit();
