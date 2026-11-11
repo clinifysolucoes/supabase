@@ -1,0 +1,236 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.stock_movement_save(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> rpc('stock_movement_save') (tela Estoque)          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lanca um movimento manual de estoque (CRIAR na tela STOCK) num material
+    com controle ativo. Quantidades em unidades de uso; na entrada e na saida
+    pode vir em embalagens (qt_packages x rendimento).
+      it_type 1  entrada (compra): valor total e fornecedor opcionais;
+                 id_payable gera a conta a pagar do fornecedor (categoria
+                 "Materiais"; exige fornecedor, valor e CRIAR no Financeiro);
+                 id_update_price atualiza o preco da embalagem do material
+                 (valor / embalagens; exige ALTERAR na Precificacao)
+      it_type 2  saida manual (perda, vencimento, uso fora de procedimento):
+                 nao pode deixar o saldo negativo
+      it_type 3  ajuste de inventario: qt_counted e o saldo contado; grava a
+                 diferenca (sem diferenca, nada e gravado)
+    A baixa pelos procedimentos (tipos 4 e 5) e automatica, pela evolucao.
+
+  Input p_json:
+    nr_version     integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_material    bigint   obrigatorio
+    it_type        smallint obrigatorio (1, 2, 3)
+    dt_movement    date     opcional (padrao hoje; nao pode ser futura)
+    qt_quantity    numeric  tipos 1 e 2 (> 0, unidades de uso), ou
+    qt_packages    numeric  tipos 1 e 2 (> 0, embalagens)
+    qt_counted     numeric  tipo 3 (>= 0)
+    vl_total       numeric  opcional (tipo 1)
+    nr_supplier    bigint   opcional (tipo 1)
+    vc_document    text     opcional (nota fiscal, ate 60)
+    id_payable     boolean  opcional (tipo 1)
+    dt_due         date     opcional (vencimento; padrao a data do movimento)
+    id_update_price boolean opcional (tipo 1, com qt_packages)
+    nr_patient     bigint   opcional (tipo 2)
+    vc_notes       text     opcional (ate 500)
+
+  Output jsonb: {"nr_movement", "qt_stock", "nr_entry", "id_changed"}
+
+  Errors: VERSION_MISMATCH, STOCK_BRANCH_REQUIRED, STOCK_FORBIDDEN, STOCK_MATERIAL_NOT_FOUND,
+    STOCK_NOT_CONTROLLED, STOCK_TYPE_INVALID, STOCK_VALUE_INVALID, STOCK_INSUFFICIENT,
+    STOCK_SUPPLIER_REQUIRED, STOCK_FINANCE_FORBIDDEN, STOCK_PRICE_FORBIDDEN, PATIENT_NOT_FOUND
+*/
+create or replace function ad.stock_movement_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _today      date;
+  _material   bigint;
+  _type       smallint;
+  _dt         date;
+  _qt         numeric;
+  _packages   numeric;
+  _counted    numeric;
+  _total      numeric;
+  _supplier   bigint;
+  _doc        text;
+  _payable    boolean;
+  _due        date;
+  _upd_price  boolean;
+  _patient    bigint;
+  _notes      text;
+  _mat        od.material;
+  _item       od.stock_item;
+  _unit       numeric;
+  _entry      bigint;
+  _cat        bigint;
+  _nr_mov     bigint;
+  _balance    numeric;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'stock_movement_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('STOCK_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'STOCK') ->> 'id_create')::boolean, false) then
+    raise exception '%', ad.fn_message('STOCK_FORBIDDEN');
+  end if;
+
+  select (now() at time zone coalesce(b.vc_timezone, 'America/Sao_Paulo'))::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  begin
+    _material  := (p_json ->> 'nr_material')::bigint;
+    _type      := (p_json ->> 'it_type')::smallint;
+    _dt        := coalesce((p_json ->> 'dt_movement')::date, _today);
+    _qt        := (p_json ->> 'qt_quantity')::numeric;
+    _packages  := (p_json ->> 'qt_packages')::numeric;
+    _counted   := (p_json ->> 'qt_counted')::numeric;
+    _total     := round((p_json ->> 'vl_total')::numeric, 2);
+    _supplier  := (p_json ->> 'nr_supplier')::bigint;
+    _doc       := nullif(trim(coalesce(p_json ->> 'vc_document', '')), '');
+    _payable   := coalesce((p_json ->> 'id_payable')::boolean, false);
+    _due       := (p_json ->> 'dt_due')::date;
+    _upd_price := coalesce((p_json ->> 'id_update_price')::boolean, false);
+    _patient   := (p_json ->> 'nr_patient')::bigint;
+    _notes     := nullif(trim(coalesce(p_json ->> 'vc_notes', '')), '');
+  exception when others then
+    raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+  end;
+  if _type is null or _type not in (1, 2, 3) then
+    raise exception '%', ad.fn_message('STOCK_TYPE_INVALID');
+  end if;
+
+  select * into _mat from od.material m
+   where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_material = _material;
+  if not found then
+    raise exception '%', ad.fn_message('STOCK_MATERIAL_NOT_FOUND');
+  end if;
+  select * into _item from od.stock_item s
+   where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_material = _material
+   for update;
+  if not found or _item.it_status <> 1 then
+    raise exception '%', ad.fn_message('STOCK_NOT_CONTROLLED');
+  end if;
+
+  if _dt > _today or length(coalesce(_doc, '')) > 60 or length(coalesce(_notes, '')) > 500
+     or _total < 0 or _total > 9999999999 then
+    raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+  end if;
+  _unit := case when coalesce(_mat.qt_yield, 0) > 0 then _mat.vl_package_price / _mat.qt_yield end;
+
+  if _type in (1, 2) then
+    if _packages is not null then
+      if _packages <= 0 or coalesce(_mat.qt_yield, 0) <= 0 then
+        raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+      end if;
+      _qt := round(_packages * _mat.qt_yield, 3);
+    end if;
+    if _qt is null or _qt <= 0 or _qt > 99999999999 then
+      raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+    end if;
+  end if;
+
+  if _type = 1 then
+    if _total is not null and _total > 0 then
+      _unit := _total / _qt;
+    end if;
+    if _supplier is not null and not exists (
+         select 1 from od.fin_supplier s
+          where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_supplier = _supplier) then
+      raise exception '%', ad.fn_message('STOCK_SUPPLIER_REQUIRED');
+    end if;
+    if _payable then
+      if _supplier is null or coalesce(_total, 0) <= 0 then
+        raise exception '%', ad.fn_message('STOCK_SUPPLIER_REQUIRED');
+      end if;
+      if not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_create')::boolean, false) then
+        raise exception '%', ad.fn_message('STOCK_FINANCE_FORBIDDEN');
+      end if;
+    end if;
+    if _upd_price then
+      if _packages is null or coalesce(_total, 0) <= 0 then
+        raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+      end if;
+      if not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING') ->> 'id_update')::boolean, false) then
+        raise exception '%', ad.fn_message('STOCK_PRICE_FORBIDDEN');
+      end if;
+    end if;
+  elsif _type = 2 then
+    if _qt > _item.qt_stock then
+      raise exception '%', ad.fn_message('STOCK_INSUFFICIENT',
+        jsonb_build_object('Stock', _item.qt_stock, 'Unit', coalesce(_mat.vc_unit, '')));
+    end if;
+    if _patient is not null and not exists (
+         select 1 from od.patient p
+          where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _patient) then
+      raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+    end if;
+    _qt := -_qt;
+  else
+    if _counted is null or _counted < 0 or _counted > 99999999999 then
+      raise exception '%', ad.fn_message('STOCK_VALUE_INVALID');
+    end if;
+    _qt := round(_counted, 3) - _item.qt_stock;
+    if _qt = 0 then
+      return jsonb_build_object('nr_movement', null, 'qt_stock', _item.qt_stock, 'nr_entry', null, 'id_changed', false);
+    end if;
+  end if;
+
+  if _type = 1 and _payable then
+    _cat := od.fn_fin_category_ensure(_nr_company, _nr_branch, 'Materiais', 2::smallint, 2::smallint, _nr_user);
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(e.nr_entry), 0) + 1 into _entry
+      from od.fin_entry e where e.nr_company = _nr_company and e.nr_branch = _nr_branch;
+    insert into od.fin_entry (
+      nr_company, nr_branch, nr_entry, it_kind, nr_category, nr_supplier, vc_description, vl_amount,
+      dt_due, dt_competence, it_status, nr_installment, qt_installments, nr_user_created, nr_operator)
+    values (
+      _nr_company, _nr_branch, _entry, 2, _cat, _supplier,
+      left(format('Compra: %s%s', _mat.vc_name, case when _doc is not null then ' (' || _doc || ')' else '' end), 140),
+      _total, coalesce(_due, _dt), _dt, 1, 1, 1, _nr_user, _nr_user);
+  end if;
+
+  if _type = 1 and _upd_price then
+    update od.material m set vl_package_price = round(_total / _packages, 2), it_price_source = 1,
+                             vc_price_source = null, dh_price_updated = now()
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_material = _material;
+  end if;
+
+  _nr_mov := od.fn_stock_move(_nr_company, _nr_branch, _material, _type, _qt, _dt, _unit,
+                              case when _type = 1 then _total else round(abs(_qt) * coalesce(_unit, 0), 2) end,
+                              _nr_user, p_nr_supplier => case when _type = 1 then _supplier end,
+                              p_vc_document => _doc, p_nr_entry => _entry,
+                              p_nr_patient => case when _type = 2 then _patient end, p_vc_notes => _notes);
+  select s.qt_stock into _balance from od.stock_item s
+   where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_material = _material;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'STOCK', 'CREATE',
+    'stock_movement', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_mov::text,
+    format('%s de %s: %s %s', case _type when 1 then 'Entrada' when 2 then 'Saída' else 'Ajuste' end,
+           _mat.vc_name, _qt, coalesce(_mat.vc_unit, '')),
+    jsonb_build_object('nr_material', _material, 'it_type', _type, 'qt_quantity', _qt, 'qt_balance', _balance,
+                       'nr_entry', _entry, 'id_update_price', _upd_price));
+
+  return jsonb_build_object('nr_movement', _nr_mov, 'qt_stock', _balance, 'nr_entry', _entry, 'id_changed', true);
+end;
+$$;
+
+revoke all on function ad.stock_movement_save(jsonb) from public, anon;
+grant execute on function ad.stock_movement_save(jsonb) to authenticated;

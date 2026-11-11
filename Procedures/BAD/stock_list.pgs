@@ -1,0 +1,101 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.stock_list(jsonb)                                          ::
+  ::  UsedBy      : Flutter -> rpc('stock_list') (tela Estoque)                   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Materiais da filial com o estoque (LER na tela STOCK): saldo em unidades
+    de uso, minimo, abaixo do minimo, custo por unidade de uso (preco da
+    embalagem / rendimento) e valor em estoque. Devolve tambem os fornecedores
+    ativos (para a entrada).
+      vc_filter = 'controlled' (padrao) com controle ativo | 'low' abaixo do
+                  minimo (ou zerado/negativo) | 'all' todos os materiais ativos
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_filter    text     opcional
+    vc_search    text     opcional (nome do material)
+
+  Output jsonb: {"items": [{nr_material, vc_name, vc_package, qt_yield, vc_unit, vl_package_price,
+                            vl_unit_cost, id_control, qt_stock, qt_min, id_low, vl_stock, dt_last_movement}],
+                 "totals": {qt_controlled, qt_low, vl_stock},
+                 "suppliers": [{nr_supplier, vc_name}]}
+
+  Errors: VERSION_MISMATCH, STOCK_BRANCH_REQUIRED, STOCK_FORBIDDEN
+*/
+create or replace function ad.stock_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _filter     text := lower(coalesce(p_json ->> 'vc_filter', 'controlled'));
+  _search     text := nullif(trim(coalesce(p_json ->> 'vc_search', '')), '');
+  _items      jsonb;
+  _totals     jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'stock_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('STOCK_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'STOCK') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('STOCK_FORBIDDEN');
+  end if;
+
+  with base as (
+    select m.nr_material, m.vc_name, m.vc_package, m.qt_yield, m.vc_unit, m.vl_package_price,
+           case when coalesce(m.qt_yield, 0) > 0 then round(m.vl_package_price / m.qt_yield, 4) end as vl_unit_cost,
+           coalesce(s.it_status = 1, false) as id_control,
+           s.qt_stock, s.qt_min,
+           (s.it_status = 1 and (s.qt_stock <= 0 or (s.qt_min is not null and s.qt_stock < s.qt_min))) as id_low,
+           (select max(x.dt_movement) from od.stock_movement x
+             where x.nr_company = m.nr_company and x.nr_branch = m.nr_branch and x.nr_material = m.nr_material)
+             as dt_last_movement
+      from od.material m
+      left join od.stock_item s on s.nr_company = m.nr_company and s.nr_branch = m.nr_branch
+                               and s.nr_material = m.nr_material
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+       and (m.it_status = 1 or s.it_status = 1)
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'nr_material', b.nr_material, 'vc_name', b.vc_name, 'vc_package', b.vc_package, 'qt_yield', b.qt_yield,
+           'vc_unit', b.vc_unit, 'vl_package_price', b.vl_package_price, 'vl_unit_cost', b.vl_unit_cost,
+           'id_control', b.id_control, 'qt_stock', b.qt_stock, 'qt_min', b.qt_min, 'id_low', coalesce(b.id_low, false),
+           'vl_stock', case when b.id_control and b.qt_stock > 0 then round(b.qt_stock * coalesce(b.vl_unit_cost, 0), 2) else 0 end,
+           'dt_last_movement', b.dt_last_movement)
+           order by coalesce(b.id_low, false) desc, lower(b.vc_name)) filter (
+             where (_search is null or b.vc_name ilike '%' || _search || '%')
+               and case _filter when 'all' then true
+                                when 'low' then coalesce(b.id_low, false)
+                                else b.id_control end), '[]'::jsonb),
+         jsonb_build_object(
+           'qt_controlled', count(*) filter (where b.id_control),
+           'qt_low',        count(*) filter (where coalesce(b.id_low, false)),
+           'vl_stock',      coalesce(sum(round(b.qt_stock * coalesce(b.vl_unit_cost, 0), 2))
+                                       filter (where b.id_control and b.qt_stock > 0), 0))
+    into _items, _totals
+    from base b;
+
+  return jsonb_build_object(
+    'items', _items, 'totals', _totals,
+    'suppliers', coalesce((select jsonb_agg(jsonb_build_object('nr_supplier', s.nr_supplier, 'vc_name', s.vc_name)
+                                            order by s.vc_name)
+                             from od.fin_supplier s
+                            where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.it_status = 1), '[]'::jsonb));
+end;
+$$;
+
+revoke all on function ad.stock_list(jsonb) from public, anon;
+grant execute on function ad.stock_list(jsonb) to authenticated;

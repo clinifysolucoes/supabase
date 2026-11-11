@@ -311,3 +311,15 @@ drop policy if exists prosthetic_work_step_select on od.prosthetic_work_step;
 create policy prosthetic_work_step_select on od.prosthetic_work_step
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.stock_item
+drop policy if exists stock_item_select on od.stock_item;
+create policy stock_item_select on od.stock_item
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.stock_movement
+drop policy if exists stock_movement_select on od.stock_movement;
+create policy stock_movement_select on od.stock_movement
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

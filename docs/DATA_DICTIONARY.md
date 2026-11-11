@@ -96,11 +96,16 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
 | [`od.prosthetic_work`](#odprostheticwork) | Trabalho protético | Trabalho protético do paciente enviado ao laboratório (coroa, prótese, placa...): laboratório, dente, cor, etapa, datas de envio, previsão, recebimento e instalação, e custo. Ao receber, o custo vira conta a pagar do laboratório. |
 | [`od.prosthetic_work_step`](#odprostheticworkstep) | Etapa do trabalho protético | Histórico das etapas do trabalho protético (envio, prova, retorno, instalação, cancelamento), com data, observação e quem registrou. |
+| [`od.stock_item`](#odstockitem) | Item de estoque | Materiais do catálogo (od.material) com controle de estoque: saldo em unidades de uso e estoque mínimo. O saldo só muda por movimento (od.fn_stock_move). |
+| [`od.stock_movement`](#odstockmovement) | Movimento de estoque | Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimentos registrados na evolução clínica (com estorno quando a evolução é excluída). Guarda o saldo depois do movimento. |
 
 ## Diagrama (ERD)
 
 ```mermaid
 erDiagram
+  material ||--o{ stock_item : "controle de estoque"
+  stock_item ||--o{ stock_movement : "movimentos"
+  clinical_evolution ||--o{ stock_movement : "baixas de material"
   patient ||--o{ prosthetic_work : "trabalhos protéticos"
   fin_supplier ||--o{ prosthetic_work : "trabalhos do laboratório"
   prosthetic_work ||--o{ prosthetic_work_step : "etapas"
@@ -1075,6 +1080,34 @@ erDiagram
     smallint nr_step PK
     smallint it_stage
     date dt_step
+    varchar vc_notes
+    bigint nr_user FK
+  }
+  stock_item {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_material PK, FK
+    numeric qt_stock
+    numeric qt_min
+    smallint it_status
+  }
+  stock_movement {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_movement PK
+    bigint nr_material FK
+    smallint it_type
+    date dt_movement
+    numeric qt_quantity
+    numeric qt_balance
+    numeric vl_unit_cost
+    numeric vl_total
+    bigint nr_supplier FK
+    varchar vc_document
+    bigint nr_entry FK
+    bigint nr_patient FK
+    bigint nr_evolution FK
+    bigint nr_movement_ref
     varchar vc_notes
     bigint nr_user FK
   }
@@ -2698,6 +2731,58 @@ Histórico das etapas do trabalho protético (envio, prova, retorno, instalaçã
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.stock_item
+
+**Item de estoque**
+
+Materiais do catálogo (od.material) com controle de estoque: saldo em unidades de uso e estoque mínimo. O saldo só muda por movimento (od.fn_stock_move).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via stock_item_save, stock_movement_save e a baixa da evolução clínica (permissão na tela STOCK).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `material.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `material.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_material` | `bigint` | PK3, FK → `material.nr_material` | NOT NULL |  | Material do catálogo da precificação. |
+| `qt_stock` | `numeric(14,3)` |  | NOT NULL | `0` | Saldo em unidades de uso do material (pode ficar negativo pela baixa automática). |
+| `qt_min` | `numeric(14,3)` |  | NULL |  | Estoque mínimo em unidades de uso (abaixo dele o material aparece em alerta). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Controle de estoque do material. Valores: 1 = Controlado; 90 = Sem controle (mantém saldo e histórico). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.stock_movement
+
+**Movimento de estoque**
+
+Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimentos registrados na evolução clínica (com estorno quando a evolução é excluída). Guarda o saldo depois do movimento.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via stock_item_save, stock_movement_save e a baixa da evolução clínica (permissão na tela STOCK).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `stock_item.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `stock_item.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_movement` | `bigint` | PK3 | NOT NULL |  | Número sequencial do movimento na filial. |
+| `nr_material` | `bigint` | FK → `stock_item.nr_material` | NOT NULL |  | Material movimentado. |
+| `it_type` | `smallint` |  | NOT NULL |  | Tipo do movimento. Valores: 1 = Entrada (compra); 2 = Saída manual; 3 = Ajuste de inventário; 4 = Baixa pela evolução clínica; 5 = Estorno da baixa (evolução excluída). |
+| `dt_movement` | `date` |  | NOT NULL |  | Data do movimento. |
+| `qt_quantity` | `numeric(14,3)` |  | NOT NULL |  | Quantidade em unidades de uso, com sinal (+ entra, − sai). |
+| `qt_balance` | `numeric(14,3)` |  | NOT NULL |  | Saldo do material depois do movimento. |
+| `vl_unit_cost` | `numeric(14,4)` |  | NULL |  | Custo por unidade de uso (na entrada, valor ÷ quantidade; nos demais, preço da embalagem ÷ rendimento). |
+| `vl_total` | `numeric(14,2)` |  | NULL |  | Valor do movimento (na entrada, o valor da compra). |
+| `nr_supplier` | `bigint` | FK → `fin_supplier.nr_supplier` | NULL |  | Fornecedor da compra. |
+| `vc_document` | `varchar(60)` |  | NULL |  | Documento da compra (nota fiscal). |
+| `nr_entry` | `bigint` | FK → `fin_entry.nr_entry` | NULL |  | Conta a pagar gerada pela compra. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NULL |  | Paciente da baixa pela evolução (ou da saída manual). |
+| `nr_evolution` | `bigint` | FK → `clinical_evolution.nr_evolution` | NULL |  | Evolução clínica que baixou (ou estornou) o material. |
+| `nr_movement_ref` | `bigint` |  | NULL |  | Baixa estornada (no estorno, tipo 5). |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observação / motivo. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que lançou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ## Functions
 
 Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema('<schema>').rpc('<nome>', params: {'p_json': {...}})` (`ad` ou `od`, conforme a assinatura).
@@ -2772,13 +2857,17 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.anamnesis_model_list(p_json jsonb)` | authenticated | Modelos de anamnese da filial com as perguntas (cria o modelo Geral na primeira chamada). Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = pode editar (alterar em SETTINGS). |
 | `ad.anamnesis_model_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um modelo de anamnese: nome, especialidade, situação e as perguntas (substituídas inteiras). Exige alterar na tela SETTINGS. Grava event_log. |
 | `ad.patient_anamnesis_save(p_json jsonb)` | authenticated | Preenche (I, criar ou alterar) ou exclui (D, alterar) uma anamnese do paciente na tela PATIENTS: copia as perguntas do modelo e grava as respostas; "sim" em pergunta de alerta vira alerta. Grava event_log sem as respostas. |
-| `ad.clinical_evolution_save(p_json jsonb)` | authenticated | Registra (I, criar ou alterar) ou exclui (D, alterar) uma evolução clínica na tela PATIENTS; com nr_budget/nr_item marca o item do orçamento aprovado como realizado (e a exclusão desmarca). Grava event_log sem o texto. |
+| `ad.clinical_evolution_save(p_json jsonb)` | authenticated | Registra (I, criar ou alterar) ou exclui (D, alterar) uma evolução clínica na tela PATIENTS; com nr_budget/nr_item marca o item do orçamento aprovado como realizado (e a exclusão desmarca). Grava event_log sem o texto. O procedimento registrado baixa do estoque os materiais da ficha técnica com controle ativo (od.fn_stock_evolution); a exclusão estorna. |
 | `ad.tooth_mark_save(p_json jsonb)` | authenticated | Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log. |
 | `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. |
 | `ad.dashboard_get(p_json jsonb)` | authenticated | Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null. |
 | `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
 | `ad.prosthetic_save(p_json jsonb)` | authenticated | Cadastra (criar em PROSTHETIC) ou altera (alterar) um trabalho protético com update parcial: paciente, profissional, laboratório, item de orçamento, descrição, dente, cor, observações, previsão e custo. Nasce na etapa A enviar; com a conta a pagar gerada, custo e laboratório não mudam. |
 | `ad.prosthetic_stage(p_json jsonb)` | authenticated | Muda a etapa do trabalho protético (alterar em PROSTHETIC) e grava o histórico; no primeiro recebimento, com custo e laboratório cadastrado, gera a conta a pagar do laboratório (categoria Laboratório) quando o usuário pode criar no Financeiro. |
+| `ad.stock_list(p_json jsonb)` | authenticated | Materiais com o estoque (ler em STOCK): saldo em unidades de uso, mínimo, abaixo do mínimo, custo por unidade e valor em estoque; filtros controlados, em alerta ou todos, busca; totais e fornecedores ativos. |
+| `ad.stock_item_save(p_json jsonb)` | authenticated | Liga/desliga o controle de estoque de um material e define o mínimo (alterar em STOCK). Desligar mantém saldo e histórico e para a baixa automática. |
+| `ad.stock_movement_save(p_json jsonb)` | authenticated | Movimento manual (criar em STOCK): entrada de compra em unidades ou embalagens, com conta a pagar opcional (categoria Materiais, exige criar no Financeiro) e atualização opcional do preço da embalagem (exige alterar na Precificação); saída manual sem deixar saldo negativo; ajuste de inventário pelo saldo contado. |
+| `ad.stock_movement_list(p_json jsonb)` | authenticated | Movimentos de estoque num período (ler em STOCK; padrão 30 dias, até 366), por material e tipo, com fornecedor, paciente e usuário, e o resumo em valor (entradas, saídas, baixas pelos procedimentos, ajustes). |
 | `ad.patient_summary_get(p_json jsonb)` | authenticated | Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null. |
 | `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional. |
 | `ad.document_template_list(p_json jsonb)` | authenticated | Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
@@ -2850,6 +2939,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
+| `od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)` | interna | Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo). |
+| `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
 | `od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)` | interna | Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento. |
 | `od.fn_fin_receivable_make(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_qt_installments integer, p_vc_reference text, p_nr_user bigint)` | interna | Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada. |
 | `od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)` | interna | Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados. |
@@ -3253,7 +3344,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_FILE_VALUE_INVALID` | `patient_file_save`, `patient_file_list` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
-| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `stock_movement_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
 | `PATIENT_NOTE_FORBIDDEN` | `patient_note_save` |  |
 | `PATIENT_NOTE_NOT_FOUND` | `patient_note_save` |  |
@@ -3363,6 +3454,17 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SPECIALTY_PERCENT_INVALID` | `specialty_save` |  |
 | `SPECIALTY_REQUIRED` | `specialty_save` |  |
 | `SPECIALTY_STATUS_INVALID` | `specialty_save` |  |
+| `STOCK_BRANCH_REQUIRED` | `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list` |  |
+| `STOCK_FINANCE_FORBIDDEN` | `stock_movement_save` |  |
+| `STOCK_FORBIDDEN` | `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list` |  |
+| `STOCK_INSUFFICIENT` | `stock_movement_save` |  |
+| `STOCK_MATERIAL_NOT_FOUND` | `stock_item_save`, `stock_movement_save` |  |
+| `STOCK_NOT_CONTROLLED` | `stock_movement_save` |  |
+| `STOCK_PERIOD_INVALID` | `stock_movement_list` |  |
+| `STOCK_PRICE_FORBIDDEN` | `stock_movement_save` |  |
+| `STOCK_SUPPLIER_REQUIRED` | `stock_movement_save` |  |
+| `STOCK_TYPE_INVALID` | `stock_movement_save` |  |
+| `STOCK_VALUE_INVALID` | `stock_item_save`, `stock_movement_save` |  |
 | `TOOTH_MARK_ACTION_INVALID` | `tooth_mark_save` |  |
 | `TOOTH_MARK_FORBIDDEN` | `tooth_mark_save` |  |
 | `TOOTH_MARK_NOT_FOUND` | `tooth_mark_save` |  |
@@ -3383,7 +3485,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
