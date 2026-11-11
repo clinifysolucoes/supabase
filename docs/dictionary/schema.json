@@ -1255,6 +1255,7 @@
         { "name": "it_source", "type": "smallint", "nullable": true, "description": "Como conheceu a clínica.",
           "values": { "1": "Google", "2": "Instagram", "3": "Facebook", "4": "Indicação", "5": "Escola", "6": "Outdoor", "7": "Panfleto", "8": "Placa", "9": "Plano / convênio", "10": "Rádio", "11": "TV", "12": "Revista", "99": "Outros" } },
         { "name": "vc_referral", "type": "varchar(120)", "nullable": true, "description": "Indicado por (nome de quem indicou)." },
+        { "name": "nr_referrer", "type": "bigint", "fk": "patient.nr_patient", "nullable": true, "description": "Paciente da filial que indicou este paciente (Controle de Indicação); vc_referral fica para quem indicou e não é paciente." },
         { "name": "vc_notes", "type": "text", "nullable": true, "description": "Observações do cadastro." },
         { "name": "vc_phone", "type": "varchar(11)", "nullable": true, "description": "Telefone fixo, só dígitos (DDD + número)." },
         { "name": "vc_mobile", "type": "varchar(11)", "nullable": true, "description": "Celular / WhatsApp, só dígitos (DDD + número)." },
@@ -1399,12 +1400,32 @@
         { "name": "vc_notes", "type": "varchar(500)", "nullable": true, "description": "Observação / motivo." },
         { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que lançou." }
       ]
+    },
+    {
+      "schema": "od",
+      "name": "referral_reward",
+      "title": "Recompensa por indicação",
+      "description": "Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via referral_reward_save (permissão na tela REFERRALS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient.nr_patient", "nullable": false, "description": "Paciente indicado." },
+        { "name": "vc_referrer", "type": "varchar(120)", "nullable": false, "description": "Quem indicou (nome no momento da recompensa)." },
+        { "name": "dt_reward", "type": "date", "nullable": false, "description": "Data da recompensa." },
+        { "name": "vc_reward", "type": "varchar(200)", "nullable": false, "description": "O que foi dado (brinde, desconto, agradecimento...)." },
+        { "name": "vl_reward", "type": "numeric(12,2)", "nullable": true, "description": "Valor da recompensa, quando houver." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação da recompensa.", "values": {"1": "Registrada", "90": "Desfeita"} },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
+      ]
     }
   ],
   "external_entities": [
     { "name": "auth_users", "title": "auth.users (Supabase Auth)", "description": "Usuários autenticados pelo Supabase (e-mail, senha, OTP, social, 2FA). Gerenciado pela Supabase; referenciado por ad.app_user.uu_auth." }
   ],
   "relations": [
+    { "from": "patient", "to": "patient", "card": "||--o{", "label": "indicou" },
+    { "from": "patient", "to": "referral_reward", "card": "||--o{", "label": "recompensa da indicação" },
     { "from": "material", "to": "stock_item", "card": "||--o{", "label": "controle de estoque" },
     { "from": "stock_item", "to": "stock_movement", "card": "||--o{", "label": "movimentos" },
     { "from": "clinical_evolution", "to": "stock_movement", "card": "||--o{", "label": "baixas de material" },
@@ -1717,6 +1738,8 @@
     { "name": "stock_item_save", "signature": "ad.stock_item_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Liga/desliga o controle de estoque de um material e define o mínimo (alterar em STOCK). Desligar mantém saldo e histórico e para a baixa automática.", "errors": ["VERSION_MISMATCH", "STOCK_BRANCH_REQUIRED", "STOCK_FORBIDDEN", "STOCK_MATERIAL_NOT_FOUND", "STOCK_VALUE_INVALID"] },
     { "name": "stock_movement_save", "signature": "ad.stock_movement_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Movimento manual (criar em STOCK): entrada de compra em unidades ou embalagens, com conta a pagar opcional (categoria Materiais, exige criar no Financeiro) e atualização opcional do preço da embalagem (exige alterar na Precificação); saída manual sem deixar saldo negativo; ajuste de inventário pelo saldo contado.", "errors": ["VERSION_MISMATCH", "STOCK_BRANCH_REQUIRED", "STOCK_FORBIDDEN", "STOCK_MATERIAL_NOT_FOUND", "STOCK_NOT_CONTROLLED", "STOCK_TYPE_INVALID", "STOCK_VALUE_INVALID", "STOCK_INSUFFICIENT", "STOCK_SUPPLIER_REQUIRED", "STOCK_FINANCE_FORBIDDEN", "STOCK_PRICE_FORBIDDEN", "PATIENT_NOT_FOUND"] },
     { "name": "stock_movement_list", "signature": "ad.stock_movement_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Movimentos de estoque num período (ler em STOCK; padrão 30 dias, até 366), por material e tipo, com fornecedor, paciente e usuário, e o resumo em valor (entradas, saídas, baixas pelos procedimentos, ajustes).", "errors": ["VERSION_MISMATCH", "STOCK_BRANCH_REQUIRED", "STOCK_FORBIDDEN", "STOCK_PERIOD_INVALID"] },
+    { "name": "referral_list", "signature": "ad.referral_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Controle de Indicação (ler em REFERRALS) dos pacientes cadastrados no período (padrão 12 meses, até 2 anos): indicados com conversão (orçamento aprovado), valor aprovado (ler em BUDGETS) e recompensa; ranking de quem indicou com valor recebido dos indicados (ler em FINANCE) e recompensas pendentes; novos e convertidos por origem.", "errors": ["VERSION_MISMATCH", "REFERRAL_BRANCH_REQUIRED", "REFERRAL_FORBIDDEN", "REFERRAL_PERIOD_INVALID"] },
+    { "name": "referral_reward_save", "signature": "ad.referral_reward_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Registra (I) ou desfaz (D) a recompensa dada a quem indicou um paciente (alterar em REFERRALS): o que foi dado, data e valor; uma por paciente indicado.", "errors": ["VERSION_MISMATCH", "REFERRAL_ACTION_INVALID", "REFERRAL_BRANCH_REQUIRED", "REFERRAL_FORBIDDEN", "PATIENT_NOT_FOUND", "REFERRAL_NOT_REFERRED", "REFERRAL_REWARD_REQUIRED", "REFERRAL_VALUE_INVALID", "REFERRAL_ALREADY_REWARDED", "REFERRAL_REWARD_NOT_FOUND"] },
     { "name": "patient_summary_get", "signature": "ad.patient_summary_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND"] },
     { "name": "report_get", "signature": "ad.report_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional.", "errors": ["VERSION_MISMATCH", "REPORT_BRANCH_REQUIRED", "REPORT_FORBIDDEN", "REPORT_INVALID", "REPORT_PERIOD_INVALID"] },
     { "name": "document_template_list", "signature": "ad.document_template_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS).", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN"] },

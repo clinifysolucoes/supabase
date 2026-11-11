@@ -35,7 +35,8 @@
       it_education (1 fundamental | 2 medio | 3 superior | 4 pos-graduacao),
       it_source (1 Google | 2 Instagram | 3 Facebook | 4 indicacao | 5 escola | 6 outdoor |
                  7 panfleto | 8 placa | 9 plano/convenio | 10 radio | 11 TV | 12 revista | 99 outros),
-      vc_referral, vc_notes, vc_phone, vc_mobile, vc_phone_other, vc_contact_name, vc_email,
+      vc_referral, nr_referrer (paciente da filial que indicou; preenche it_source 4 quando vazio),
+      vc_notes, vc_phone, vc_mobile, vc_phone_other, vc_contact_name, vc_email,
       id_no_email, vc_zip, vc_state, vc_city, vc_address, vc_address_number, vc_district,
       vc_address_complement, vc_record_number, vc_profession, vc_workplace, vc_work_time,
       vc_plan_name, vc_plan_number, vc_father_name, vc_father_cpf, vc_father_rg,
@@ -96,7 +97,7 @@ declare
   -- tudo que o app pode mandar (o resto do JSON e ignorado)
   _allowed    constant text[] := array[
     'vc_name', 'vc_nickname', 'vc_cpf', 'vc_rg', 'dt_birth', 'it_gender', 'it_marital_status',
-    'it_education', 'it_source', 'vc_referral', 'vc_notes', 'vc_phone', 'vc_mobile', 'vc_phone_other',
+    'it_education', 'it_source', 'vc_referral', 'nr_referrer', 'vc_notes', 'vc_phone', 'vc_mobile', 'vc_phone_other',
     'vc_contact_name', 'vc_email', 'id_no_email', 'vc_zip', 'vc_state', 'vc_city', 'vc_address',
     'vc_address_number', 'vc_district', 'vc_address_complement', 'vc_record_number', 'vc_profession',
     'vc_workplace', 'vc_work_time', 'vc_plan_name', 'vc_plan_number', 'vc_father_name', 'vc_father_cpf',
@@ -178,6 +179,10 @@ begin
       end;
     end if;
   end loop;
+  if _data ? 'nr_referrer' and jsonb_typeof(_data -> 'nr_referrer') <> 'null'
+     and (_data ->> 'nr_referrer') !~ '^\d{1,15}$' then
+    raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'nr_referrer'));
+  end if;
   if _data ? 'id_no_email' and jsonb_typeof(_data -> 'id_no_email') not in ('boolean', 'null')
      and (_data ->> 'id_no_email') !~* '^(true|false)$' then
     raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'id_no_email'));
@@ -266,6 +271,16 @@ begin
   if _new.it_status not in (1, 90) then
     raise exception '%', ad.fn_message('PATIENT_STATUS_INVALID');
   end if;
+  -- quem indicou: outro paciente da filial
+  if _new.nr_referrer is not null then
+    if _new.nr_referrer is not distinct from _nr_patient
+       or not exists (select 1 from od.patient q
+                       where q.nr_company = _nr_company and q.nr_branch = _nr_branch
+                         and q.nr_patient = _new.nr_referrer) then
+      raise exception '%', ad.fn_message('PATIENT_VALUE_INVALID', jsonb_build_object('Field', 'nr_referrer'));
+    end if;
+    _new.it_source := coalesce(_new.it_source, 4);
+  end if;
 
   -- obrigatorios: nome e nascimento (acima), CPF sempre e os campos que a
   -- filial marcou (od.branch_setting.vc_patient_required). Na alteracao so
@@ -280,6 +295,7 @@ begin
       when 'email' then array['vc_email', 'id_no_email']
       when 'plan' then array['vc_plan_name']
       when 'source' then array['it_source']
+      when 'referral' then array['vc_referral', 'nr_referrer']
       when 'gender' then array['it_gender']
       when 'marital_status' then array['it_marital_status']
       when 'education' then array['it_education']
@@ -293,7 +309,7 @@ begin
          when 'marital_status' then _new.it_marital_status is null
          when 'education' then _new.it_education is null
          when 'source' then _new.it_source is null
-         when 'referral' then _new.vc_referral is null
+         when 'referral' then _new.vc_referral is null and _new.nr_referrer is null
          when 'mobile' then _new.vc_mobile is null
          when 'phone' then _new.vc_phone is null
          when 'email' then _new.vc_email is null and not coalesce(_new.id_no_email, false)
@@ -349,6 +365,7 @@ begin
       it_education          = _new.it_education,
       it_source             = _new.it_source,
       vc_referral           = _new.vc_referral,
+      nr_referrer           = _new.nr_referrer,
       vc_notes              = _new.vc_notes,
       vc_phone              = _new.vc_phone,
       vc_mobile             = _new.vc_mobile,

@@ -20,7 +20,7 @@
     nr_patient  bigint   obrigatorio
 
   Output jsonb:
-    {"patient": {... colunas de od.patient ..., "qt_age"},
+    {"patient": {... colunas de od.patient ..., "qt_age", "vc_referrer" (nome de quem indicou)},
      "notes": [{"nr_note", "vc_note", "nr_user", "vc_user", "dh_note"}],
      "permission": {"id_read", "id_create", "id_update"}}
 
@@ -59,9 +59,12 @@ begin
   end if;
 
   select to_jsonb(p) - 'nr_operator'
-         || jsonb_build_object('qt_age', extract(year from age(current_date, p.dt_birth))::int)
+         || jsonb_build_object('qt_age', extract(year from age(current_date, p.dt_birth))::int,
+                               'vc_referrer', r.vc_name)
     into _patient
     from od.patient p
+    left join od.patient r on r.nr_company = p.nr_company and r.nr_branch = p.nr_branch
+                          and r.nr_patient = p.nr_referrer
    where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient;
   if _patient is null then
     raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
