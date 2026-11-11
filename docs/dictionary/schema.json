@@ -1310,12 +1310,62 @@
         { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação da nota (exclusão é lógica).",
           "values": { "1": "Ativa", "90": "Excluída" } }
       ]
+    },
+    {
+      "schema": "od",
+      "name": "prosthetic_work",
+      "title": "Trabalho protético",
+      "description": "Trabalho protético do paciente enviado ao laboratório (coroa, prótese, placa...): laboratório, dente, cor, etapa, datas de envio, previsão, recebimento e instalação, e custo. Ao receber, o custo vira conta a pagar do laboratório.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via prosthetic_save e prosthetic_stage (permissão na tela PROSTHETIC).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_work", "type": "bigint", "pk": 3, "nullable": false, "description": "Número sequencial do trabalho na filial." },
+        { "name": "nr_patient", "type": "bigint", "fk": "patient.nr_patient", "nullable": false, "description": "Paciente do trabalho." },
+        { "name": "nr_professional", "type": "bigint", "fk": "professional.nr_professional", "nullable": true, "description": "Profissional responsável." },
+        { "name": "nr_supplier", "type": "bigint", "fk": "fin_supplier.nr_supplier", "nullable": true, "description": "Laboratório (fornecedor do financeiro); é quem recebe a conta a pagar." },
+        { "name": "vc_lab", "type": "varchar(120)", "nullable": true, "description": "Nome do laboratório quando não está cadastrado como fornecedor." },
+        { "name": "nr_budget", "type": "bigint", "fk": "budget_item.nr_budget", "nullable": true, "description": "Orçamento do item ligado (opcional, junto com nr_item)." },
+        { "name": "nr_item", "type": "smallint", "fk": "budget_item.nr_item", "nullable": true, "description": "Item do orçamento do paciente ligado ao trabalho." },
+        { "name": "vc_description", "type": "varchar(120)", "nullable": false, "description": "Descrição do trabalho (ex.: Coroa metalocerâmica)." },
+        { "name": "vc_tooth", "type": "varchar(40)", "nullable": true, "description": "Dente(s) ou região." },
+        { "name": "vc_shade", "type": "varchar(40)", "nullable": true, "description": "Cor / escala de cor." },
+        { "name": "vc_notes", "type": "varchar(1000)", "nullable": true, "description": "Observações para o laboratório ou internas." },
+        { "name": "it_stage", "type": "smallint", "nullable": false, "default": "1", "description": "Etapa atual do trabalho.", "values": {"1": "A enviar ao laboratório", "2": "Enviado ao laboratório", "3": "Em prova na clínica", "4": "Recebido do laboratório", "5": "Instalado / entregue", "90": "Cancelado"} },
+        { "name": "dt_sent", "type": "date", "nullable": true, "description": "Data do último envio ao laboratório." },
+        { "name": "dt_expected", "type": "date", "nullable": true, "description": "Previsão de retorno do laboratório (atrasado quando passa e o trabalho está no laboratório)." },
+        { "name": "dt_received", "type": "date", "nullable": true, "description": "Data em que voltou pronto do laboratório." },
+        { "name": "dt_installed", "type": "date", "nullable": true, "description": "Data da instalação / entrega ao paciente." },
+        { "name": "vl_cost", "type": "numeric(12,2)", "nullable": true, "description": "Custo do laboratório." },
+        { "name": "nr_entry", "type": "bigint", "fk": "fin_entry.nr_entry", "nullable": true, "description": "Conta a pagar gerada no recebimento (depois dela o custo e o laboratório não mudam)." },
+        { "name": "nr_user_created", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que cadastrou." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "prosthetic_work_step",
+      "title": "Etapa do trabalho protético",
+      "description": "Histórico das etapas do trabalho protético (envio, prova, retorno, instalação, cancelamento), com data, observação e quem registrou.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via prosthetic_save e prosthetic_stage (permissão na tela PROSTHETIC).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "prosthetic_work.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "prosthetic_work.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_work", "type": "bigint", "pk": 3, "fk": "prosthetic_work.nr_work", "nullable": false, "description": "Trabalho protético." },
+        { "name": "nr_step", "type": "smallint", "pk": 4, "nullable": false, "description": "Número sequencial do passo no trabalho." },
+        { "name": "it_stage", "type": "smallint", "nullable": false, "description": "Etapa registrada.", "values": {"1": "A enviar ao laboratório", "2": "Enviado ao laboratório", "3": "Em prova na clínica", "4": "Recebido do laboratório", "5": "Instalado / entregue", "90": "Cancelado"} },
+        { "name": "dt_step", "type": "date", "nullable": false, "description": "Data do passo." },
+        { "name": "vc_notes", "type": "varchar(500)", "nullable": true, "description": "Observação do passo." },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
+      ]
     }
   ],
   "external_entities": [
     { "name": "auth_users", "title": "auth.users (Supabase Auth)", "description": "Usuários autenticados pelo Supabase (e-mail, senha, OTP, social, 2FA). Gerenciado pela Supabase; referenciado por ad.app_user.uu_auth." }
   ],
   "relations": [
+    { "from": "patient", "to": "prosthetic_work", "card": "||--o{", "label": "trabalhos protéticos" },
+    { "from": "fin_supplier", "to": "prosthetic_work", "card": "||--o{", "label": "trabalhos do laboratório" },
+    { "from": "prosthetic_work", "to": "prosthetic_work_step", "card": "||--o{", "label": "etapas" },
     { "from": "screen", "to": "access_profile_screen", "card": "||--o{", "label": "liberada para perfis" },
     { "from": "access_profile", "to": "access_profile_screen", "card": "||--o{", "label": "telas do perfil" },
     { "from": "app_user", "to": "event_log", "card": "||--o{", "label": "atividades" },
@@ -1613,6 +1663,9 @@
     { "name": "tooth_mark_save", "signature": "ad.tooth_mark_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log.", "errors": ["VERSION_MISMATCH", "TOOTH_MARK_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "TOOTH_MARK_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "TOOTH_MARK_TOOTH_INVALID", "TOOTH_MARK_VALUE_INVALID", "TOOTH_MARK_NOT_FOUND"] },
     { "name": "patient_record_get", "signature": "ad.patient_record_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND"] },
     { "name": "dashboard_get", "signature": "ad.dashboard_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null.", "errors": ["VERSION_MISMATCH", "DASHBOARD_BRANCH_REQUIRED", "DASHBOARD_FORBIDDEN", "DASHBOARD_PERIOD_INVALID"] },
+    { "name": "prosthetic_list", "signature": "ad.prosthetic_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos).", "errors": ["VERSION_MISMATCH", "PROSTHETIC_BRANCH_REQUIRED", "PROSTHETIC_FORBIDDEN"] },
+    { "name": "prosthetic_save", "signature": "ad.prosthetic_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cadastra (criar em PROSTHETIC) ou altera (alterar) um trabalho protético com update parcial: paciente, profissional, laboratório, item de orçamento, descrição, dente, cor, observações, previsão e custo. Nasce na etapa A enviar; com a conta a pagar gerada, custo e laboratório não mudam.", "errors": ["VERSION_MISMATCH", "PROSTHETIC_ACTION_INVALID", "PROSTHETIC_BRANCH_REQUIRED", "PROSTHETIC_FORBIDDEN", "PROSTHETIC_NOT_FOUND", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "PROSTHETIC_DESCRIPTION_REQUIRED", "PROSTHETIC_VALUE_INVALID", "PROSTHETIC_PROFESSIONAL_INVALID", "PROSTHETIC_LAB_INVALID", "PROSTHETIC_ITEM_INVALID", "PROSTHETIC_CLOSED", "PROSTHETIC_ENTRY_EXISTS"] },
+    { "name": "prosthetic_stage", "signature": "ad.prosthetic_stage(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Muda a etapa do trabalho protético (alterar em PROSTHETIC) e grava o histórico; no primeiro recebimento, com custo e laboratório cadastrado, gera a conta a pagar do laboratório (categoria Laboratório) quando o usuário pode criar no Financeiro.", "errors": ["VERSION_MISMATCH", "PROSTHETIC_BRANCH_REQUIRED", "PROSTHETIC_FORBIDDEN", "PROSTHETIC_NOT_FOUND", "PROSTHETIC_STAGE_INVALID", "PROSTHETIC_CLOSED", "PROSTHETIC_VALUE_INVALID"] },
     { "name": "patient_summary_get", "signature": "ad.patient_summary_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND"] },
     { "name": "report_get", "signature": "ad.report_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional.", "errors": ["VERSION_MISMATCH", "REPORT_BRANCH_REQUIRED", "REPORT_FORBIDDEN", "REPORT_INVALID", "REPORT_PERIOD_INVALID"] },
     { "name": "document_template_list", "signature": "ad.document_template_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS).", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN"] },

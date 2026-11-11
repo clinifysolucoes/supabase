@@ -299,3 +299,15 @@ drop policy if exists whatsapp_message_select on od.whatsapp_message;
 create policy whatsapp_message_select on od.whatsapp_message
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.prosthetic_work
+drop policy if exists prosthetic_work_select on od.prosthetic_work;
+create policy prosthetic_work_select on od.prosthetic_work
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.prosthetic_work_step
+drop policy if exists prosthetic_work_step_select on od.prosthetic_work_step;
+create policy prosthetic_work_step_select on od.prosthetic_work_step
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

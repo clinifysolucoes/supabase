@@ -1,0 +1,187 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.prosthetic_save(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('prosthetic_save') (tela Controle Protetico)   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastra (I, CRIAR em PROSTHETIC) ou altera (U, ALTERAR) um trabalho
+    protetico. Update parcial: chave presente altera (null limpa), ausente
+    mantem. O trabalho nasce na etapa 1 (a enviar), com o primeiro passo no
+    historico; a etapa muda por ad.prosthetic_stage. Depois que a conta a pagar
+    do laboratorio foi gerada, o custo e o laboratorio nao mudam mais.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_action        text     I | U
+    nr_work          bigint   obrigatorio em U
+    nr_patient       bigint   obrigatorio em I (nao muda em U)
+    vc_description   text     obrigatorio (ex.: Coroa metalocerâmica)
+    nr_professional, nr_supplier (laboratorio), vc_lab (laboratorio sem cadastro),
+    nr_budget + nr_item (item de orcamento do paciente), vc_tooth, vc_shade (cor),
+    vc_notes, dt_expected, vl_cost       opcionais
+
+  Output jsonb: {"nr_work"}
+
+  Errors: VERSION_MISMATCH, PROSTHETIC_ACTION_INVALID, PROSTHETIC_BRANCH_REQUIRED, PROSTHETIC_FORBIDDEN,
+    PROSTHETIC_NOT_FOUND, PATIENT_REQUIRED, PATIENT_NOT_FOUND, PROSTHETIC_DESCRIPTION_REQUIRED,
+    PROSTHETIC_VALUE_INVALID, PROSTHETIC_PROFESSIONAL_INVALID, PROSTHETIC_LAB_INVALID,
+    PROSTHETIC_ITEM_INVALID, PROSTHETIC_CLOSED, PROSTHETIC_ENTRY_EXISTS
+*/
+create or replace function ad.prosthetic_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr_work    bigint;
+  _old        od.prosthetic_work;
+  _new        od.prosthetic_work;
+  _changed    text[];
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'prosthetic_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('PROSTHETIC_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PROSTHETIC_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PROSTHETIC');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'U' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('PROSTHETIC_FORBIDDEN');
+  end if;
+
+  if _action = 'U' then
+    _nr_work := (p_json ->> 'nr_work')::bigint;
+    select * into _old from od.prosthetic_work w
+     where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_work = _nr_work
+     for update;
+    if not found then
+      raise exception '%', ad.fn_message('PROSTHETIC_NOT_FOUND');
+    end if;
+    if _old.it_stage = 90 then
+      raise exception '%', ad.fn_message('PROSTHETIC_CLOSED');
+    end if;
+    _new := _old;
+  else
+    if (p_json ->> 'nr_patient') is null then
+      raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+    end if;
+    _new.nr_company := _nr_company;
+    _new.nr_branch  := _nr_branch;
+    _new.nr_patient := (p_json ->> 'nr_patient')::bigint;
+    _new.it_stage   := 1;
+    if not exists (select 1 from od.patient p
+                    where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient) then
+      raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+    end if;
+  end if;
+
+  begin
+    if p_json ? 'nr_professional' then _new.nr_professional := (p_json ->> 'nr_professional')::bigint; end if;
+    if p_json ? 'nr_supplier'     then _new.nr_supplier := (p_json ->> 'nr_supplier')::bigint; end if;
+    if p_json ? 'vc_lab'          then _new.vc_lab := nullif(trim(p_json ->> 'vc_lab'), ''); end if;
+    if p_json ? 'nr_budget'       then _new.nr_budget := (p_json ->> 'nr_budget')::bigint; end if;
+    if p_json ? 'nr_item'         then _new.nr_item := (p_json ->> 'nr_item')::smallint; end if;
+    if p_json ? 'vc_description'  then _new.vc_description := trim(p_json ->> 'vc_description'); end if;
+    if p_json ? 'vc_tooth'        then _new.vc_tooth := nullif(trim(p_json ->> 'vc_tooth'), ''); end if;
+    if p_json ? 'vc_shade'        then _new.vc_shade := nullif(trim(p_json ->> 'vc_shade'), ''); end if;
+    if p_json ? 'vc_notes'        then _new.vc_notes := nullif(trim(p_json ->> 'vc_notes'), ''); end if;
+    if p_json ? 'dt_expected'     then _new.dt_expected := (p_json ->> 'dt_expected')::date; end if;
+    if p_json ? 'vl_cost'         then _new.vl_cost := round((p_json ->> 'vl_cost')::numeric, 2); end if;
+  exception when others then
+    raise exception '%', ad.fn_message('PROSTHETIC_VALUE_INVALID');
+  end;
+
+  if coalesce(length(_new.vc_description), 0) = 0 then
+    raise exception '%', ad.fn_message('PROSTHETIC_DESCRIPTION_REQUIRED');
+  end if;
+  if length(_new.vc_description) > 120 or length(coalesce(_new.vc_tooth, '')) > 40
+     or length(coalesce(_new.vc_shade, '')) > 40 or length(coalesce(_new.vc_lab, '')) > 120
+     or length(coalesce(_new.vc_notes, '')) > 1000 or _new.vl_cost < 0 or _new.vl_cost > 9999999999 then
+    raise exception '%', ad.fn_message('PROSTHETIC_VALUE_INVALID');
+  end if;
+  if _new.nr_professional is not null
+     and not exists (select 1 from od.professional p
+                      where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                        and p.nr_professional = _new.nr_professional
+                        and (p.it_status = 1 or p.nr_professional is not distinct from _old.nr_professional)) then
+    raise exception '%', ad.fn_message('PROSTHETIC_PROFESSIONAL_INVALID');
+  end if;
+  if _new.nr_supplier is not null
+     and not exists (select 1 from od.fin_supplier s
+                      where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_supplier = _new.nr_supplier
+                        and (s.it_status = 1 or s.nr_supplier is not distinct from _old.nr_supplier)) then
+    raise exception '%', ad.fn_message('PROSTHETIC_LAB_INVALID');
+  end if;
+  if (_new.nr_budget is null) <> (_new.nr_item is null)
+     or (_new.nr_budget is not null
+         and not exists (select 1 from od.budget_item i
+                           join od.budget b on b.nr_company = i.nr_company and b.nr_branch = i.nr_branch
+                                           and b.nr_budget = i.nr_budget
+                          where i.nr_company = _nr_company and i.nr_branch = _nr_branch
+                            and i.nr_budget = _new.nr_budget and i.nr_item = _new.nr_item
+                            and b.nr_patient = _new.nr_patient)) then
+    raise exception '%', ad.fn_message('PROSTHETIC_ITEM_INVALID');
+  end if;
+  if _old.nr_entry is not null
+     and (_new.vl_cost is distinct from _old.vl_cost or _new.nr_supplier is distinct from _old.nr_supplier) then
+    raise exception '%', ad.fn_message('PROSTHETIC_ENTRY_EXISTS');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(w.nr_work), 0) + 1 into _nr_work
+      from od.prosthetic_work w where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+    insert into od.prosthetic_work (
+      nr_company, nr_branch, nr_work, nr_patient, nr_professional, nr_supplier, vc_lab, nr_budget, nr_item,
+      vc_description, vc_tooth, vc_shade, vc_notes, it_stage, dt_expected, vl_cost, nr_user_created)
+    values (
+      _nr_company, _nr_branch, _nr_work, _new.nr_patient, _new.nr_professional, _new.nr_supplier, _new.vc_lab,
+      _new.nr_budget, _new.nr_item, _new.vc_description, _new.vc_tooth, _new.vc_shade, _new.vc_notes, 1,
+      _new.dt_expected, _new.vl_cost, _nr_user);
+    insert into od.prosthetic_work_step (nr_company, nr_branch, nr_work, nr_step, it_stage, dt_step, nr_user)
+    values (_nr_company, _nr_branch, _nr_work, 1, 1,
+            (now() at time zone coalesce((select b.vc_timezone from ad.branch b
+                                           where b.nr_company = _nr_company and b.nr_branch = _nr_branch),
+                                         'America/Sao_Paulo'))::date, _nr_user);
+  else
+    select array_agg(k) into _changed
+      from jsonb_object_keys(p_json - 'nr_version' - 'nr_company' - 'nr_branch' - 'vc_action' - 'nr_work') k;
+    update od.prosthetic_work w set
+      nr_professional = _new.nr_professional, nr_supplier = _new.nr_supplier, vc_lab = _new.vc_lab,
+      nr_budget = _new.nr_budget, nr_item = _new.nr_item, vc_description = _new.vc_description,
+      vc_tooth = _new.vc_tooth, vc_shade = _new.vc_shade, vc_notes = _new.vc_notes,
+      dt_expected = _new.dt_expected, vl_cost = _new.vl_cost
+     where w.nr_company = _nr_company and w.nr_branch = _nr_branch and w.nr_work = _nr_work;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PROSTHETIC', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'prosthetic_work', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_work::text,
+    format('Trabalho protético %s %s: %s', _nr_work, case when _action = 'I' then 'cadastrado' else 'alterado' end,
+           _new.vc_description),
+    jsonb_build_object('nr_patient', _new.nr_patient, 'vl_cost', _new.vl_cost, 'fields', to_jsonb(_changed)));
+
+  return jsonb_build_object('nr_work', _nr_work);
+end;
+$$;
+
+revoke all on function ad.prosthetic_save(jsonb) from public, anon;
+grant execute on function ad.prosthetic_save(jsonb) to authenticated;

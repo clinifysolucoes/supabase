@@ -94,11 +94,16 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.branch_hour`](#odbranchhour) | Horário de funcionamento | Horário de funcionamento da clínica por dia da semana (um ou mais intervalos por dia, sem sobreposição). nr_hour é sequencial por filial. |
 | [`od.patient`](#odpatient) | Paciente | Ficha do paciente da filial: dados cadastrais (nome, apelido, CPF, RG, nascimento, gênero, estado civil, escolaridade, como conheceu, indicado por), contato e endereço, dados complementares (prontuário, profissão, plano/convênio, filiação, representante legal) e alerta de retorno. Documentos, telefones e CEP só com dígitos. nr_patient é sequencial por filial. |
 | [`od.patient_note`](#odpatientnote) | Nota do paciente | Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e data. Exclusão lógica (it_status 90). |
+| [`od.prosthetic_work`](#odprostheticwork) | Trabalho protético | Trabalho protético do paciente enviado ao laboratório (coroa, prótese, placa...): laboratório, dente, cor, etapa, datas de envio, previsão, recebimento e instalação, e custo. Ao receber, o custo vira conta a pagar do laboratório. |
+| [`od.prosthetic_work_step`](#odprostheticworkstep) | Etapa do trabalho protético | Histórico das etapas do trabalho protético (envio, prova, retorno, instalação, cancelamento), com data, observação e quem registrou. |
 
 ## Diagrama (ERD)
 
 ```mermaid
 erDiagram
+  patient ||--o{ prosthetic_work : "trabalhos protéticos"
+  fin_supplier ||--o{ prosthetic_work : "trabalhos do laboratório"
+  prosthetic_work ||--o{ prosthetic_work_step : "etapas"
   screen ||--o{ access_profile_screen : "liberada para perfis"
   access_profile ||--o{ access_profile_screen : "telas do perfil"
   app_user ||--o{ event_log : "atividades"
@@ -1039,6 +1044,39 @@ erDiagram
     bigint nr_user FK
     timestamptz dh_note
     smallint it_status
+  }
+  prosthetic_work {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_work PK
+    bigint nr_patient FK
+    bigint nr_professional FK
+    bigint nr_supplier FK
+    varchar vc_lab
+    bigint nr_budget FK
+    smallint nr_item FK
+    varchar vc_description
+    varchar vc_tooth
+    varchar vc_shade
+    varchar vc_notes
+    smallint it_stage
+    date dt_sent
+    date dt_expected
+    date dt_received
+    date dt_installed
+    numeric vl_cost
+    bigint nr_entry FK
+    bigint nr_user_created FK
+  }
+  prosthetic_work_step {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_work PK, FK
+    smallint nr_step PK
+    smallint it_stage
+    date dt_step
+    varchar vc_notes
+    bigint nr_user FK
   }
 ```
 
@@ -2603,6 +2641,63 @@ Notas gerais da ficha do paciente (card Notas gerais): texto livre com autor e d
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.prosthetic_work
+
+**Trabalho protético**
+
+Trabalho protético do paciente enviado ao laboratório (coroa, prótese, placa...): laboratório, dente, cor, etapa, datas de envio, previsão, recebimento e instalação, e custo. Ao receber, o custo vira conta a pagar do laboratório.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via prosthetic_save e prosthetic_stage (permissão na tela PROSTHETIC).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_work` | `bigint` | PK3 | NOT NULL |  | Número sequencial do trabalho na filial. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente do trabalho. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional responsável. |
+| `nr_supplier` | `bigint` | FK → `fin_supplier.nr_supplier` | NULL |  | Laboratório (fornecedor do financeiro); é quem recebe a conta a pagar. |
+| `vc_lab` | `varchar(120)` |  | NULL |  | Nome do laboratório quando não está cadastrado como fornecedor. |
+| `nr_budget` | `bigint` | FK → `budget_item.nr_budget` | NULL |  | Orçamento do item ligado (opcional, junto com nr_item). |
+| `nr_item` | `smallint` | FK → `budget_item.nr_item` | NULL |  | Item do orçamento do paciente ligado ao trabalho. |
+| `vc_description` | `varchar(120)` |  | NOT NULL |  | Descrição do trabalho (ex.: Coroa metalocerâmica). |
+| `vc_tooth` | `varchar(40)` |  | NULL |  | Dente(s) ou região. |
+| `vc_shade` | `varchar(40)` |  | NULL |  | Cor / escala de cor. |
+| `vc_notes` | `varchar(1000)` |  | NULL |  | Observações para o laboratório ou internas. |
+| `it_stage` | `smallint` |  | NOT NULL | `1` | Etapa atual do trabalho. Valores: 1 = A enviar ao laboratório; 2 = Enviado ao laboratório; 3 = Em prova na clínica; 4 = Recebido do laboratório; 5 = Instalado / entregue; 90 = Cancelado. |
+| `dt_sent` | `date` |  | NULL |  | Data do último envio ao laboratório. |
+| `dt_expected` | `date` |  | NULL |  | Previsão de retorno do laboratório (atrasado quando passa e o trabalho está no laboratório). |
+| `dt_received` | `date` |  | NULL |  | Data em que voltou pronto do laboratório. |
+| `dt_installed` | `date` |  | NULL |  | Data da instalação / entrega ao paciente. |
+| `vl_cost` | `numeric(12,2)` |  | NULL |  | Custo do laboratório. |
+| `nr_entry` | `bigint` | FK → `fin_entry.nr_entry` | NULL |  | Conta a pagar gerada no recebimento (depois dela o custo e o laboratório não mudam). |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que cadastrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.prosthetic_work_step
+
+**Etapa do trabalho protético**
+
+Histórico das etapas do trabalho protético (envio, prova, retorno, instalação, cancelamento), com data, observação e quem registrou.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via prosthetic_save e prosthetic_stage (permissão na tela PROSTHETIC).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `prosthetic_work.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `prosthetic_work.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_work` | `bigint` | PK3, FK → `prosthetic_work.nr_work` | NOT NULL |  | Trabalho protético. |
+| `nr_step` | `smallint` | PK4 | NOT NULL |  | Número sequencial do passo no trabalho. |
+| `it_stage` | `smallint` |  | NOT NULL |  | Etapa registrada. Valores: 1 = A enviar ao laboratório; 2 = Enviado ao laboratório; 3 = Em prova na clínica; 4 = Recebido do laboratório; 5 = Instalado / entregue; 90 = Cancelado. |
+| `dt_step` | `date` |  | NOT NULL |  | Data do passo. |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observação do passo. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ## Functions
 
 Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema('<schema>').rpc('<nome>', params: {'p_json': {...}})` (`ad` ou `od`, conforme a assinatura).
@@ -2681,6 +2776,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.tooth_mark_save(p_json jsonb)` | authenticated | Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log. |
 | `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. |
 | `ad.dashboard_get(p_json jsonb)` | authenticated | Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null. |
+| `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
+| `ad.prosthetic_save(p_json jsonb)` | authenticated | Cadastra (criar em PROSTHETIC) ou altera (alterar) um trabalho protético com update parcial: paciente, profissional, laboratório, item de orçamento, descrição, dente, cor, observações, previsão e custo. Nasce na etapa A enviar; com a conta a pagar gerada, custo e laboratório não mudam. |
+| `ad.prosthetic_stage(p_json jsonb)` | authenticated | Muda a etapa do trabalho protético (alterar em PROSTHETIC) e grava o histórico; no primeiro recebimento, com custo e laboratório cadastrado, gera a conta a pagar do laboratório (categoria Laboratório) quando o usuário pode criar no Financeiro. |
 | `ad.patient_summary_get(p_json jsonb)` | authenticated | Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null. |
 | `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional. |
 | `ad.document_template_list(p_json jsonb)` | authenticated | Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
@@ -3155,13 +3253,13 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_FILE_VALUE_INVALID` | `patient_file_save`, `patient_file_list` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
-| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
 | `PATIENT_NOTE_FORBIDDEN` | `patient_note_save` |  |
 | `PATIENT_NOTE_NOT_FOUND` | `patient_note_save` |  |
 | `PATIENT_NOTE_REQUIRED` | `patient_note_save` |  |
 | `PATIENT_PHONE_INVALID` | `patient_save` |  |
-| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_STATE_INVALID` | `patient_save` |  |
 | `PATIENT_STATUS_INVALID` | `patient_save` |  |
 | `PATIENT_VALUE_INVALID` | `patient_save` |  |
@@ -3207,6 +3305,18 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROFESSIONAL_STATUS_INVALID` | `professional_save` |  |
 | `PROFESSIONAL_USER_IN_USE` | `professional_save` |  |
 | `PROFESSIONAL_USER_INVALID` | `professional_save` |  |
+| `PROSTHETIC_ACTION_INVALID` | `prosthetic_save` |  |
+| `PROSTHETIC_BRANCH_REQUIRED` | `prosthetic_list`, `prosthetic_save`, `prosthetic_stage` |  |
+| `PROSTHETIC_CLOSED` | `prosthetic_save`, `prosthetic_stage` |  |
+| `PROSTHETIC_DESCRIPTION_REQUIRED` | `prosthetic_save` |  |
+| `PROSTHETIC_ENTRY_EXISTS` | `prosthetic_save` |  |
+| `PROSTHETIC_FORBIDDEN` | `prosthetic_list`, `prosthetic_save`, `prosthetic_stage` |  |
+| `PROSTHETIC_ITEM_INVALID` | `prosthetic_save` |  |
+| `PROSTHETIC_LAB_INVALID` | `prosthetic_save` |  |
+| `PROSTHETIC_NOT_FOUND` | `prosthetic_save`, `prosthetic_stage` |  |
+| `PROSTHETIC_PROFESSIONAL_INVALID` | `prosthetic_save` |  |
+| `PROSTHETIC_STAGE_INVALID` | `prosthetic_stage` |  |
+| `PROSTHETIC_VALUE_INVALID` | `prosthetic_save`, `prosthetic_stage` |  |
 | `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_summary_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list` |  |
 | `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `patient_summary_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list`, `patient_file_list` |  |
 | `REPORT_BRANCH_REQUIRED` | `report_get` |  |
@@ -3273,7 +3383,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

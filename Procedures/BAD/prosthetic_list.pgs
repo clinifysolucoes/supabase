@@ -1,0 +1,134 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.prosthetic_list(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('prosthetic_list') (tela Controle Protetico)   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 11/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Trabalhos proteticos da filial (LER na tela PROSTHETIC), com o historico
+    das etapas, os totais por etapa e os laboratorios (fornecedores ativos).
+    Atrasado = enviado ao laboratorio (etapa 2) com a previsao de retorno
+    antes de hoje.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_filter    text     open (padrao: etapas 1 a 4) | late | done (5) |
+                          cancelled (90) | all
+    nr_patient   bigint   opcional
+    nr_work      bigint   opcional (um trabalho)
+    vc_search    text     opcional (paciente, descricao ou laboratorio)
+
+  Output jsonb: {"works": [{nr_work, nr_patient, vc_patient, nr_professional, vc_professional,
+                            nr_supplier, vc_lab, nr_budget, nr_item, vc_description, vc_tooth,
+                            vc_shade, vc_notes, it_stage, dt_sent, dt_expected, dt_received,
+                            dt_installed, vl_cost, nr_entry, it_entry_status, id_late,
+                            steps: [{nr_step, it_stage, dt_step, vc_notes, vc_user}]}],
+                 "totals": {qt_to_send, qt_at_lab, qt_trial, qt_ready, qt_late},
+                 "labs": [{nr_supplier, vc_name}], "id_truncated"}
+
+  Errors: VERSION_MISMATCH, PROSTHETIC_BRANCH_REQUIRED, PROSTHETIC_FORBIDDEN
+*/
+create or replace function ad.prosthetic_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _filter     text := lower(coalesce(p_json ->> 'vc_filter', 'open'));
+  _patient    bigint := (p_json ->> 'nr_patient')::bigint;
+  _work       bigint := (p_json ->> 'nr_work')::bigint;
+  _search     text := nullif(trim(coalesce(p_json ->> 'vc_search', '')), '');
+  _today      date;
+  _tz         text;
+  _limit      constant integer := 500;
+  _works      jsonb;
+  _qt         integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'prosthetic_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PROSTHETIC_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PROSTHETIC') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('PROSTHETIC_FORBIDDEN');
+  end if;
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _today := (now() at time zone coalesce(_tz, 'America/Sao_Paulo'))::date;
+
+  with base as (
+    select w.*, pa.vc_name as vc_patient, pr.vc_name as vc_professional,
+           coalesce(su.vc_name, w.vc_lab) as vc_lab_name, e.it_status as it_entry_status,
+           (w.it_stage = 2 and w.dt_expected < _today) as id_late
+      from od.prosthetic_work w
+      join od.patient pa on pa.nr_company = w.nr_company and pa.nr_branch = w.nr_branch and pa.nr_patient = w.nr_patient
+      left join od.professional pr on pr.nr_company = w.nr_company and pr.nr_branch = w.nr_branch
+                                  and pr.nr_professional = w.nr_professional
+      left join od.fin_supplier su on su.nr_company = w.nr_company and su.nr_branch = w.nr_branch
+                                  and su.nr_supplier = w.nr_supplier
+      left join od.fin_entry e on e.nr_company = w.nr_company and e.nr_branch = w.nr_branch and e.nr_entry = w.nr_entry
+     where w.nr_company = _nr_company and w.nr_branch = _nr_branch
+       and (_work is null or w.nr_work = _work)
+       and (_patient is null or w.nr_patient = _patient)
+       and (_work is not null or case _filter
+              when 'all' then true
+              when 'late' then w.it_stage = 2 and w.dt_expected < _today
+              when 'done' then w.it_stage = 5
+              when 'cancelled' then w.it_stage = 90
+              else w.it_stage in (1, 2, 3, 4) end)
+       and (_search is null or pa.vc_name ilike '%' || _search || '%' or w.vc_description ilike '%' || _search || '%'
+            or coalesce(su.vc_name, w.vc_lab, '') ilike '%' || _search || '%')
+  ), lim as (
+    select * from base
+     order by (it_stage = 2 and dt_expected < _today) desc, it_stage, dt_expected nulls last, nr_work desc
+     limit _limit
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'nr_work', l.nr_work, 'nr_patient', l.nr_patient, 'vc_patient', l.vc_patient,
+           'nr_professional', l.nr_professional, 'vc_professional', l.vc_professional,
+           'nr_supplier', l.nr_supplier, 'vc_lab', l.vc_lab_name, 'vc_lab_free', l.vc_lab,
+           'nr_budget', l.nr_budget, 'nr_item', l.nr_item,
+           'vc_description', l.vc_description, 'vc_tooth', l.vc_tooth, 'vc_shade', l.vc_shade, 'vc_notes', l.vc_notes,
+           'it_stage', l.it_stage, 'dt_sent', l.dt_sent, 'dt_expected', l.dt_expected, 'dt_received', l.dt_received,
+           'dt_installed', l.dt_installed, 'vl_cost', l.vl_cost, 'nr_entry', l.nr_entry,
+           'it_entry_status', l.it_entry_status, 'id_late', l.id_late,
+           'steps', coalesce((
+             select jsonb_agg(jsonb_build_object('nr_step', s.nr_step, 'it_stage', s.it_stage, 'dt_step', s.dt_step,
+                                                 'vc_notes', s.vc_notes, 'vc_user', u.vc_name) order by s.nr_step)
+               from od.prosthetic_work_step s
+               left join ad.app_user u on u.nr_user = s.nr_user
+              where s.nr_company = l.nr_company and s.nr_branch = l.nr_branch and s.nr_work = l.nr_work), '[]'::jsonb))
+           order by l.id_late desc, l.it_stage, l.dt_expected nulls last, l.nr_work desc), '[]'::jsonb),
+         (select count(*) from base)
+    into _works, _qt
+    from lim l;
+
+  return jsonb_build_object(
+    'works', _works,
+    'totals', (select jsonb_build_object(
+                 'qt_to_send', count(*) filter (where w.it_stage = 1),
+                 'qt_at_lab',  count(*) filter (where w.it_stage = 2),
+                 'qt_trial',   count(*) filter (where w.it_stage = 3),
+                 'qt_ready',   count(*) filter (where w.it_stage = 4),
+                 'qt_late',    count(*) filter (where w.it_stage = 2 and w.dt_expected < _today))
+                 from od.prosthetic_work w
+                where w.nr_company = _nr_company and w.nr_branch = _nr_branch
+                  and (_patient is null or w.nr_patient = _patient)),
+    'labs', coalesce((select jsonb_agg(jsonb_build_object('nr_supplier', s.nr_supplier, 'vc_name', s.vc_name) order by s.vc_name)
+                        from od.fin_supplier s
+                       where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.it_status = 1), '[]'::jsonb),
+    'id_truncated', _qt > _limit);
+end;
+$$;
+
+revoke all on function ad.prosthetic_list(jsonb) from public, anon;
+grant execute on function ad.prosthetic_list(jsonb) to authenticated;
