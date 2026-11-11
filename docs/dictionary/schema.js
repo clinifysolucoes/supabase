@@ -9254,6 +9254,20 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "report_get",
+      "signature": "ad.report_get(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "REPORT_BRANCH_REQUIRED",
+        "REPORT_FORBIDDEN",
+        "REPORT_INVALID",
+        "REPORT_PERIOD_INVALID"
+      ]
+    },
+    {
       "name": "document_template_list",
       "signature": "ad.document_template_list(p_json jsonb)",
       "kind": "rpc",
