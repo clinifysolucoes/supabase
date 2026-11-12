@@ -1,0 +1,38 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_notify_render(text, jsonb)                              ::
+  ::  UsedBy      : od.fn_notify_enqueue                                          ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 12/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Troca os campos {{chave}} do texto do alerta pelos valores de p_vars
+    (nome, clinica, data, hora, profissional, retorno). Campo sem valor vira
+    vazio; {{link}} fica para a Edge Function (link de confirmacao). Espacos
+    repetidos sao reduzidos. Helper interno (sem grant).
+  Input: p_tpl, p_vars ({"nome": "...", ...})
+  Output: text
+*/
+create or replace function od.fn_notify_render(p_tpl text, p_vars jsonb)
+returns text
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  _t text := coalesce(p_tpl, '');
+  _k text;
+  _v text;
+begin
+  for _k, _v in select key, value from jsonb_each_text(coalesce(p_vars, '{}'::jsonb)) loop
+    _t := replace(_t, '{{' || _k || '}}', coalesce(_v, ''));
+  end loop;
+  _t := regexp_replace(_t, '\{\{(?!link\}\})[a-z_]+\}\}', '', 'g');
+  return trim(regexp_replace(_t, '[ \t]{2,}', ' ', 'g'));
+end;
+$$;
+
+revoke all on function od.fn_notify_render(text, jsonb) from public, anon, authenticated;

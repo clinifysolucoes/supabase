@@ -1418,12 +1418,64 @@
         { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação da recompensa.", "values": {"1": "Registrada", "90": "Desfeita"} },
         { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
       ]
+    },
+    {
+      "schema": "od",
+      "name": "notify_setting",
+      "title": "Alertas por e-mail e SMS",
+      "description": "Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions).",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via notify_settings_save (permissão na tela SETTINGS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "branch.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "branch.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "id_email", "type": "boolean", "nullable": false, "default": "false", "description": "Envia os alertas por e-mail." },
+        { "name": "id_sms", "type": "boolean", "nullable": false, "default": "false", "description": "Envia os alertas por SMS." },
+        { "name": "vc_email_from_name", "type": "varchar(80)", "nullable": true, "description": "Nome do remetente do e-mail (vazio = nome da filial)." },
+        { "name": "vc_email_reply_to", "type": "varchar(120)", "nullable": true, "description": "E-mail para onde vão as respostas do paciente." },
+        { "name": "id_reminder", "type": "boolean", "nullable": false, "default": "true", "description": "Envia o lembrete da consulta." },
+        { "name": "qt_reminder_hours", "type": "smallint", "nullable": false, "default": "24", "description": "Antecedência do lembrete, em horas (1 a 72)." },
+        { "name": "id_booked", "type": "boolean", "nullable": false, "default": "true", "description": "Avisa quando a consulta é marcada." },
+        { "name": "id_return", "type": "boolean", "nullable": false, "default": "false", "description": "Avisa no dia do alerta de retorno da ficha." },
+        { "name": "qt_send_hour", "type": "smallint", "nullable": false, "default": "9", "description": "Hora (fuso da filial) a partir da qual o aviso de retorno é enviado (6 a 20)." },
+        { "name": "vc_tpl_reminder", "type": "varchar(500)", "nullable": false, "description": "Texto do lembrete ({{link}} = link para confirmar)." },
+        { "name": "vc_tpl_booked", "type": "varchar(500)", "nullable": false, "description": "Texto da consulta agendada." },
+        { "name": "vc_tpl_return", "type": "varchar(500)", "nullable": false, "description": "Texto do retorno ({{retorno}} = texto do alerta da ficha)." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "notify_message",
+      "title": "Alerta por e-mail ou SMS",
+      "description": "Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via notify_dispatch (service_role) e notify_settings_save (cancela a fila do canal desligado).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_message", "type": "bigint", "pk": 3, "nullable": false, "description": "Número sequencial da mensagem na filial." },
+        { "name": "it_channel", "type": "smallint", "nullable": false, "description": "Canal.", "values": {"1": "E-mail (Resend)", "2": "SMS (Zenvia)"} },
+        { "name": "it_kind", "type": "smallint", "nullable": false, "description": "Alerta.", "values": {"1": "Lembrete da consulta (com link de confirmação)", "2": "Consulta agendada", "4": "Retorno"} },
+        { "name": "nr_patient", "type": "bigint", "fk": "patient.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_appointment", "type": "bigint", "fk": "appointment.nr_appointment", "nullable": true, "description": "Consulta (lembrete e agendamento)." },
+        { "name": "dt_ref", "type": "date", "nullable": false, "description": "Data de referência (dia da consulta ou do retorno), parte da chave contra repetição." },
+        { "name": "vc_to", "type": "varchar(120)", "nullable": false, "description": "Destino: e-mail ou celular 55 + DDD + número." },
+        { "name": "vc_subject", "type": "varchar(150)", "nullable": true, "description": "Assunto (só e-mail)." },
+        { "name": "tx_body", "type": "text", "nullable": false, "description": "Texto montado do modelo da filial ({{link}} é trocado no envio)." },
+        { "name": "uu_token", "type": "uuid", "nullable": true, "description": "Token do link de confirmação (só no lembrete)." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação.", "values": {"1": "Na fila", "2": "Enviada", "5": "Enviando", "9": "Erro", "90": "Cancelada"} },
+        { "name": "vc_provider_id", "type": "varchar(120)", "nullable": true, "description": "Id da mensagem no Resend ou na Zenvia." },
+        { "name": "vc_error", "type": "varchar(500)", "nullable": true, "description": "Erro do envio." },
+        { "name": "dh_sent", "type": "timestamptz", "nullable": true, "description": "Data/hora do envio." },
+        { "name": "dh_confirmed", "type": "timestamptz", "nullable": true, "description": "Quando o paciente confirmou pelo link." }
+      ]
     }
   ],
   "external_entities": [
     { "name": "auth_users", "title": "auth.users (Supabase Auth)", "description": "Usuários autenticados pelo Supabase (e-mail, senha, OTP, social, 2FA). Gerenciado pela Supabase; referenciado por ad.app_user.uu_auth." }
   ],
   "relations": [
+    { "from": "branch", "to": "notify_setting", "card": "||--o{", "label": "alertas por e-mail/SMS" },
+    { "from": "patient", "to": "notify_message", "card": "||--o{", "label": "alertas por e-mail/SMS" },
+    { "from": "appointment", "to": "notify_message", "card": "||--o{", "label": "lembretes por e-mail/SMS" },
     { "from": "patient", "to": "patient", "card": "||--o{", "label": "indicou" },
     { "from": "patient", "to": "referral_reward", "card": "||--o{", "label": "recompensa da indicação" },
     { "from": "material", "to": "stock_item", "card": "||--o{", "label": "controle de estoque" },
@@ -1690,6 +1742,8 @@
     { "name": "fn_patient_overdue", "signature": "od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)", "kind": "helper", "grant": "interna", "description": "Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}." },
     { "name": "fn_stock_move", "signature": "od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)", "kind": "helper", "grant": "interna", "description": "Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo)." },
     { "name": "fn_stock_evolution", "signature": "od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)", "kind": "helper", "grant": "interna", "description": "Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída." },
+    { "name": "fn_notify_enqueue", "signature": "od.fn_notify_enqueue()", "kind": "helper", "grant": "interna", "description": "Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete." },
+    { "name": "fn_notify_render", "signature": "od.fn_notify_render(p_tpl text, p_vars jsonb)", "kind": "helper", "grant": "interna", "description": "Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function." },
     { "name": "fn_fin_category_ensure", "signature": "od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)", "kind": "helper", "grant": "interna", "description": "Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento." },
     { "name": "fin_rate_save", "signature": "ad.fin_rate_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I, criar) ou altera parcialmente (U, alterar) uma taxa de recebimento: nome, forma (crédito, débito, boleto, cheque), faixa de parcelas, percentual, tarifa fixa, prazo e conta destino. Grava event_log.",
       "errors": ["VERSION_MISMATCH", "FIN_RATE_ACTION_INVALID", "FINANCE_BRANCH_REQUIRED", "FIN_RATE_FORBIDDEN", "FIN_RATE_REQUIRED", "FIN_RATE_NOT_FOUND", "FIN_RATE_VALUE_INVALID", "FIN_RATE_NAME_REQUIRED", "FIN_RATE_NAME_IN_USE", "FIN_RATE_METHOD_INVALID", "FIN_RATE_INSTALLMENTS_INVALID", "FIN_RATE_FEE_INVALID", "FIN_RATE_DAYS_INVALID", "FIN_RATE_ACCOUNT_INVALID", "FIN_RATE_STATUS_INVALID"] },
@@ -1740,6 +1794,10 @@
     { "name": "stock_movement_list", "signature": "ad.stock_movement_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Movimentos de estoque num período (ler em STOCK; padrão 30 dias, até 366), por material e tipo, com fornecedor, paciente e usuário, e o resumo em valor (entradas, saídas, baixas pelos procedimentos, ajustes).", "errors": ["VERSION_MISMATCH", "STOCK_BRANCH_REQUIRED", "STOCK_FORBIDDEN", "STOCK_PERIOD_INVALID"] },
     { "name": "referral_list", "signature": "ad.referral_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Controle de Indicação (ler em REFERRALS) dos pacientes cadastrados no período (padrão 12 meses, até 2 anos): indicados com conversão (orçamento aprovado), valor aprovado (ler em BUDGETS) e recompensa; ranking de quem indicou com valor recebido dos indicados (ler em FINANCE) e recompensas pendentes; novos e convertidos por origem.", "errors": ["VERSION_MISMATCH", "REFERRAL_BRANCH_REQUIRED", "REFERRAL_FORBIDDEN", "REFERRAL_PERIOD_INVALID"] },
     { "name": "referral_reward_save", "signature": "ad.referral_reward_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Registra (I) ou desfaz (D) a recompensa dada a quem indicou um paciente (alterar em REFERRALS): o que foi dado, data e valor; uma por paciente indicado.", "errors": ["VERSION_MISMATCH", "REFERRAL_ACTION_INVALID", "REFERRAL_BRANCH_REQUIRED", "REFERRAL_FORBIDDEN", "PATIENT_NOT_FOUND", "REFERRAL_NOT_REFERRED", "REFERRAL_REWARD_REQUIRED", "REFERRAL_VALUE_INVALID", "REFERRAL_ALREADY_REWARDED", "REFERRAL_REWARD_NOT_FOUND"] },
+    { "name": "notify_settings_get", "signature": "ad.notify_settings_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Configuração dos alertas por e-mail e SMS da filial (ler em SETTINGS), com os padrões das colunas quando ainda não configurada, e o resumo dos últimos 30 dias por canal e situação.", "errors": ["VERSION_MISMATCH", "NOTIFY_BRANCH_REQUIRED", "NOTIFY_FORBIDDEN"] },
+    { "name": "notify_settings_save", "signature": "ad.notify_settings_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila.", "errors": ["VERSION_MISMATCH", "NOTIFY_BRANCH_REQUIRED", "NOTIFY_FORBIDDEN", "NOTIFY_VALUE_INVALID", "NOTIFY_EMAIL_INVALID", "NOTIFY_TEMPLATE_INVALID"] },
+    { "name": "notify_message_list", "signature": "ad.notify_message_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Histórico dos alertas por e-mail e SMS (ler em SETTINGS) por canal, tipo e situação, paginado, com a confirmação pelo link.", "errors": ["VERSION_MISMATCH", "NOTIFY_BRANCH_REQUIRED", "NOTIFY_FORBIDDEN", "NOTIFY_VALUE_INVALID"] },
+    { "name": "notify_dispatch", "signature": "ad.notify_dispatch(p_json jsonb)", "kind": "rpc", "grant": "service_role", "description": "Lado servidor dos alertas por e-mail e SMS (só service_role, Edge Functions notify-send e notify-confirm): CLAIM enfileira o devido e entrega o lote, RESULT grava enviada/erro, CONFIRM confirma a consulta pelo token do link do lembrete.", "errors": ["VERSION_MISMATCH", "NOTIFY_ACTION_INVALID", "NOTIFY_VALUE_INVALID"] },
     { "name": "patient_summary_get", "signature": "ad.patient_summary_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND"] },
     { "name": "report_get", "signature": "ad.report_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional.", "errors": ["VERSION_MISMATCH", "REPORT_BRANCH_REQUIRED", "REPORT_FORBIDDEN", "REPORT_INVALID", "REPORT_PERIOD_INVALID"] },
     { "name": "document_template_list", "signature": "ad.document_template_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS).", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN"] },

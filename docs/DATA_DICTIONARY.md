@@ -99,11 +99,16 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.stock_item`](#odstockitem) | Item de estoque | Materiais do catálogo (od.material) com controle de estoque: saldo em unidades de uso e estoque mínimo. O saldo só muda por movimento (od.fn_stock_move). |
 | [`od.stock_movement`](#odstockmovement) | Movimento de estoque | Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimentos registrados na evolução clínica (com estorno quando a evolução é excluída). Guarda o saldo depois do movimento. |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
+| [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
+| [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
 
 ## Diagrama (ERD)
 
 ```mermaid
 erDiagram
+  branch ||--o{ notify_setting : "alertas por e-mail/SMS"
+  patient ||--o{ notify_message : "alertas por e-mail/SMS"
+  appointment ||--o{ notify_message : "lembretes por e-mail/SMS"
   patient ||--o{ patient : "indicou"
   patient ||--o{ referral_reward : "recompensa da indicação"
   material ||--o{ stock_item : "controle de estoque"
@@ -1125,6 +1130,41 @@ erDiagram
     numeric vl_reward
     smallint it_status
     bigint nr_user FK
+  }
+  notify_setting {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    boolean id_email
+    boolean id_sms
+    varchar vc_email_from_name
+    varchar vc_email_reply_to
+    boolean id_reminder
+    smallint qt_reminder_hours
+    boolean id_booked
+    boolean id_return
+    smallint qt_send_hour
+    varchar vc_tpl_reminder
+    varchar vc_tpl_booked
+    varchar vc_tpl_return
+  }
+  notify_message {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_message PK
+    smallint it_channel
+    smallint it_kind
+    bigint nr_patient FK
+    bigint nr_appointment FK
+    date dt_ref
+    varchar vc_to
+    varchar vc_subject
+    text tx_body
+    uuid uu_token
+    smallint it_status
+    varchar vc_provider_id
+    varchar vc_error
+    timestamptz dh_sent
+    timestamptz dh_confirmed
   }
 ```
 
@@ -2822,6 +2862,65 @@ Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma p
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.notify_setting
+
+**Alertas por e-mail e SMS**
+
+Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via notify_settings_save (permissão na tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `id_email` | `boolean` |  | NOT NULL | `false` | Envia os alertas por e-mail. |
+| `id_sms` | `boolean` |  | NOT NULL | `false` | Envia os alertas por SMS. |
+| `vc_email_from_name` | `varchar(80)` |  | NULL |  | Nome do remetente do e-mail (vazio = nome da filial). |
+| `vc_email_reply_to` | `varchar(120)` |  | NULL |  | E-mail para onde vão as respostas do paciente. |
+| `id_reminder` | `boolean` |  | NOT NULL | `true` | Envia o lembrete da consulta. |
+| `qt_reminder_hours` | `smallint` |  | NOT NULL | `24` | Antecedência do lembrete, em horas (1 a 72). |
+| `id_booked` | `boolean` |  | NOT NULL | `true` | Avisa quando a consulta é marcada. |
+| `id_return` | `boolean` |  | NOT NULL | `false` | Avisa no dia do alerta de retorno da ficha. |
+| `qt_send_hour` | `smallint` |  | NOT NULL | `9` | Hora (fuso da filial) a partir da qual o aviso de retorno é enviado (6 a 20). |
+| `vc_tpl_reminder` | `varchar(500)` |  | NOT NULL |  | Texto do lembrete ({{link}} = link para confirmar). |
+| `vc_tpl_booked` | `varchar(500)` |  | NOT NULL |  | Texto da consulta agendada. |
+| `vc_tpl_return` | `varchar(500)` |  | NOT NULL |  | Texto do retorno ({{retorno}} = texto do alerta da ficha). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.notify_message
+
+**Alerta por e-mail ou SMS**
+
+Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via notify_dispatch (service_role) e notify_settings_save (cancela a fila do canal desligado).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_message` | `bigint` | PK3 | NOT NULL |  | Número sequencial da mensagem na filial. |
+| `it_channel` | `smallint` |  | NOT NULL |  | Canal. Valores: 1 = E-mail (Resend); 2 = SMS (Zenvia). |
+| `it_kind` | `smallint` |  | NOT NULL |  | Alerta. Valores: 1 = Lembrete da consulta (com link de confirmação); 2 = Consulta agendada; 4 = Retorno. |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_appointment` | `bigint` | FK → `appointment.nr_appointment` | NULL |  | Consulta (lembrete e agendamento). |
+| `dt_ref` | `date` |  | NOT NULL |  | Data de referência (dia da consulta ou do retorno), parte da chave contra repetição. |
+| `vc_to` | `varchar(120)` |  | NOT NULL |  | Destino: e-mail ou celular 55 + DDD + número. |
+| `vc_subject` | `varchar(150)` |  | NULL |  | Assunto (só e-mail). |
+| `tx_body` | `text` |  | NOT NULL |  | Texto montado do modelo da filial ({{link}} é trocado no envio). |
+| `uu_token` | `uuid` |  | NULL |  | Token do link de confirmação (só no lembrete). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Na fila; 2 = Enviada; 5 = Enviando; 9 = Erro; 90 = Cancelada. |
+| `vc_provider_id` | `varchar(120)` |  | NULL |  | Id da mensagem no Resend ou na Zenvia. |
+| `vc_error` | `varchar(500)` |  | NULL |  | Erro do envio. |
+| `dh_sent` | `timestamptz` |  | NULL |  | Data/hora do envio. |
+| `dh_confirmed` | `timestamptz` |  | NULL |  | Quando o paciente confirmou pelo link. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ## Functions
 
 Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema('<schema>').rpc('<nome>', params: {'p_json': {...}})` (`ad` ou `od`, conforme a assinatura).
@@ -2909,6 +3008,10 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.stock_movement_list(p_json jsonb)` | authenticated | Movimentos de estoque num período (ler em STOCK; padrão 30 dias, até 366), por material e tipo, com fornecedor, paciente e usuário, e o resumo em valor (entradas, saídas, baixas pelos procedimentos, ajustes). |
 | `ad.referral_list(p_json jsonb)` | authenticated | Controle de Indicação (ler em REFERRALS) dos pacientes cadastrados no período (padrão 12 meses, até 2 anos): indicados com conversão (orçamento aprovado), valor aprovado (ler em BUDGETS) e recompensa; ranking de quem indicou com valor recebido dos indicados (ler em FINANCE) e recompensas pendentes; novos e convertidos por origem. |
 | `ad.referral_reward_save(p_json jsonb)` | authenticated | Registra (I) ou desfaz (D) a recompensa dada a quem indicou um paciente (alterar em REFERRALS): o que foi dado, data e valor; uma por paciente indicado. |
+| `ad.notify_settings_get(p_json jsonb)` | authenticated | Configuração dos alertas por e-mail e SMS da filial (ler em SETTINGS), com os padrões das colunas quando ainda não configurada, e o resumo dos últimos 30 dias por canal e situação. |
+| `ad.notify_settings_save(p_json jsonb)` | authenticated | Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila. |
+| `ad.notify_message_list(p_json jsonb)` | authenticated | Histórico dos alertas por e-mail e SMS (ler em SETTINGS) por canal, tipo e situação, paginado, com a confirmação pelo link. |
+| `ad.notify_dispatch(p_json jsonb)` | service_role | Lado servidor dos alertas por e-mail e SMS (só service_role, Edge Functions notify-send e notify-confirm): CLAIM enfileira o devido e entrega o lote, RESULT grava enviada/erro, CONFIRM confirma a consulta pelo token do link do lembrete. |
 | `ad.patient_summary_get(p_json jsonb)` | authenticated | Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null. |
 | `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional. |
 | `ad.document_template_list(p_json jsonb)` | authenticated | Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
@@ -2982,6 +3085,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
 | `od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)` | interna | Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo). |
 | `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
+| `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. |
+| `od.fn_notify_render(p_tpl text, p_vars jsonb)` | interna | Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function. |
 | `od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)` | interna | Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento. |
 | `od.fn_fin_receivable_make(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_qt_installments integer, p_vc_reference text, p_nr_user bigint)` | interna | Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada. |
 | `od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)` | interna | Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados. |
@@ -3337,6 +3442,12 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `MEDICATION_NAME_REQUIRED` | `medication_save` |  |
 | `MEDICATION_NOT_FOUND` | `medication_save` |  |
 | `MEDICATION_VALUE_INVALID` | `medication_save` |  |
+| `NOTIFY_ACTION_INVALID` | `notify_dispatch` |  |
+| `NOTIFY_BRANCH_REQUIRED` | `notify_settings_get`, `notify_settings_save`, `notify_message_list` |  |
+| `NOTIFY_EMAIL_INVALID` | `notify_settings_save` |  |
+| `NOTIFY_FORBIDDEN` | `notify_settings_get`, `notify_settings_save`, `notify_message_list` |  |
+| `NOTIFY_TEMPLATE_INVALID` | `notify_settings_save` |  |
+| `NOTIFY_VALUE_INVALID` | `notify_settings_save`, `notify_message_list`, `notify_dispatch` |  |
 | `ONLINE_BOOKING_ACTION_INVALID` | `online_booking_public` |  |
 | `ONLINE_BOOKING_BIRTH_INVALID` | `online_booking_public` |  |
 | `ONLINE_BOOKING_BRANCH_REQUIRED` | `online_booking_settings_get`, `online_booking_settings_save` |  |
@@ -3535,7 +3646,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

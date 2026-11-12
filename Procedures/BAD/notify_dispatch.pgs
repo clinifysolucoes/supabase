@@ -1,0 +1,152 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (so service_role; nao e do app)           ::
+  ::  Object      : ad.notify_dispatch(jsonb)                                     ::
+  ::  UsedBy      : Edge Functions notify-send e notify-confirm                   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 12/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Lado servidor dos alertas por e-mail e SMS. So o service_role executa.
+      vc_action = 'CLAIM'    enfileira o devido (od.fn_notify_enqueue), devolve
+                             ate qt_limit mensagens da fila com o remetente da
+                             filial e as marca "enviando" (5); "enviando" ha
+                             mais de 15 minutos volta para a fila
+      vc_action = 'RESULT'   results: [{nr_company, nr_branch, nr_message,
+                             vc_provider_id | vc_error}] -> enviada (2) ou erro (9)
+      vc_action = 'CONFIRM'  uu_token do link do lembrete: consulta Agendado
+                             passa a Confirmado. it_result 1 confirmada agora |
+                             2 ja estava confirmada | 3 nao da mais (cancelada,
+                             falta ou ja passou) | 0 link invalido
+
+  Output jsonb: CLAIM {"messages": [{nr_company, nr_branch, nr_message, it_channel, it_kind, vc_to,
+                                     vc_subject, tx_body, uu_token, vc_from_name, vc_reply_to}], "qt_enqueued"} |
+                RESULT {"qt_updated"} |
+                CONFIRM {"it_result", "vc_clinic", "vc_patient", "dh_start", "vc_date", "vc_time", "vc_professional"}
+
+  Errors: VERSION_MISMATCH, NOTIFY_ACTION_INVALID, NOTIFY_VALUE_INVALID
+*/
+create or replace function ad.notify_dispatch(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _action  text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _limit   integer;
+  _q       integer;
+  _n       integer := 0;
+  _k       integer;
+  _x       jsonb;
+  _msgs    jsonb;
+  _token   uuid;
+  _r       record;
+  _result  smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'notify_dispatch');
+  if _action not in ('CLAIM', 'RESULT', 'CONFIRM') then
+    raise exception '%', ad.fn_message('NOTIFY_ACTION_INVALID');
+  end if;
+
+  if _action = 'CLAIM' then
+    begin
+      _limit := least(greatest(coalesce((p_json ->> 'qt_limit')::integer, 50), 1), 200);
+    exception when others then
+      raise exception '%', ad.fn_message('NOTIFY_VALUE_INVALID');
+    end;
+    update od.notify_message m set it_status = 1
+     where m.it_status = 5 and m.dh_updated < now() - interval '15 minutes';
+    _q := od.fn_notify_enqueue();
+    with pick as (
+      select m.nr_company, m.nr_branch, m.nr_message
+        from od.notify_message m
+       where m.it_status = 1
+       order by m.dh_created, m.nr_message
+       limit _limit
+         for update of m skip locked
+    ), upd as (
+      update od.notify_message m set it_status = 5
+        from pick p
+       where m.nr_company = p.nr_company and m.nr_branch = p.nr_branch and m.nr_message = p.nr_message
+      returning m.*
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+             'nr_company', u.nr_company, 'nr_branch', u.nr_branch, 'nr_message', u.nr_message,
+             'it_channel', u.it_channel, 'it_kind', u.it_kind, 'vc_to', u.vc_to, 'vc_subject', u.vc_subject,
+             'tx_body', u.tx_body, 'uu_token', u.uu_token,
+             'vc_from_name', coalesce(nullif(s.vc_email_from_name, ''), b.vc_name),
+             'vc_reply_to', s.vc_email_reply_to) order by u.nr_company, u.nr_branch, u.nr_message), '[]'::jsonb)
+      into _msgs
+      from upd u
+      join ad.branch b on b.nr_company = u.nr_company and b.nr_branch = u.nr_branch
+      left join od.notify_setting s on s.nr_company = u.nr_company and s.nr_branch = u.nr_branch;
+    return jsonb_build_object('messages', _msgs, 'qt_enqueued', _q);
+  end if;
+
+  if _action = 'RESULT' then
+    for _x in select * from jsonb_array_elements(coalesce(p_json -> 'results', '[]'::jsonb)) loop
+      begin
+        update od.notify_message m set
+          it_status      = case when nullif(_x ->> 'vc_provider_id', '') is not null then 2 else 9 end,
+          vc_provider_id = left(nullif(_x ->> 'vc_provider_id', ''), 120),
+          vc_error       = case when nullif(_x ->> 'vc_provider_id', '') is null
+                                then left(coalesce(nullif(_x ->> 'vc_error', ''), 'Falha no envio'), 500) end,
+          dh_sent        = case when nullif(_x ->> 'vc_provider_id', '') is not null then now() end
+         where m.nr_company = (_x ->> 'nr_company')::bigint and m.nr_branch = (_x ->> 'nr_branch')::bigint
+           and m.nr_message = (_x ->> 'nr_message')::bigint and m.it_status = 5;
+      exception when invalid_text_representation or numeric_value_out_of_range then
+        raise exception '%', ad.fn_message('NOTIFY_VALUE_INVALID');
+      end;
+      get diagnostics _k = row_count;
+      _n := _n + _k;
+    end loop;
+    return jsonb_build_object('qt_updated', _n);
+  end if;
+
+  -- CONFIRM
+  begin
+    _token := (p_json ->> 'uu_token')::uuid;
+  exception when others then
+    return jsonb_build_object('it_result', 0);
+  end;
+  select m.nr_company, m.nr_branch, m.nr_message, a.nr_appointment, a.it_status, a.dh_start,
+         b.vc_name as vc_clinic, b.vc_timezone, split_part(p.vc_name, ' ', 1) as vc_patient,
+         pr.vc_name as vc_professional
+    into _r
+    from od.notify_message m
+    join od.appointment a on a.nr_company = m.nr_company and a.nr_branch = m.nr_branch
+                         and a.nr_appointment = m.nr_appointment
+    join od.patient p on p.nr_company = m.nr_company and p.nr_branch = m.nr_branch and p.nr_patient = m.nr_patient
+    join ad.branch b on b.nr_company = m.nr_company and b.nr_branch = m.nr_branch
+    left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                and pr.nr_professional = a.nr_professional
+   where _token is not null and m.uu_token = _token and m.it_kind = 1
+     for update of a;
+  if not found then
+    return jsonb_build_object('it_result', 0);
+  end if;
+  if _r.it_status = 1 and _r.dh_start > now() then
+    update od.appointment a set it_status = 2
+     where a.nr_company = _r.nr_company and a.nr_branch = _r.nr_branch and a.nr_appointment = _r.nr_appointment;
+    _result := 1;
+  elsif _r.it_status in (2, 3, 4, 5) then
+    _result := 2;
+  else
+    _result := 3;
+  end if;
+  update od.notify_message m set dh_confirmed = coalesce(m.dh_confirmed, now())
+   where m.nr_company = _r.nr_company and m.nr_branch = _r.nr_branch and m.nr_message = _r.nr_message
+     and _result in (1, 2);
+  return jsonb_build_object(
+    'it_result', _result, 'vc_clinic', _r.vc_clinic, 'vc_patient', _r.vc_patient, 'dh_start', _r.dh_start,
+    'vc_date', to_char(_r.dh_start at time zone _r.vc_timezone, 'DD/MM/YYYY'),
+    'vc_time', to_char(_r.dh_start at time zone _r.vc_timezone, 'HH24:MI'),
+    'vc_professional', _r.vc_professional);
+end;
+$$;
+
+revoke all on function ad.notify_dispatch(jsonb) from public, anon, authenticated;
+grant execute on function ad.notify_dispatch(jsonb) to service_role;
