@@ -1,0 +1,119 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.notify_settings_save(jsonb)                                ::
+  ::  UsedBy      : Flutter -> rpc('notify_settings_save') (Configuracoes)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 12/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava a configuracao dos alertas por e-mail e SMS da filial (ALTERAR na
+    tela SETTINGS). Update parcial: chave presente altera, ausente mantem.
+    Desligar um canal cancela (90) o que dele ainda estava na fila.
+    Campos dos textos: {{nome}}, {{clinica}}, {{data}}, {{hora}},
+    {{profissional}}, {{retorno}} e, no lembrete, {{link}} (confirmacao).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    id_email, id_sms, id_reminder, id_booked, id_return  boolean
+    vc_email_from_name (ate 80), vc_email_reply_to (e-mail)
+    qt_reminder_hours (1 a 72), qt_send_hour (6 a 20)
+    vc_tpl_reminder, vc_tpl_booked, vc_tpl_return  text (1 a 500)
+
+  Output jsonb: {"id_email", "id_sms"}
+
+  Errors: VERSION_MISMATCH, NOTIFY_BRANCH_REQUIRED, NOTIFY_FORBIDDEN, NOTIFY_VALUE_INVALID,
+    NOTIFY_EMAIL_INVALID, NOTIFY_TEMPLATE_INVALID
+*/
+create or replace function ad.notify_settings_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _w          od.notify_setting;
+  _new        od.notify_setting;
+  _js         jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'notify_settings_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('NOTIFY_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('NOTIFY_FORBIDDEN');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  select * into _w from od.notify_setting w where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+  if not found then
+    insert into od.notify_setting (nr_company, nr_branch, nr_operator) values (_nr_company, _nr_branch, _nr_user)
+    returning * into _w;
+  end if;
+
+  _js := (select coalesce(jsonb_object_agg(k, case when jsonb_typeof(v) = 'string'
+                                                   then to_jsonb(nullif(trim(v #>> '{}'), '')) else v end), '{}'::jsonb)
+            from jsonb_each(p_json) e(k, v)
+           where k in ('id_email', 'id_sms', 'vc_email_from_name', 'vc_email_reply_to', 'id_reminder',
+                       'qt_reminder_hours', 'id_booked', 'id_return', 'qt_send_hour',
+                       'vc_tpl_reminder', 'vc_tpl_booked', 'vc_tpl_return'));
+  if _js ? 'vc_email_reply_to' and jsonb_typeof(_js -> 'vc_email_reply_to') = 'string' then
+    _js := jsonb_set(_js, '{vc_email_reply_to}', to_jsonb(lower(_js ->> 'vc_email_reply_to')));
+  end if;
+  begin
+    _new := jsonb_populate_record(_w, _js);
+  exception when others then
+    raise exception '%', ad.fn_message('NOTIFY_VALUE_INVALID');
+  end;
+  if _new.id_email is null or _new.id_sms is null or _new.id_reminder is null or _new.id_booked is null
+     or _new.id_return is null or _new.qt_reminder_hours is null or _new.qt_reminder_hours not between 1 and 72
+     or _new.qt_send_hour is null or _new.qt_send_hour not between 6 and 20
+     or length(coalesce(_new.vc_email_from_name, '')) > 80 then
+    raise exception '%', ad.fn_message('NOTIFY_VALUE_INVALID');
+  end if;
+  if _new.vc_email_reply_to is not null
+     and (length(_new.vc_email_reply_to) > 120 or not ad.fn_email_is_valid(_new.vc_email_reply_to)) then
+    raise exception '%', ad.fn_message('NOTIFY_EMAIL_INVALID');
+  end if;
+  if _new.vc_tpl_reminder is null or _new.vc_tpl_booked is null or _new.vc_tpl_return is null
+     or length(_new.vc_tpl_reminder) > 500 or length(_new.vc_tpl_booked) > 500 or length(_new.vc_tpl_return) > 500 then
+    raise exception '%', ad.fn_message('NOTIFY_TEMPLATE_INVALID');
+  end if;
+
+  update od.notify_setting w set
+    id_email = _new.id_email, id_sms = _new.id_sms,
+    vc_email_from_name = _new.vc_email_from_name, vc_email_reply_to = _new.vc_email_reply_to,
+    id_reminder = _new.id_reminder, qt_reminder_hours = _new.qt_reminder_hours,
+    id_booked = _new.id_booked, id_return = _new.id_return, qt_send_hour = _new.qt_send_hour,
+    vc_tpl_reminder = _new.vc_tpl_reminder, vc_tpl_booked = _new.vc_tpl_booked, vc_tpl_return = _new.vc_tpl_return
+   where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+
+  -- desligar um canal cancela o que dele ainda estava na fila
+  update od.notify_message m set it_status = 90
+   where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.it_status = 1
+     and ((m.it_channel = 1 and not _new.id_email) or (m.it_channel = 2 and not _new.id_sms));
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', 'UPDATE',
+    'notify_setting', _nr_company::text || '/' || _nr_branch::text,
+    format('Alertas por e-mail %s e SMS %s', case when _new.id_email then 'ligados' else 'desligados' end,
+           case when _new.id_sms then 'ligados' else 'desligados' end),
+    jsonb_build_object('id_email', _new.id_email, 'id_sms', _new.id_sms, 'id_reminder', _new.id_reminder,
+                       'id_booked', _new.id_booked, 'id_return', _new.id_return));
+
+  return jsonb_build_object('id_email', _new.id_email, 'id_sms', _new.id_sms);
+end;
+$$;
+
+revoke all on function ad.notify_settings_save(jsonb) from public, anon;
+grant execute on function ad.notify_settings_save(jsonb) to authenticated;

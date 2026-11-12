@@ -329,3 +329,15 @@ drop policy if exists referral_reward_select on od.referral_reward;
 create policy referral_reward_select on od.referral_reward
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.notify_setting
+drop policy if exists notify_setting_select on od.notify_setting;
+create policy notify_setting_select on od.notify_setting
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.notify_message
+drop policy if exists notify_message_select on od.notify_message;
+create policy notify_message_select on od.notify_message
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

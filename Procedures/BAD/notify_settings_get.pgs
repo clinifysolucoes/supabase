@@ -1,0 +1,91 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.notify_settings_get(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> rpc('notify_settings_get') (Configuracoes)         ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 12/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Configuracao dos alertas por e-mail e SMS da filial (LER na tela
+    SETTINGS): canais, alertas e textos (padroes quando ainda nao
+    configurado) e o resumo dos ultimos 30 dias por canal e situacao.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+
+  Output jsonb:
+    {"settings": {"id_email", "id_sms", "vc_email_from_name", "vc_email_reply_to", "id_reminder",
+                  "qt_reminder_hours", "id_booked", "id_return", "qt_send_hour", "vc_tpl_reminder",
+                  "vc_tpl_booked", "vc_tpl_return", "vc_clinic", "id_saved"},
+     "totals": [{"it_channel", "it_status", "qt"}], "permission": {"id_update"}}
+
+  Errors: VERSION_MISMATCH, NOTIFY_BRANCH_REQUIRED, NOTIFY_FORBIDDEN
+*/
+create or replace function ad.notify_settings_get(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _w          od.notify_setting;
+  _js         jsonb := '{}';
+  _col        text;
+  _expr       text;
+  _v          jsonb;
+  _clinic     text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'notify_settings_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('NOTIFY_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('NOTIFY_FORBIDDEN');
+  end if;
+  select b.vc_name into _clinic from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  select * into _w from od.notify_setting w where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
+  if _w.nr_company is null then
+    -- ainda nao configurada: os padroes das colunas (uma unica fonte, a DDL)
+    for _col, _expr in
+      select a.attname, pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+        from pg_catalog.pg_attribute a
+        join pg_catalog.pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+       where a.attrelid = 'od.notify_setting'::pg_catalog.regclass and a.attname not like 'dh_%'
+    loop
+      execute 'select to_jsonb(' || _expr || ')' into _v;
+      _js := _js || jsonb_build_object(_col, _v);
+    end loop;
+    _w := jsonb_populate_record(null::od.notify_setting, _js);
+  end if;
+
+  return jsonb_build_object(
+    'settings', jsonb_build_object(
+      'id_email', _w.id_email, 'id_sms', _w.id_sms,
+      'vc_email_from_name', _w.vc_email_from_name, 'vc_email_reply_to', _w.vc_email_reply_to,
+      'id_reminder', _w.id_reminder, 'qt_reminder_hours', _w.qt_reminder_hours,
+      'id_booked', _w.id_booked, 'id_return', _w.id_return, 'qt_send_hour', _w.qt_send_hour,
+      'vc_tpl_reminder', _w.vc_tpl_reminder, 'vc_tpl_booked', _w.vc_tpl_booked, 'vc_tpl_return', _w.vc_tpl_return,
+      'vc_clinic', _clinic, 'id_saved', _w.nr_company is not null),
+    'totals', coalesce((
+      select jsonb_agg(jsonb_build_object('it_channel', t.it_channel, 'it_status', t.it_status, 'qt', t.qt)
+                       order by t.it_channel, t.it_status)
+        from (select m.it_channel, m.it_status, count(*) as qt from od.notify_message m
+               where m.nr_company = _nr_company and m.nr_branch = _nr_branch
+                 and m.dh_created > now() - interval '30 days'
+               group by m.it_channel, m.it_status) t), '[]'::jsonb),
+    'permission', jsonb_build_object('id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.notify_settings_get(jsonb) from public, anon;
+grant execute on function ad.notify_settings_get(jsonb) to authenticated;

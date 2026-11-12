@@ -77,6 +77,7 @@ Objetos principais:
 | `od.online_booking` / `ad.online_booking_settings_get/save` / `ad.online_booking_public` + Edge Function `online-booking` | agendamento online: página pública `/agendar/<slug>` sem login; a RPC pública só aceita service_role; `appointment.it_origin = 2`; horários livres em `od.fn_online_slots` |
 | `od.signature` / `ad.signature_save` / `ad.signature_list` | assinatura eletrônica simples de documentos e orçamentos (traço, assinante, IP, código, hash SHA-256 do conteúdo em `od.fn_signature_hash`; `id_valid` diz se o conteúdo mudou depois) |
 | `od.whatsapp_setting` / `od.whatsapp_secret` / `od.whatsapp_message` / `ad.whatsapp_settings_get/save` / `ad.whatsapp_message_list` / `ad.whatsapp_dispatch` + Edge Functions `whatsapp-*` | alertas pelo WhatsApp Cloud API com o número de cada clínica: chave da Meta cifrada (sem policy), fila `od.fn_whatsapp_enqueue` (lembrete com Confirmar/Remarcar, agendamento, aniversário, retorno), webhook; `appointment_list` devolve `it_wa_status` / `vc_wa_reply` |
+| `od.notify_setting` / `od.notify_message` / `ad.notify_settings_get/save` / `ad.notify_message_list` / `ad.notify_dispatch` + Edge Functions `notify-send` e `notify-confirm` | alertas por e-mail (Resend) e SMS (Zenvia) com contas do sistema: cada filial liga os canais e escreve os textos (`{{nome}}`, `{{data}}`, `{{link}}`...); fila `od.fn_notify_enqueue` (lembrete com link para confirmar, agendamento, retorno); o link abre `/confirmar/<token>` no app e confirma a consulta |
 
 ---
 
@@ -438,6 +439,8 @@ sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 | `whatsapp-send` | envio da fila (sem login, `verify_jwt = false`, header `x-cron-secret`): `ad.whatsapp_dispatch` CLAIM → Cloud API da Meta → RESULT; chamada a cada 10 min pelo workflow `whatsapp-cron.yml` | `WHATSAPP_ENC_KEY`, `CRON_SECRET` |
 | `whatsapp-webhook` | retorno da Meta (sem login, `verify_jwt = false`, assinatura `X-Hub-Signature-256`): situações e respostas Confirmar/Remarcar → `ad.whatsapp_dispatch` WEBHOOK | `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` |
 | `user-password-reset` | o administrador define uma senha nova para um usuário da empresa: valida com `ad.user_password_reset_check` (JWT do admin; conta compartilhada com outra empresa fica de fora) e troca no Auth com service_role | nenhum extra |
+| `notify-send` | envio da fila de e-mail/SMS (sem login, `verify_jwt = false`, header `x-cron-secret`): `ad.notify_dispatch` CLAIM → Resend / Zenvia → RESULT; troca `{{link}}` por `APP_PUBLIC_URL/confirmar/<token>`; canal sem chave vira erro na mensagem. Precisa de um agendador (Supabase Integrations > Cron, HTTP a cada 10-15 min) | `CRON_SECRET`, `RESEND_API_KEY`, `RESEND_FROM`, `ZENVIA_API_TOKEN`, `ZENVIA_FROM`, `APP_PUBLIC_URL` |
+| `notify-confirm` | confirmação da consulta pelo link do lembrete (sem login, `verify_jwt = false`): repassa o token para `ad.notify_dispatch` CONFIRM | nenhum extra |
 
 ### Setup do projeto Supabase (uma vez por ambiente)
 
@@ -486,8 +489,12 @@ final filiais = await sb.schema('ad').from('branch').select('nr_company, nr_bran
 - Empresa ativa no JWT (Auth Hook de custom claims) para policies sem subquery — só se a performance pedir.
 - Secrets ainda não configurados em homologação/produção: `SUPABASE_ACCESS_TOKEN` (deploy automático das Edge
   Functions), `WHATSAPP_ENC_KEY`, `CRON_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` (WhatsApp) e a conta
-  da Meta de cada clínica. Agendador do WhatsApp em produção (o workflow só agenda a branch default).
-- Hospedagem do app web com fallback de SPA (`index.html` para qualquer caminho), para o link `/agendar/...`.
+  da Meta de cada clínica. Agendador do WhatsApp em produção (o workflow só agenda a branch default; o
+  workflow `whatsapp-cron.yml` está desativado no GitHub desde que o Actions foi pausado por uso).
+- Alertas por e-mail/SMS: secrets `RESEND_API_KEY`, `RESEND_FROM` (domínio verificado no Resend), `ZENVIA_API_TOKEN`,
+  `ZENVIA_FROM`, `APP_PUBLIC_URL` e o agendador da `notify-send` (Supabase Integrations > Cron, não GitHub Actions).
+- Hospedagem do app web com fallback de SPA (`index.html` para qualquer caminho), para os links `/agendar/...` e
+  `/confirmar/...`.
 - Assinatura com certificado ICP-Brasil (hoje só assinatura eletrônica simples) e envio do documento para
   assinatura remota por link.
 - Storage para avatar/logo.
