@@ -1,0 +1,198 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.perio_exam_save(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('perio_exam_save') (prontuario > periograma)   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 13/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Exame periodontal (periograma) do paciente (tela PATIENTS).
+      vc_action = 'I'  novo exame                            -> CRIAR ou ALTERAR
+      vc_action = 'U'  altera data, profissional, observacoes e, com "teeth",
+                       substitui os dentes                   -> ALTERAR
+      vc_action = 'D'  exclui (it_status 90)                 -> ALTERAR
+    Cada dente (FDI permanente 11-48) tem 6 pontos, nesta ordem:
+    distovestibular, vestibular, mesiovestibular, distolingual/palatino,
+    lingual/palatino, mesiolingual/palatino. Sondagem 0 a 15 mm, recessao
+    -5 a 15 mm (negativo = margem acima da juncao), sangramento e placa
+    sim/nao; ponto nao medido = null. Mobilidade e furca 0 a 3.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     obrigatorio 'I' | 'U' | 'D'
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_exam          bigint   obrigatorio em 'U' e 'D'
+    dt_exam          date     opcional (padrao hoje; nao pode ser futura)
+    nr_professional  bigint   opcional
+    vc_notes         text     opcional (ate 2000)
+    teeth            array    [{"vc_tooth", "id_missing", "it_mobility", "it_furcation",
+                               "qt_probing" [6], "qt_recession" [6], "id_bleeding" [6], "id_plaque" [6]}]
+
+  Output jsonb: {"nr_exam"}
+
+  Errors: VERSION_MISMATCH, PERIO_ACTION_INVALID, RECORD_BRANCH_REQUIRED, PERIO_FORBIDDEN, PATIENT_REQUIRED,
+    PATIENT_NOT_FOUND, PERIO_NOT_FOUND, PERIO_PROFESSIONAL_INVALID, PERIO_VALUE_INVALID,
+    PERIO_TOOTH_INVALID {Tooth}
+*/
+create or replace function ad.perio_exam_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_exam    bigint;
+  _perm       jsonb;
+  _name       text;
+  _e          od.perio_exam;
+  _today      date;
+  _dt         date;
+  _prof       bigint;
+  _t          jsonb;
+  _tooth      text;
+  _probing    smallint[];
+  _recession  smallint[];
+  _bleeding   boolean[];
+  _plaque     boolean[];
+  _mob        smallint;
+  _furc       smallint;
+  _n          integer := 0;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'perio_exam_save');
+  if _action not in ('I', 'U', 'D') then
+    raise exception '%', ad.fn_message('PERIO_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not (coalesce((_perm ->> 'id_create')::boolean, false)
+                                or coalesce((_perm ->> 'id_update')::boolean, false)))
+     or (_action in ('U', 'D') and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('PERIO_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _name from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+   for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+  select (now() at time zone coalesce(b.vc_timezone, 'America/Sao_Paulo'))::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  if _action in ('U', 'D') then
+    _nr_exam := (p_json ->> 'nr_exam')::bigint;
+    select * into _e from od.perio_exam e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+       and e.nr_exam = _nr_exam and e.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('PERIO_NOT_FOUND');
+    end if;
+  end if;
+
+  if _action = 'D' then
+    update od.perio_exam e set it_status = 90
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+       and e.nr_exam = _nr_exam;
+  else
+    begin
+      _dt   := case when p_json ? 'dt_exam' then coalesce((p_json ->> 'dt_exam')::date, _today)
+                    else coalesce(_e.dt_exam, _today) end;
+      _prof := case when p_json ? 'nr_professional' then (p_json ->> 'nr_professional')::bigint else _e.nr_professional end;
+    exception when others then
+      raise exception '%', ad.fn_message('PERIO_VALUE_INVALID');
+    end;
+    if _dt > _today or length(coalesce(p_json ->> 'vc_notes', '')) > 2000
+       or (p_json ? 'teeth' and jsonb_typeof(p_json -> 'teeth') <> 'array') then
+      raise exception '%', ad.fn_message('PERIO_VALUE_INVALID');
+    end if;
+    if _prof is not null and not exists (
+         select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                           and r.nr_professional = _prof) then
+      raise exception '%', ad.fn_message('PERIO_PROFESSIONAL_INVALID');
+    end if;
+
+    if _action = 'I' then
+      select coalesce(max(e.nr_exam), 0) + 1 into _nr_exam
+        from od.perio_exam e
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient;
+      insert into od.perio_exam (nr_company, nr_branch, nr_patient, nr_exam, dt_exam, nr_professional, vc_notes, nr_user)
+      values (_nr_company, _nr_branch, _nr_patient, _nr_exam, _dt, _prof, nullif(trim(p_json ->> 'vc_notes'), ''), _nr_user);
+    else
+      update od.perio_exam e set
+        dt_exam = _dt, nr_professional = _prof,
+        vc_notes = case when p_json ? 'vc_notes' then nullif(trim(p_json ->> 'vc_notes'), '') else e.vc_notes end
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+         and e.nr_exam = _nr_exam;
+    end if;
+
+    if p_json ? 'teeth' then
+      delete from od.perio_tooth t
+       where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_patient = _nr_patient
+         and t.nr_exam = _nr_exam;
+      for _t in select value from jsonb_array_elements(p_json -> 'teeth') loop
+        _tooth := trim(coalesce(_t ->> 'vc_tooth', ''));
+        begin
+          _mob       := (_t ->> 'it_mobility')::smallint;
+          _furc      := (_t ->> 'it_furcation')::smallint;
+          _probing   := case when jsonb_typeof(_t -> 'qt_probing') = 'array'
+                             then array(select (x #>> '{}')::smallint from jsonb_array_elements(_t -> 'qt_probing') x) end;
+          _recession := case when jsonb_typeof(_t -> 'qt_recession') = 'array'
+                             then array(select (x #>> '{}')::smallint from jsonb_array_elements(_t -> 'qt_recession') x) end;
+          _bleeding  := case when jsonb_typeof(_t -> 'id_bleeding') = 'array'
+                             then array(select (x #>> '{}')::boolean from jsonb_array_elements(_t -> 'id_bleeding') x) end;
+          _plaque    := case when jsonb_typeof(_t -> 'id_plaque') = 'array'
+                             then array(select (x #>> '{}')::boolean from jsonb_array_elements(_t -> 'id_plaque') x) end;
+        exception when others then
+          raise exception '%', ad.fn_message('PERIO_TOOTH_INVALID', jsonb_build_object('Tooth', _tooth));
+        end;
+        if _tooth !~ '^[1-4][1-8]$'
+           or (_mob is not null and _mob not between 0 and 3) or (_furc is not null and _furc not between 0 and 3)
+           or (_probing is not null and (cardinality(_probing) <> 6
+               or exists (select 1 from unnest(_probing) v where v not between 0 and 15)))
+           or (_recession is not null and (cardinality(_recession) <> 6
+               or exists (select 1 from unnest(_recession) v where v not between -5 and 15)))
+           or (_bleeding is not null and cardinality(_bleeding) <> 6)
+           or (_plaque is not null and cardinality(_plaque) <> 6) then
+          raise exception '%', ad.fn_message('PERIO_TOOTH_INVALID', jsonb_build_object('Tooth', _tooth));
+        end if;
+        insert into od.perio_tooth (nr_company, nr_branch, nr_patient, nr_exam, vc_tooth, id_missing, it_mobility,
+                                    it_furcation, qt_probing, qt_recession, id_bleeding, id_plaque)
+        values (_nr_company, _nr_branch, _nr_patient, _nr_exam, _tooth,
+                coalesce((_t ->> 'id_missing')::boolean, false), _mob, _furc, _probing, _recession, _bleeding, _plaque)
+        on conflict (nr_company, nr_branch, nr_patient, nr_exam, vc_tooth) do nothing;
+        _n := _n + 1;
+      end loop;
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS',
+    case _action when 'I' then 'CREATE' when 'U' then 'UPDATE' else 'DELETE' end,
+    'perio_exam', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_exam::text,
+    format('Periograma %s no paciente %s', case _action when 'I' then 'registrado' when 'U' then 'alterado'
+                                                         else 'excluído' end, _name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_exam', _nr_exam, 'qt_teeth', case when p_json ? 'teeth' then _n end));
+
+  return jsonb_build_object('nr_exam', _nr_exam);
+end;
+$$;
+
+revoke all on function ad.perio_exam_save(jsonb) from public, anon;
+grant execute on function ad.perio_exam_save(jsonb) to authenticated;

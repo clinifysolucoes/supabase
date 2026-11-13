@@ -1,0 +1,84 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_chart_list(jsonb)                                  ::
+  ::  UsedBy      : Flutter -> rpc('patient_chart_list') (prontuario)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 13/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Fichas por especialidade do paciente (LER na tela PATIENTS), mais
+    recentes primeiro, com os valores (copia dos campos), profissional e
+    quem preencheu. Filtro opcional por modelo.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_model    bigint   opcional
+
+  Output jsonb:
+    {"charts": [{"nr_chart", "nr_model", "vc_model", "vc_tooth", "dt_chart", "nr_professional",
+                 "vc_professional", "vc_notes", "vc_user", "dh_created", "dh_updated",
+                 "values": [{"nr_field", "vc_label", "it_type", "vc_unit", "vc_value"}]}],
+     "permission": {"id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN, PATIENT_REQUIRED
+*/
+create or replace function ad.patient_chart_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _model      bigint;
+  _perm       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_chart_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  _model := (p_json ->> 'nr_model')::bigint;
+
+  return jsonb_build_object(
+    'charts', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_chart', c.nr_chart, 'nr_model', c.nr_model, 'vc_model', c.vc_model, 'vc_tooth', c.vc_tooth,
+               'dt_chart', c.dt_chart, 'nr_professional', c.nr_professional, 'vc_professional', r.vc_name,
+               'vc_notes', c.vc_notes, 'vc_user', u.vc_name, 'dh_created', c.dh_created, 'dh_updated', c.dh_updated,
+               'values', coalesce((select jsonb_agg(jsonb_build_object(
+                    'nr_field', v.nr_field, 'vc_label', v.vc_label, 'it_type', v.it_type, 'vc_unit', v.vc_unit,
+                    'vc_value', v.vc_value) order by v.nr_field)
+                  from od.patient_chart_value v
+                 where v.nr_company = c.nr_company and v.nr_branch = c.nr_branch and v.nr_patient = c.nr_patient
+                   and v.nr_chart = c.nr_chart), '[]'::jsonb))
+             order by c.dt_chart desc, c.nr_chart desc)
+        from od.patient_chart c
+        left join od.professional r on r.nr_company = c.nr_company and r.nr_branch = c.nr_branch
+                                   and r.nr_professional = c.nr_professional
+        left join ad.app_user u on u.nr_user = c.nr_user
+       where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_patient = _nr_patient
+         and c.it_status = 1 and (_model is null or c.nr_model = _model)), '[]'::jsonb),
+    'permission', jsonb_build_object(
+      'id_create', coalesce((_perm ->> 'id_create')::boolean, false) or coalesce((_perm ->> 'id_update')::boolean, false),
+      'id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.patient_chart_list(jsonb) from public, anon;
+grant execute on function ad.patient_chart_list(jsonb) to authenticated;

@@ -1,0 +1,177 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.chart_model_save(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> rpc('chart_model_save') (Configuracoes)            ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 13/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria (I) ou altera (U) um modelo de ficha por especialidade (ALTERAR na
+    tela SETTINGS): nome (unico na filial), especialidade, por dente,
+    situacao e, com "fields", substitui os campos (as fichas ja preenchidas
+    guardam a propria copia). Grava ad.event_log.
+    Tipos de campo: 1 texto curto | 2 texto longo | 3 sim/nao | 4 escolha |
+    5 numero | 6 data | 7 titulo de secao.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     obrigatorio 'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_model     bigint   obrigatorio em 'U'
+    vc_name      text     obrigatorio em 'I' (ate 80)
+    nr_specialty bigint   opcional (null limpa)
+    id_per_tooth boolean  opcional (a ficha pede o dente)
+    it_status    integer  opcional 1 | 90 (so em 'U')
+    fields       array    obrigatorio em 'I': [{"vc_label" (ate 120), "it_type", "vc_options"
+                          (escolha: texto com | ou lista), "vc_unit" (ate 20), "id_required"}]
+
+  Output jsonb: {"nr_model"}
+
+  Errors: VERSION_MISMATCH, CHART_MODEL_ACTION_INVALID, RECORD_BRANCH_REQUIRED, CHART_MODEL_FORBIDDEN,
+    CHART_MODEL_NOT_FOUND, CHART_MODEL_NAME_REQUIRED, CHART_MODEL_NAME_IN_USE, CHART_MODEL_SPECIALTY_INVALID,
+    CHART_MODEL_FIELDS_REQUIRED, CHART_FIELD_INVALID {Item}, CHART_MODEL_VALUE_INVALID
+*/
+create or replace function ad.chart_model_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_model   bigint;
+  _m          od.chart_model;
+  _name       text;
+  _specialty  bigint;
+  _per_tooth  boolean;
+  _status     smallint;
+  _f          jsonb;
+  _i          integer := 0;
+  _label      text;
+  _type       smallint;
+  _opts       text;
+  _unit       text;
+  _req        boolean;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'chart_model_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('CHART_MODEL_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('CHART_MODEL_FORBIDDEN');
+  end if;
+  begin
+    _specialty := (p_json ->> 'nr_specialty')::bigint;
+    _per_tooth := (p_json ->> 'id_per_tooth')::boolean;
+    _status    := (p_json ->> 'it_status')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('CHART_MODEL_VALUE_INVALID');
+  end;
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+
+  if _action = 'U' then
+    _nr_model := (p_json ->> 'nr_model')::bigint;
+    select * into _m from od.chart_model m
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_model = _nr_model;
+    if not found then
+      raise exception '%', ad.fn_message('CHART_MODEL_NOT_FOUND');
+    end if;
+  else
+    if jsonb_typeof(p_json -> 'fields') is distinct from 'array' or jsonb_array_length(p_json -> 'fields') = 0 then
+      raise exception '%', ad.fn_message('CHART_MODEL_FIELDS_REQUIRED');
+    end if;
+    _m.id_per_tooth := false;
+    _m.it_status    := 1;
+  end if;
+
+  _name := case when p_json ? 'vc_name' then nullif(trim(p_json ->> 'vc_name'), '') else _m.vc_name end;
+  if _name is null then
+    raise exception '%', ad.fn_message('CHART_MODEL_NAME_REQUIRED');
+  end if;
+  if length(_name) > 80 or (_action = 'U' and p_json ? 'it_status' and _status not in (1, 90)) then
+    raise exception '%', ad.fn_message('CHART_MODEL_VALUE_INVALID');
+  end if;
+  if exists (select 1 from od.chart_model m
+              where m.nr_company = _nr_company and m.nr_branch = _nr_branch and lower(m.vc_name) = lower(_name)
+                and m.nr_model is distinct from _nr_model) then
+    raise exception '%', ad.fn_message('CHART_MODEL_NAME_IN_USE');
+  end if;
+  if not (p_json ? 'nr_specialty') then
+    _specialty := _m.nr_specialty;
+  elsif _specialty is not null and not exists (
+          select 1 from od.specialty s
+           where s.nr_company = _nr_company and s.nr_branch = _nr_branch and s.nr_specialty = _specialty) then
+    raise exception '%', ad.fn_message('CHART_MODEL_SPECIALTY_INVALID');
+  end if;
+
+  if _action = 'I' then
+    select coalesce(max(m.nr_model), 0) + 1 into _nr_model
+      from od.chart_model m where m.nr_company = _nr_company and m.nr_branch = _nr_branch;
+    insert into od.chart_model (nr_company, nr_branch, nr_model, vc_name, nr_specialty, id_per_tooth, it_status)
+    values (_nr_company, _nr_branch, _nr_model, _name, _specialty, coalesce(_per_tooth, false), 1);
+  else
+    update od.chart_model m set
+      vc_name      = _name,
+      nr_specialty = _specialty,
+      id_per_tooth = case when p_json ? 'id_per_tooth' then coalesce(_per_tooth, false) else m.id_per_tooth end,
+      it_status    = case when p_json ? 'it_status' then _status else m.it_status end
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_model = _nr_model;
+  end if;
+
+  if p_json ? 'fields' then
+    if jsonb_typeof(p_json -> 'fields') <> 'array' or jsonb_array_length(p_json -> 'fields') = 0 then
+      raise exception '%', ad.fn_message('CHART_MODEL_FIELDS_REQUIRED');
+    end if;
+    delete from od.chart_field f
+     where f.nr_company = _nr_company and f.nr_branch = _nr_branch and f.nr_model = _nr_model;
+    for _f in select value from jsonb_array_elements(p_json -> 'fields') loop
+      _i := _i + 1;
+      begin
+        _label := nullif(trim(_f ->> 'vc_label'), '');
+        _type  := coalesce((_f ->> 'it_type')::smallint, 1);
+        _unit  := nullif(trim(coalesce(_f ->> 'vc_unit', '')), '');
+        _req   := coalesce((_f ->> 'id_required')::boolean, false);
+        _opts  := case when jsonb_typeof(_f -> 'vc_options') = 'array'
+                       then (select string_agg(nullif(trim(o), ''), '|') from jsonb_array_elements_text(_f -> 'vc_options') o)
+                       else (select string_agg(nullif(trim(o), ''), '|')
+                               from unnest(string_to_array(coalesce(_f ->> 'vc_options', ''), '|')) o) end;
+      exception when others then
+        raise exception '%', ad.fn_message('CHART_FIELD_INVALID', jsonb_build_object('Item', _i));
+      end;
+      if _label is null or length(_label) > 120 or _type not between 1 and 7 or length(coalesce(_unit, '')) > 20
+         or (_type = 4 and (_opts is null or length(_opts) > 500 or position('|' in _opts) = 0)) or _i > 200 then
+        raise exception '%', ad.fn_message('CHART_FIELD_INVALID', jsonb_build_object('Item', _i));
+      end if;
+      insert into od.chart_field (nr_company, nr_branch, nr_model, nr_field, vc_label, it_type, vc_options, vc_unit,
+                                  id_required)
+      values (_nr_company, _nr_branch, _nr_model, _i, _label, _type, case when _type = 4 then _opts end,
+              case when _type = 5 then _unit end,
+              _type <> 7 and _req);
+    end loop;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'chart_model', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_model::text,
+    format('Modelo de ficha %s %s', _name, case when _action = 'I' then 'criado' else 'alterado' end),
+    jsonb_build_object('qt_fields', case when p_json ? 'fields' then _i end));
+
+  return jsonb_build_object('nr_model', _nr_model);
+end;
+$$;
+
+revoke all on function ad.chart_model_save(jsonb) from public, anon;
+grant execute on function ad.chart_model_save(jsonb) to authenticated;

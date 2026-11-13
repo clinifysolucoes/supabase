@@ -1,0 +1,233 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.patient_chart_save(jsonb)                                  ::
+  ::  UsedBy      : Flutter -> rpc('patient_chart_save') (prontuario)             ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 13/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Ficha por especialidade do paciente (tela PATIENTS).
+      vc_action = 'I'  preenche uma ficha de um modelo ativo, copiando os
+                       campos (o modelo pode mudar depois)  -> CRIAR ou ALTERAR
+      vc_action = 'U'  altera data, dente, profissional, observacoes e os
+                       valores (sobre a copia dos campos)   -> ALTERAR
+      vc_action = 'D'  exclui (it_status 90)                -> ALTERAR
+    Valores: "values" [{"nr_field", "vc_value"}]. Sim/nao grava S/N; numero
+    com ponto; data ISO; escolha precisa ser uma das opcoes; titulo de secao
+    nao tem valor. Campo obrigatorio vazio = erro. Modelo por dente exige
+    vc_tooth (FDI, um ou mais separados por virgula). Grava ad.event_log sem
+    os valores.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     obrigatorio 'I' | 'U' | 'D'
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+    nr_model         bigint   obrigatorio em 'I'
+    nr_chart         bigint   obrigatorio em 'U' e 'D'
+    dt_chart         date     opcional (padrao hoje; nao pode ser futura)
+    vc_tooth         text     obrigatorio quando o modelo e por dente
+    nr_professional  bigint   opcional
+    vc_notes         text     opcional (ate 2000)
+    values           array    opcional (em 'U', so os campos enviados mudam)
+
+  Output jsonb: {"nr_chart"}
+
+  Errors: VERSION_MISMATCH, CHART_ACTION_INVALID, RECORD_BRANCH_REQUIRED, CHART_FORBIDDEN, PATIENT_REQUIRED,
+    PATIENT_NOT_FOUND, CHART_MODEL_NOT_FOUND, CHART_NOT_FOUND, CHART_TOOTH_REQUIRED, CHART_TOOTH_INVALID,
+    CHART_PROFESSIONAL_INVALID, CHART_VALUE_INVALID {Field}, CHART_FIELD_REQUIRED {Field}
+*/
+create or replace function ad.patient_chart_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _nr_chart   bigint;
+  _perm       jsonb;
+  _name       text;
+  _c          od.patient_chart;
+  _per_tooth  boolean;
+  _tooth      text;
+  _dt         date;
+  _today      date;
+  _prof       bigint;
+  _v          jsonb;
+  _f          record;
+  _val        text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'patient_chart_save');
+  if _action not in ('I', 'U', 'D') then
+    raise exception '%', ad.fn_message('CHART_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if _nr_user is null
+     or (_action = 'I' and not (coalesce((_perm ->> 'id_create')::boolean, false)
+                                or coalesce((_perm ->> 'id_update')::boolean, false)))
+     or (_action in ('U', 'D') and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('CHART_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+  select p.vc_name into _name from od.patient p
+   where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+   for update;
+  if not found then
+    raise exception '%', ad.fn_message('PATIENT_NOT_FOUND');
+  end if;
+  select (now() at time zone coalesce(b.vc_timezone, 'America/Sao_Paulo'))::date into _today
+    from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+
+  if _action in ('U', 'D') then
+    _nr_chart := (p_json ->> 'nr_chart')::bigint;
+    select * into _c from od.patient_chart c
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_patient = _nr_patient
+       and c.nr_chart = _nr_chart and c.it_status = 1;
+    if not found then
+      raise exception '%', ad.fn_message('CHART_NOT_FOUND');
+    end if;
+    select m.id_per_tooth into _per_tooth from od.chart_model m
+     where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_model = _c.nr_model;
+  end if;
+
+  if _action = 'D' then
+    update od.patient_chart c set it_status = 90
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_patient = _nr_patient
+       and c.nr_chart = _nr_chart;
+  else
+    if _action = 'I' then
+      _c.nr_model := (p_json ->> 'nr_model')::bigint;
+      select m.vc_name, m.id_per_tooth into _c.vc_model, _per_tooth from od.chart_model m
+       where m.nr_company = _nr_company and m.nr_branch = _nr_branch and m.nr_model = _c.nr_model
+         and m.it_status = 1;
+      if not found then
+        raise exception '%', ad.fn_message('CHART_MODEL_NOT_FOUND');
+      end if;
+    end if;
+    begin
+      _dt   := case when p_json ? 'dt_chart' then coalesce((p_json ->> 'dt_chart')::date, _today)
+                    else coalesce(_c.dt_chart, _today) end;
+      _prof := case when p_json ? 'nr_professional' then (p_json ->> 'nr_professional')::bigint else _c.nr_professional end;
+    exception when others then
+      raise exception '%', ad.fn_message('CHART_VALUE_INVALID', jsonb_build_object('Field', 'dt_chart'));
+    end;
+    if _dt > _today then
+      raise exception '%', ad.fn_message('CHART_VALUE_INVALID', jsonb_build_object('Field', 'dt_chart'));
+    end if;
+    _tooth := case when p_json ? 'vc_tooth' then nullif(regexp_replace(trim(p_json ->> 'vc_tooth'), '\s*,\s*', ', ', 'g'), '')
+                   else _c.vc_tooth end;
+    if coalesce(_per_tooth, false) and _tooth is null then
+      raise exception '%', ad.fn_message('CHART_TOOTH_REQUIRED');
+    end if;
+    if _tooth is not null and (_tooth !~ '^([1-4][1-8]|[5-8][1-5])(, ([1-4][1-8]|[5-8][1-5]))*$' or length(_tooth) > 40) then
+      raise exception '%', ad.fn_message('CHART_TOOTH_INVALID');
+    end if;
+    if _prof is not null and not exists (
+         select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                                           and r.nr_professional = _prof) then
+      raise exception '%', ad.fn_message('CHART_PROFESSIONAL_INVALID');
+    end if;
+    if length(coalesce(p_json ->> 'vc_notes', '')) > 2000 then
+      raise exception '%', ad.fn_message('CHART_VALUE_INVALID', jsonb_build_object('Field', 'vc_notes'));
+    end if;
+
+    if _action = 'I' then
+      select coalesce(max(c.nr_chart), 0) + 1 into _nr_chart
+        from od.patient_chart c
+       where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_patient = _nr_patient;
+      insert into od.patient_chart (nr_company, nr_branch, nr_patient, nr_chart, nr_model, vc_model, vc_tooth, dt_chart,
+                                    nr_professional, vc_notes, nr_user)
+      values (_nr_company, _nr_branch, _nr_patient, _nr_chart, _c.nr_model, _c.vc_model, _tooth, _dt, _prof,
+              nullif(trim(p_json ->> 'vc_notes'), ''), _nr_user);
+      insert into od.patient_chart_value (nr_company, nr_branch, nr_patient, nr_chart, nr_field, vc_label, it_type, vc_unit)
+      select _nr_company, _nr_branch, _nr_patient, _nr_chart, f.nr_field, f.vc_label, f.it_type, f.vc_unit
+        from od.chart_field f
+       where f.nr_company = _nr_company and f.nr_branch = _nr_branch and f.nr_model = _c.nr_model;
+    else
+      update od.patient_chart c set
+        vc_tooth = _tooth, dt_chart = _dt, nr_professional = _prof,
+        vc_notes = case when p_json ? 'vc_notes' then nullif(trim(p_json ->> 'vc_notes'), '') else c.vc_notes end
+       where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_patient = _nr_patient
+         and c.nr_chart = _nr_chart;
+    end if;
+
+    -- valores (sobre a copia dos campos)
+    for _v in select value from jsonb_array_elements(coalesce(p_json -> 'values', '[]'::jsonb)) loop
+      select v.nr_field, v.vc_label, v.it_type, f.vc_options into _f
+        from od.patient_chart_value v
+        left join od.patient_chart c on c.nr_company = v.nr_company and c.nr_branch = v.nr_branch
+                                    and c.nr_patient = v.nr_patient and c.nr_chart = v.nr_chart
+        left join od.chart_field f on f.nr_company = v.nr_company and f.nr_branch = v.nr_branch
+                                  and f.nr_model = c.nr_model and f.nr_field = v.nr_field and f.it_type = 4
+       where v.nr_company = _nr_company and v.nr_branch = _nr_branch and v.nr_patient = _nr_patient
+         and v.nr_chart = _nr_chart and v.nr_field = (_v ->> 'nr_field')::smallint;
+      continue when not found or _f.it_type = 7;
+      _val := nullif(trim(coalesce(_v ->> 'vc_value', '')), '');
+      if _val is not null then
+        begin
+          _val := case _f.it_type
+            when 3 then case when upper(_val) in ('S', 'SIM', 'TRUE', '1') then 'S'
+                             when upper(_val) in ('N', 'NAO', 'NÃO', 'FALSE', '0') then 'N' end
+            when 5 then (replace(_val, ',', '.')::numeric)::text
+            when 6 then ((_val)::date)::text
+            else _val end;
+        exception when others then
+          _val := null;
+          raise exception '%', ad.fn_message('CHART_VALUE_INVALID', jsonb_build_object('Field', _f.vc_label));
+        end;
+        if _val is null
+           or (_f.it_type = 4 and _f.vc_options is not null and not (_val = any (string_to_array(_f.vc_options, '|'))))
+           or (_f.it_type = 1 and length(_val) > 200) or length(_val) > 2000 then
+          raise exception '%', ad.fn_message('CHART_VALUE_INVALID', jsonb_build_object('Field', _f.vc_label));
+        end if;
+      end if;
+      update od.patient_chart_value v set vc_value = _val
+       where v.nr_company = _nr_company and v.nr_branch = _nr_branch and v.nr_patient = _nr_patient
+         and v.nr_chart = _nr_chart and v.nr_field = _f.nr_field;
+    end loop;
+
+    -- obrigatorios (do modelo, quando ainda existe)
+    select f.vc_label into _val
+      from od.patient_chart_value v
+      join od.patient_chart c on c.nr_company = v.nr_company and c.nr_branch = v.nr_branch
+                             and c.nr_patient = v.nr_patient and c.nr_chart = v.nr_chart
+      join od.chart_field f on f.nr_company = v.nr_company and f.nr_branch = v.nr_branch and f.nr_model = c.nr_model
+                           and f.nr_field = v.nr_field and f.vc_label = v.vc_label and f.id_required
+     where v.nr_company = _nr_company and v.nr_branch = _nr_branch and v.nr_patient = _nr_patient
+       and v.nr_chart = _nr_chart and v.vc_value is null
+     order by v.nr_field limit 1;
+    if found then
+      raise exception '%', ad.fn_message('CHART_FIELD_REQUIRED', jsonb_build_object('Field', _val));
+    end if;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS',
+    case _action when 'I' then 'CREATE' when 'U' then 'UPDATE' else 'DELETE' end,
+    'patient_chart', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_patient::text || '/' || _nr_chart::text,
+    format('Ficha %s %s no paciente %s', coalesce(_c.vc_model, ''),
+           case _action when 'I' then 'preenchida' when 'U' then 'alterada' else 'excluída' end, _name),
+    jsonb_build_object('nr_patient', _nr_patient, 'nr_chart', _nr_chart, 'nr_model', _c.nr_model));
+
+  return jsonb_build_object('nr_chart', _nr_chart);
+end;
+$$;
+
+revoke all on function ad.patient_chart_save(jsonb) from public, anon;
+grant execute on function ad.patient_chart_save(jsonb) to authenticated;

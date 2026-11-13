@@ -101,11 +101,23 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
+| [`od.chart_model`](#odchartmodel) | Modelo de ficha por especialidade | Modelo de ficha clínica por especialidade da filial (Ortodontia, Endodontia, Implantodontia, Periodontia e os que a clínica criar), editado em Configurações. Os prontos são criados na primeira consulta (od.fn_chart_default). |
+| [`od.chart_field`](#odchartfield) | Campo do modelo de ficha | Campos de um modelo de ficha, na ordem; substituídos a cada chart_model_save com fields. |
+| [`od.patient_chart`](#odpatientchart) | Ficha por especialidade do paciente | Ficha preenchida no prontuário, com cópia do nome do modelo, dente (quando o modelo é por dente), data, profissional e observações. Exclusão lógica. |
+| [`od.patient_chart_value`](#odpatientchartvalue) | Valor da ficha do paciente | Valores da ficha com cópia do rótulo, tipo e unidade do campo: o modelo pode mudar sem alterar o que já foi preenchido. Sim/não = S/N; número com ponto; data ISO. |
+| [`od.perio_exam`](#odperioexam) | Periograma | Exame periodontal do paciente (periograma): data, profissional e observações; os dentes ficam em od.perio_tooth. Exclusão lógica. |
+| [`od.perio_tooth`](#odperiotooth) | Dente do periograma | Um dente do periograma (FDI permanente) com 6 pontos na ordem distovestibular, vestibular, mesiovestibular, distolingual, lingual, mesiolingual: sondagem, recessão, sangramento e placa; mobilidade, furca e ausente. |
 
 ## Diagrama (ERD)
 
 ```mermaid
 erDiagram
+  chart_model ||--o{ chart_field : "campos"
+  chart_model ||--o{ patient_chart : "fichas preenchidas"
+  patient ||--o{ patient_chart : "fichas por especialidade"
+  patient_chart ||--o{ patient_chart_value : "valores"
+  patient ||--o{ perio_exam : "periogramas"
+  perio_exam ||--o{ perio_tooth : "dentes"
   branch ||--o{ notify_setting : "alertas por e-mail/SMS"
   patient ||--o{ notify_message : "alertas por e-mail/SMS"
   appointment ||--o{ notify_message : "lembretes por e-mail/SMS"
@@ -1165,6 +1177,76 @@ erDiagram
     varchar vc_error
     timestamptz dh_sent
     timestamptz dh_confirmed
+  }
+  chart_model {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_model PK
+    varchar vc_name
+    bigint nr_specialty FK
+    boolean id_per_tooth
+    smallint it_status
+  }
+  chart_field {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_model PK, FK
+    smallint nr_field PK
+    varchar vc_label
+    smallint it_type
+    varchar vc_options
+    varchar vc_unit
+    boolean id_required
+  }
+  patient_chart {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_chart PK
+    bigint nr_model FK
+    varchar vc_model
+    varchar vc_tooth
+    date dt_chart
+    bigint nr_professional FK
+    varchar vc_notes
+    smallint it_status
+    bigint nr_user FK
+  }
+  patient_chart_value {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_chart PK, FK
+    smallint nr_field PK
+    varchar vc_label
+    smallint it_type
+    varchar vc_unit
+    varchar vc_value
+  }
+  perio_exam {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_exam PK
+    date dt_exam
+    bigint nr_professional FK
+    varchar vc_notes
+    smallint it_status
+    bigint nr_user FK
+  }
+  perio_tooth {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_patient PK, FK
+    bigint nr_exam PK, FK
+    varchar vc_tooth PK
+    boolean id_missing
+    smallint it_mobility
+    smallint it_furcation
+    smallint[] qt_probing
+    smallint[] qt_recession
+    boolean[] id_bleeding
+    boolean[] id_plaque
   }
 ```
 
@@ -2921,6 +3003,148 @@ Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o 
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.chart_model
+
+**Modelo de ficha por especialidade**
+
+Modelo de ficha clínica por especialidade da filial (Ortodontia, Endodontia, Implantodontia, Periodontia e os que a clínica criar), editado em Configurações. Os prontos são criados na primeira consulta (od.fn_chart_default).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via chart_model_save (SETTINGS) e od.fn_chart_default.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_model` | `bigint` | PK3 | NOT NULL |  | Número sequencial do modelo na filial. |
+| `vc_name` | `varchar(80)` |  | NOT NULL |  | Nome do modelo (único na filial, sem diferenciar maiúsculas). |
+| `nr_specialty` | `bigint` | FK → `specialty.nr_specialty` | NULL |  | Especialidade ligada (opcional). |
+| `id_per_tooth` | `boolean` |  | NOT NULL | `false` | A ficha pede o dente (ex.: endodontia, implante). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do modelo. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.chart_field
+
+**Campo do modelo de ficha**
+
+Campos de um modelo de ficha, na ordem; substituídos a cada chart_model_save com fields.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via chart_model_save (SETTINGS) e od.fn_chart_default.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `chart_model.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `chart_model.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_model` | `bigint` | PK3, FK → `chart_model.nr_model` | NOT NULL |  | Modelo. |
+| `nr_field` | `smallint` | PK4 | NOT NULL |  | Ordem do campo no modelo. |
+| `vc_label` | `varchar(120)` |  | NOT NULL |  | Rótulo do campo. |
+| `it_type` | `smallint` |  | NOT NULL | `1` | Tipo do campo. Valores: 1 = Texto curto; 2 = Texto longo; 3 = Sim/não; 4 = Escolha; 5 = Número; 6 = Data; 7 = Título de seção. |
+| `vc_options` | `varchar(500)` |  | NULL |  | Opções da escolha, separadas por \| (só no tipo 4). |
+| `vc_unit` | `varchar(20)` |  | NULL |  | Unidade do número (mm, meses, N.cm...). |
+| `id_required` | `boolean` |  | NOT NULL | `false` | Campo obrigatório ao preencher a ficha. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.patient_chart
+
+**Ficha por especialidade do paciente**
+
+Ficha preenchida no prontuário, com cópia do nome do modelo, dente (quando o modelo é por dente), data, profissional e observações. Exclusão lógica.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_chart_save (permissão na tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_chart` | `bigint` | PK4 | NOT NULL |  | Número sequencial da ficha no paciente. |
+| `nr_model` | `bigint` | FK → `chart_model.nr_model` | NULL |  | Modelo usado. |
+| `vc_model` | `varchar(80)` |  | NOT NULL |  | Nome do modelo no momento do preenchimento. |
+| `vc_tooth` | `varchar(40)` |  | NULL |  | Dente(s) FDI, separados por vírgula. |
+| `dt_chart` | `date` |  | NOT NULL |  | Data da ficha. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional. |
+| `vc_notes` | `varchar(2000)` |  | NULL |  | Observações gerais. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativa; 90 = Excluída. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que preencheu. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.patient_chart_value
+
+**Valor da ficha do paciente**
+
+Valores da ficha com cópia do rótulo, tipo e unidade do campo: o modelo pode mudar sem alterar o que já foi preenchido. Sim/não = S/N; número com ponto; data ISO.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_chart_save (permissão na tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient_chart.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient_chart.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient_chart.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_chart` | `bigint` | PK4, FK → `patient_chart.nr_chart` | NOT NULL |  | Ficha. |
+| `nr_field` | `smallint` | PK5 | NOT NULL |  | Ordem do campo. |
+| `vc_label` | `varchar(120)` |  | NOT NULL |  | Rótulo do campo (cópia). |
+| `it_type` | `smallint` |  | NOT NULL |  | Tipo do campo (cópia). Valores: 1 = Texto curto; 2 = Texto longo; 3 = Sim/não; 4 = Escolha; 5 = Número; 6 = Data; 7 = Título de seção. |
+| `vc_unit` | `varchar(20)` |  | NULL |  | Unidade (cópia). |
+| `vc_value` | `varchar(2000)` |  | NULL |  | Valor preenchido. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.perio_exam
+
+**Periograma**
+
+Exame periodontal do paciente (periograma): data, profissional e observações; os dentes ficam em od.perio_tooth. Exclusão lógica.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via perio_exam_save (permissão na tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_exam` | `bigint` | PK4 | NOT NULL |  | Número sequencial do exame no paciente. |
+| `dt_exam` | `date` |  | NOT NULL |  | Data do exame. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional. |
+| `vc_notes` | `varchar(2000)` |  | NULL |  | Observações. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Excluído. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.perio_tooth
+
+**Dente do periograma**
+
+Um dente do periograma (FDI permanente) com 6 pontos na ordem distovestibular, vestibular, mesiovestibular, distolingual, lingual, mesiolingual: sondagem, recessão, sangramento e placa; mobilidade, furca e ausente.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via perio_exam_save (permissão na tela PATIENTS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `perio_exam.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `perio_exam.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_patient` | `bigint` | PK3, FK → `perio_exam.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_exam` | `bigint` | PK4, FK → `perio_exam.nr_exam` | NOT NULL |  | Exame. |
+| `vc_tooth` | `varchar(2)` | PK5 | NOT NULL |  | Dente FDI (11 a 48). |
+| `id_missing` | `boolean` |  | NOT NULL | `false` | Dente ausente (fora do resumo). |
+| `it_mobility` | `smallint` |  | NULL |  | Mobilidade. Valores: 0 = Sem mobilidade; 1 = Grau 1; 2 = Grau 2; 3 = Grau 3. |
+| `it_furcation` | `smallint` |  | NULL |  | Lesão de furca. Valores: 0 = Sem lesão; 1 = Grau I; 2 = Grau II; 3 = Grau III. |
+| `qt_probing` | `smallint[]` |  | NULL |  | Profundidade de sondagem por ponto, mm (6 posições; null = não medido). |
+| `qt_recession` | `smallint[]` |  | NULL |  | Recessão por ponto, mm (negativo = margem acima da junção). |
+| `id_bleeding` | `boolean[]` |  | NULL |  | Sangramento à sondagem por ponto. |
+| `id_plaque` | `boolean[]` |  | NULL |  | Placa por ponto. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ## Functions
 
 Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` de saída, erros via `RAISE EXCEPTION` com `ad.fn_message` (`{"Message": "CHAVE", "Parameters": {...}}`). Chamada no Flutter: `supabase.schema('<schema>').rpc('<nome>', params: {'p_json': {...}})` (`ad` ou `od`, conforme a assinatura).
@@ -3012,6 +3236,12 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.notify_settings_save(p_json jsonb)` | authenticated | Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila. |
 | `ad.notify_message_list(p_json jsonb)` | authenticated | Histórico dos alertas por e-mail e SMS (ler em SETTINGS) por canal, tipo e situação, paginado, com a confirmação pelo link. |
 | `ad.notify_dispatch(p_json jsonb)` | service_role | Lado servidor dos alertas por e-mail e SMS (só service_role, Edge Functions notify-send e notify-confirm): CLAIM enfileira o devido e entrega o lote, RESULT grava enviada/erro, CONFIRM confirma a consulta pelo token do link do lembrete. |
+| `ad.chart_model_list(p_json jsonb)` | authenticated | Modelos de ficha por especialidade com os campos (ler em PATIENTS ou SETTINGS); na primeira chamada cria os prontos (Ortodontia, Endodontia, Implantodontia, Periodontia). |
+| `ad.chart_model_save(p_json jsonb)` | authenticated | Cria ou altera um modelo de ficha (alterar em SETTINGS): nome único, especialidade, por dente, situação e campos (substituídos; as fichas preenchidas guardam a própria cópia). |
+| `ad.patient_chart_save(p_json jsonb)` | authenticated | Preenche (I), altera (U) ou exclui (D) uma ficha por especialidade do paciente (PATIENTS): copia os campos do modelo, valida tipo, opções, obrigatórios e o dente quando o modelo é por dente. |
+| `ad.patient_chart_list(p_json jsonb)` | authenticated | Fichas por especialidade do paciente (ler em PATIENTS) com os valores, profissional e quem preencheu; filtro por modelo. |
+| `ad.perio_exam_save(p_json jsonb)` | authenticated | Registra (I), altera (U) ou exclui (D) um periograma (PATIENTS): dentes FDI permanentes com 6 pontos de sondagem, recessão, sangramento e placa, mobilidade, furca e ausente. |
+| `ad.perio_exam_list(p_json jsonb)` | authenticated | Periogramas do paciente (ler em PATIENTS) com os dentes e o resumo: % de sangramento e placa, sondagem média, pontos de 4-5 mm e de 6 mm ou mais e nível de inserção médio. |
 | `ad.patient_summary_get(p_json jsonb)` | authenticated | Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null. |
 | `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional. |
 | `ad.document_template_list(p_json jsonb)` | authenticated | Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
@@ -3087,6 +3317,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
 | `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. |
 | `od.fn_notify_render(p_tpl text, p_vars jsonb)` | interna | Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function. |
+| `od.fn_chart_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)` | interna | Cria os modelos de ficha prontos (Ortodontia, Endodontia, Implantodontia, Periodontia) quando a filial ainda não tem nenhum. |
 | `od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)` | interna | Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento. |
 | `od.fn_fin_receivable_make(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_qt_installments integer, p_vc_reference text, p_nr_user bigint)` | interna | Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada. |
 | `od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)` | interna | Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados. |
@@ -3200,6 +3431,23 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `BUDGET_REQUIRED` | `budget_save`, `budget_status` |  |
 | `BUDGET_STATUS_INVALID` | `budget_save`, `budget_status` |  |
 | `BUDGET_VALUE_INVALID` | `budget_save`, `budget_status` |  |
+| `CHART_ACTION_INVALID` | `patient_chart_save` |  |
+| `CHART_FIELD_INVALID` | `chart_model_save` |  |
+| `CHART_FIELD_REQUIRED` | `patient_chart_save` |  |
+| `CHART_FORBIDDEN` | `patient_chart_save` |  |
+| `CHART_MODEL_ACTION_INVALID` | `chart_model_save` |  |
+| `CHART_MODEL_FIELDS_REQUIRED` | `chart_model_save` |  |
+| `CHART_MODEL_FORBIDDEN` | `chart_model_save` |  |
+| `CHART_MODEL_NAME_IN_USE` | `chart_model_save` |  |
+| `CHART_MODEL_NAME_REQUIRED` | `chart_model_save` |  |
+| `CHART_MODEL_NOT_FOUND` | `chart_model_save`, `patient_chart_save` |  |
+| `CHART_MODEL_SPECIALTY_INVALID` | `chart_model_save` |  |
+| `CHART_MODEL_VALUE_INVALID` | `chart_model_save` |  |
+| `CHART_NOT_FOUND` | `patient_chart_save` |  |
+| `CHART_PROFESSIONAL_INVALID` | `patient_chart_save` |  |
+| `CHART_TOOTH_INVALID` | `patient_chart_save` |  |
+| `CHART_TOOTH_REQUIRED` | `patient_chart_save` |  |
+| `CHART_VALUE_INVALID` | `patient_chart_save` |  |
 | `CHECKOUT_ALREADY_DONE` | `appointment_checkout` |  |
 | `CHECKOUT_APPOINTMENT_INVALID` | `appointment_checkout` |  |
 | `CHECKOUT_APPOINTMENT_NOT_FOUND` | `appointment_checkout_get`, `appointment_checkout` |  |
@@ -3496,17 +3744,23 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PATIENT_FILE_VALUE_INVALID` | `patient_file_save`, `patient_file_list` |  |
 | `PATIENT_FORBIDDEN` | `patient_list`, `patient_get`, `patient_save` |  |
 | `PATIENT_NAME_REQUIRED` | `patient_save` |  |
-| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `stock_movement_save`, `referral_reward_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_NOT_FOUND` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `stock_movement_save`, `referral_reward_save`, `patient_chart_save`, `perio_exam_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_NOTE_ACTION_INVALID` | `patient_note_save` |  |
 | `PATIENT_NOTE_FORBIDDEN` | `patient_note_save` |  |
 | `PATIENT_NOTE_NOT_FOUND` | `patient_note_save` |  |
 | `PATIENT_NOTE_REQUIRED` | `patient_note_save` |  |
 | `PATIENT_PHONE_INVALID` | `patient_save` |  |
-| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
+| `PATIENT_REQUIRED` | `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `prosthetic_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list`, `patient_get`, `patient_save`, `patient_note_save` |  |
 | `PATIENT_STATE_INVALID` | `patient_save` |  |
 | `PATIENT_STATUS_INVALID` | `patient_save` |  |
 | `PATIENT_VALUE_INVALID` | `patient_save` |  |
 | `PATIENT_ZIP_INVALID` | `patient_save` |  |
+| `PERIO_ACTION_INVALID` | `perio_exam_save` |  |
+| `PERIO_FORBIDDEN` | `perio_exam_save` |  |
+| `PERIO_NOT_FOUND` | `perio_exam_save` |  |
+| `PERIO_PROFESSIONAL_INVALID` | `perio_exam_save` |  |
+| `PERIO_TOOTH_INVALID` | `perio_exam_save` |  |
+| `PERIO_VALUE_INVALID` | `perio_exam_save` |  |
 | `PRICING_BRANCH_REQUIRED` | `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `specialty_list`, `specialty_save` |  |
 | `PRICING_EXPENSE_AMOUNT_INVALID` | `pricing_param_save` | Expense |
 | `PRICING_EXPENSE_NAME_REQUIRED` | `pricing_param_save` |  |
@@ -3560,8 +3814,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROSTHETIC_PROFESSIONAL_INVALID` | `prosthetic_save` |  |
 | `PROSTHETIC_STAGE_INVALID` | `prosthetic_stage` |  |
 | `PROSTHETIC_VALUE_INVALID` | `prosthetic_save`, `prosthetic_stage` |  |
-| `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `patient_summary_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list` |  |
-| `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `patient_summary_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list`, `patient_file_list` |  |
+| `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list` |  |
+| `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `chart_model_list`, `patient_chart_list`, `perio_exam_list`, `patient_summary_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list`, `patient_file_list` |  |
 | `REFERRAL_ACTION_INVALID` | `referral_reward_save` |  |
 | `REFERRAL_ALREADY_REWARDED` | `referral_reward_save` |  |
 | `REFERRAL_BRANCH_REQUIRED` | `referral_list`, `referral_reward_save` |  |
@@ -3646,7 +3900,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

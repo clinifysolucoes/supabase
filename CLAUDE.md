@@ -9,7 +9,7 @@ procedimentos** — rodando em **Supabase** (PostgreSQL + Auth + PostgREST). Tr�
 | Schema | Papel | Exposto na API |
 |---|---|---|
 | `ad` (Administrative) | empresas, filiais, usuários, perfis, telas, logs | sim |
-| `od` (Odontologia) | tabelas e helpers do negócio: precificação, pacientes, prontuário, agenda (e agendamento online), orçamentos, financeiro, documentos, assinatura eletrônica e WhatsApp | **não** (o app só chega por RPC em `ad`) |
+| `od` (Odontologia) | tabelas e helpers do negócio: precificação, pacientes, prontuário (com fichas por especialidade e periograma), agenda (e agendamento online), orçamentos, financeiro, documentos, assinatura eletrônica e WhatsApp | **não** (o app só chega por RPC em `ad`) |
 | `private` | helpers de RLS | **nunca** |
 
 **No futuro** o schema `od` recebe agenda, pacientes, prontuário, orçamentos e financeiro, sempre **em cima**
@@ -74,6 +74,8 @@ Objetos principais:
 | `od.clinical_evolution` / `od.tooth_mark` / `ad.clinical_evolution_save` / `ad.tooth_mark_save` / `ad.patient_record_get` | prontuário: evolução clínica (realiza item de orçamento aprovado) e odontograma FDI; `patient_record_get` junta tudo (permissão da tela PATIENTS) |
 | `od.document_template` / `od.medication` / `od.patient_document` / `od.patient_document_item` / `ad.document_template_*` / `ad.medication_*` / `ad.patient_document_render/save/list` | documentos do paciente: modelos com campos `{{...}}` (`od.fn_document_render`), catálogo de medicamentos e documentos emitidos com o texto final guardado (PDF no app) |
 | `od.patient_file` / `ad.patient_file_save` / `ad.patient_file_list` + Edge Function `patient-file` | fotos e exames no bucket privado `patient` (até 20 MB), só por URL assinada |
+| `od.chart_model` / `od.chart_field` / `od.patient_chart` / `od.patient_chart_value` / `ad.chart_model_list/save` / `ad.patient_chart_save/list` | fichas clínicas por especialidade: modelos da filial (prontos Ortodontia, Endodontia e Implantodontia por dente, Periodontia; `od.fn_chart_default`) editados em SETTINGS com campos texto/sim-não/escolha/número/data/título; a ficha preenchida copia os campos |
+| `od.perio_exam` / `od.perio_tooth` / `ad.perio_exam_save/list` | periograma: 6 pontos por dente (sondagem, recessão, sangramento, placa), mobilidade, furca, ausente e resumo (% sangramento/placa, bolsas ≥ 4 e ≥ 6 mm, inserção média) |
 | `od.online_booking` / `ad.online_booking_settings_get/save` / `ad.online_booking_public` + Edge Function `online-booking` | agendamento online: página pública `/agendar/<slug>` sem login; a RPC pública só aceita service_role; `appointment.it_origin = 2`; horários livres em `od.fn_online_slots` |
 | `od.signature` / `ad.signature_save` / `ad.signature_list` | assinatura eletrônica simples de documentos e orçamentos (traço, assinante, IP, código, hash SHA-256 do conteúdo em `od.fn_signature_hash`; `id_valid` diz se o conteúdo mudou depois) |
 | `od.whatsapp_setting` / `od.whatsapp_secret` / `od.whatsapp_message` / `ad.whatsapp_settings_get/save` / `ad.whatsapp_message_list` / `ad.whatsapp_dispatch` + Edge Functions `whatsapp-*` | alertas pelo WhatsApp Cloud API com o número de cada clínica: chave da Meta cifrada (sem policy), fila `od.fn_whatsapp_enqueue` (lembrete com Confirmar/Remarcar, agendamento, aniversário, retorno), webhook; `appointment_list` devolve `it_wa_status` / `vc_wa_reply` |
