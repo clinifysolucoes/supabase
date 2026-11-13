@@ -237,3 +237,27 @@ create or replace trigger notify_setting_audit
 create or replace trigger notify_message_audit
   before insert or update on od.notify_message
   for each row execute function ad.trg_audit();
+
+create or replace trigger chart_model_audit
+  before insert or update on od.chart_model
+  for each row execute function ad.trg_audit();
+
+create or replace trigger chart_field_audit
+  before insert or update on od.chart_field
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_chart_audit
+  before insert or update on od.patient_chart
+  for each row execute function ad.trg_audit();
+
+create or replace trigger patient_chart_value_audit
+  before insert or update on od.patient_chart_value
+  for each row execute function ad.trg_audit();
+
+create or replace trigger perio_exam_audit
+  before insert or update on od.perio_exam
+  for each row execute function ad.trg_audit();
+
+create or replace trigger perio_tooth_audit
+  before insert or update on od.perio_tooth
+  for each row execute function ad.trg_audit();

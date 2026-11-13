@@ -1467,12 +1467,130 @@
         { "name": "dh_sent", "type": "timestamptz", "nullable": true, "description": "Data/hora do envio." },
         { "name": "dh_confirmed", "type": "timestamptz", "nullable": true, "description": "Quando o paciente confirmou pelo link." }
       ]
+    },
+    {
+      "schema": "od",
+      "name": "chart_model",
+      "title": "Modelo de ficha por especialidade",
+      "description": "Modelo de ficha clínica por especialidade da filial (Ortodontia, Endodontia, Implantodontia, Periodontia e os que a clínica criar), editado em Configurações. Os prontos são criados na primeira consulta (od.fn_chart_default).",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via chart_model_save (SETTINGS) e od.fn_chart_default.",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "branch.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "branch.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_model", "type": "bigint", "pk": 3, "nullable": false, "description": "Número sequencial do modelo na filial." },
+        { "name": "vc_name", "type": "varchar(80)", "nullable": false, "description": "Nome do modelo (único na filial, sem diferenciar maiúsculas)." },
+        { "name": "nr_specialty", "type": "bigint", "fk": "specialty.nr_specialty", "nullable": true, "description": "Especialidade ligada (opcional)." },
+        { "name": "id_per_tooth", "type": "boolean", "nullable": false, "default": "false", "description": "A ficha pede o dente (ex.: endodontia, implante)." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação do modelo.", "values": {"1": "Ativo", "90": "Inativo"} }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "chart_field",
+      "title": "Campo do modelo de ficha",
+      "description": "Campos de um modelo de ficha, na ordem; substituídos a cada chart_model_save com fields.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via chart_model_save (SETTINGS) e od.fn_chart_default.",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "chart_model.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "chart_model.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_model", "type": "bigint", "pk": 3, "fk": "chart_model.nr_model", "nullable": false, "description": "Modelo." },
+        { "name": "nr_field", "type": "smallint", "pk": 4, "nullable": false, "description": "Ordem do campo no modelo." },
+        { "name": "vc_label", "type": "varchar(120)", "nullable": false, "description": "Rótulo do campo." },
+        { "name": "it_type", "type": "smallint", "nullable": false, "default": "1", "description": "Tipo do campo.", "values": {"1": "Texto curto", "2": "Texto longo", "3": "Sim/não", "4": "Escolha", "5": "Número", "6": "Data", "7": "Título de seção"} },
+        { "name": "vc_options", "type": "varchar(500)", "nullable": true, "description": "Opções da escolha, separadas por | (só no tipo 4)." },
+        { "name": "vc_unit", "type": "varchar(20)", "nullable": true, "description": "Unidade do número (mm, meses, N.cm...)." },
+        { "name": "id_required", "type": "boolean", "nullable": false, "default": "false", "description": "Campo obrigatório ao preencher a ficha." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "patient_chart",
+      "title": "Ficha por especialidade do paciente",
+      "description": "Ficha preenchida no prontuário, com cópia do nome do modelo, dente (quando o modelo é por dente), data, profissional e observações. Exclusão lógica.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_chart_save (permissão na tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_chart", "type": "bigint", "pk": 4, "nullable": false, "description": "Número sequencial da ficha no paciente." },
+        { "name": "nr_model", "type": "bigint", "fk": "chart_model.nr_model", "nullable": true, "description": "Modelo usado." },
+        { "name": "vc_model", "type": "varchar(80)", "nullable": false, "description": "Nome do modelo no momento do preenchimento." },
+        { "name": "vc_tooth", "type": "varchar(40)", "nullable": true, "description": "Dente(s) FDI, separados por vírgula." },
+        { "name": "dt_chart", "type": "date", "nullable": false, "description": "Data da ficha." },
+        { "name": "nr_professional", "type": "bigint", "fk": "professional.nr_professional", "nullable": true, "description": "Profissional." },
+        { "name": "vc_notes", "type": "varchar(2000)", "nullable": true, "description": "Observações gerais." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação.", "values": {"1": "Ativa", "90": "Excluída"} },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que preencheu." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "patient_chart_value",
+      "title": "Valor da ficha do paciente",
+      "description": "Valores da ficha com cópia do rótulo, tipo e unidade do campo: o modelo pode mudar sem alterar o que já foi preenchido. Sim/não = S/N; número com ponto; data ISO.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via patient_chart_save (permissão na tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient_chart.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient_chart.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient_chart.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_chart", "type": "bigint", "pk": 4, "fk": "patient_chart.nr_chart", "nullable": false, "description": "Ficha." },
+        { "name": "nr_field", "type": "smallint", "pk": 5, "nullable": false, "description": "Ordem do campo." },
+        { "name": "vc_label", "type": "varchar(120)", "nullable": false, "description": "Rótulo do campo (cópia)." },
+        { "name": "it_type", "type": "smallint", "nullable": false, "description": "Tipo do campo (cópia).", "values": {"1": "Texto curto", "2": "Texto longo", "3": "Sim/não", "4": "Escolha", "5": "Número", "6": "Data", "7": "Título de seção"} },
+        { "name": "vc_unit", "type": "varchar(20)", "nullable": true, "description": "Unidade (cópia)." },
+        { "name": "vc_value", "type": "varchar(2000)", "nullable": true, "description": "Valor preenchido." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "perio_exam",
+      "title": "Periograma",
+      "description": "Exame periodontal do paciente (periograma): data, profissional e observações; os dentes ficam em od.perio_tooth. Exclusão lógica.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via perio_exam_save (permissão na tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "patient.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "patient.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "patient.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_exam", "type": "bigint", "pk": 4, "nullable": false, "description": "Número sequencial do exame no paciente." },
+        { "name": "dt_exam", "type": "date", "nullable": false, "description": "Data do exame." },
+        { "name": "nr_professional", "type": "bigint", "fk": "professional.nr_professional", "nullable": true, "description": "Profissional." },
+        { "name": "vc_notes", "type": "varchar(2000)", "nullable": true, "description": "Observações." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação.", "values": {"1": "Ativo", "90": "Excluído"} },
+        { "name": "nr_user", "type": "bigint", "fk": "app_user.nr_user", "nullable": false, "description": "Usuário que registrou." }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "perio_tooth",
+      "title": "Dente do periograma",
+      "description": "Um dente do periograma (FDI permanente) com 6 pontos na ordem distovestibular, vestibular, mesiovestibular, distolingual, lingual, mesiolingual: sondagem, recessão, sangramento e placa; mobilidade, furca e ausente.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via perio_exam_save (permissão na tela PATIENTS).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "perio_exam.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "perio_exam.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_patient", "type": "bigint", "pk": 3, "fk": "perio_exam.nr_patient", "nullable": false, "description": "Paciente." },
+        { "name": "nr_exam", "type": "bigint", "pk": 4, "fk": "perio_exam.nr_exam", "nullable": false, "description": "Exame." },
+        { "name": "vc_tooth", "type": "varchar(2)", "pk": 5, "nullable": false, "description": "Dente FDI (11 a 48)." },
+        { "name": "id_missing", "type": "boolean", "nullable": false, "default": "false", "description": "Dente ausente (fora do resumo)." },
+        { "name": "it_mobility", "type": "smallint", "nullable": true, "description": "Mobilidade.", "values": {"0": "Sem mobilidade", "1": "Grau 1", "2": "Grau 2", "3": "Grau 3"} },
+        { "name": "it_furcation", "type": "smallint", "nullable": true, "description": "Lesão de furca.", "values": {"0": "Sem lesão", "1": "Grau I", "2": "Grau II", "3": "Grau III"} },
+        { "name": "qt_probing", "type": "smallint[]", "nullable": true, "description": "Profundidade de sondagem por ponto, mm (6 posições; null = não medido)." },
+        { "name": "qt_recession", "type": "smallint[]", "nullable": true, "description": "Recessão por ponto, mm (negativo = margem acima da junção)." },
+        { "name": "id_bleeding", "type": "boolean[]", "nullable": true, "description": "Sangramento à sondagem por ponto." },
+        { "name": "id_plaque", "type": "boolean[]", "nullable": true, "description": "Placa por ponto." }
+      ]
     }
   ],
   "external_entities": [
     { "name": "auth_users", "title": "auth.users (Supabase Auth)", "description": "Usuários autenticados pelo Supabase (e-mail, senha, OTP, social, 2FA). Gerenciado pela Supabase; referenciado por ad.app_user.uu_auth." }
   ],
   "relations": [
+    { "from": "chart_model", "to": "chart_field", "card": "||--o{", "label": "campos" },
+    { "from": "chart_model", "to": "patient_chart", "card": "||--o{", "label": "fichas preenchidas" },
+    { "from": "patient", "to": "patient_chart", "card": "||--o{", "label": "fichas por especialidade" },
+    { "from": "patient_chart", "to": "patient_chart_value", "card": "||--o{", "label": "valores" },
+    { "from": "patient", "to": "perio_exam", "card": "||--o{", "label": "periogramas" },
+    { "from": "perio_exam", "to": "perio_tooth", "card": "||--o{", "label": "dentes" },
     { "from": "branch", "to": "notify_setting", "card": "||--o{", "label": "alertas por e-mail/SMS" },
     { "from": "patient", "to": "notify_message", "card": "||--o{", "label": "alertas por e-mail/SMS" },
     { "from": "appointment", "to": "notify_message", "card": "||--o{", "label": "lembretes por e-mail/SMS" },
@@ -1744,6 +1862,7 @@
     { "name": "fn_stock_evolution", "signature": "od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)", "kind": "helper", "grant": "interna", "description": "Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída." },
     { "name": "fn_notify_enqueue", "signature": "od.fn_notify_enqueue()", "kind": "helper", "grant": "interna", "description": "Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete." },
     { "name": "fn_notify_render", "signature": "od.fn_notify_render(p_tpl text, p_vars jsonb)", "kind": "helper", "grant": "interna", "description": "Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function." },
+    { "name": "fn_chart_default", "signature": "od.fn_chart_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)", "kind": "helper", "grant": "interna", "description": "Cria os modelos de ficha prontos (Ortodontia, Endodontia, Implantodontia, Periodontia) quando a filial ainda não tem nenhum." },
     { "name": "fn_fin_category_ensure", "signature": "od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)", "kind": "helper", "grant": "interna", "description": "Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento." },
     { "name": "fin_rate_save", "signature": "ad.fin_rate_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I, criar) ou altera parcialmente (U, alterar) uma taxa de recebimento: nome, forma (crédito, débito, boleto, cheque), faixa de parcelas, percentual, tarifa fixa, prazo e conta destino. Grava event_log.",
       "errors": ["VERSION_MISMATCH", "FIN_RATE_ACTION_INVALID", "FINANCE_BRANCH_REQUIRED", "FIN_RATE_FORBIDDEN", "FIN_RATE_REQUIRED", "FIN_RATE_NOT_FOUND", "FIN_RATE_VALUE_INVALID", "FIN_RATE_NAME_REQUIRED", "FIN_RATE_NAME_IN_USE", "FIN_RATE_METHOD_INVALID", "FIN_RATE_INSTALLMENTS_INVALID", "FIN_RATE_FEE_INVALID", "FIN_RATE_DAYS_INVALID", "FIN_RATE_ACCOUNT_INVALID", "FIN_RATE_STATUS_INVALID"] },
@@ -1798,6 +1917,12 @@
     { "name": "notify_settings_save", "signature": "ad.notify_settings_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila.", "errors": ["VERSION_MISMATCH", "NOTIFY_BRANCH_REQUIRED", "NOTIFY_FORBIDDEN", "NOTIFY_VALUE_INVALID", "NOTIFY_EMAIL_INVALID", "NOTIFY_TEMPLATE_INVALID"] },
     { "name": "notify_message_list", "signature": "ad.notify_message_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Histórico dos alertas por e-mail e SMS (ler em SETTINGS) por canal, tipo e situação, paginado, com a confirmação pelo link.", "errors": ["VERSION_MISMATCH", "NOTIFY_BRANCH_REQUIRED", "NOTIFY_FORBIDDEN", "NOTIFY_VALUE_INVALID"] },
     { "name": "notify_dispatch", "signature": "ad.notify_dispatch(p_json jsonb)", "kind": "rpc", "grant": "service_role", "description": "Lado servidor dos alertas por e-mail e SMS (só service_role, Edge Functions notify-send e notify-confirm): CLAIM enfileira o devido e entrega o lote, RESULT grava enviada/erro, CONFIRM confirma a consulta pelo token do link do lembrete.", "errors": ["VERSION_MISMATCH", "NOTIFY_ACTION_INVALID", "NOTIFY_VALUE_INVALID"] },
+    { "name": "chart_model_list", "signature": "ad.chart_model_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Modelos de ficha por especialidade com os campos (ler em PATIENTS ou SETTINGS); na primeira chamada cria os prontos (Ortodontia, Endodontia, Implantodontia, Periodontia).", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN"] },
+    { "name": "chart_model_save", "signature": "ad.chart_model_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria ou altera um modelo de ficha (alterar em SETTINGS): nome único, especialidade, por dente, situação e campos (substituídos; as fichas preenchidas guardam a própria cópia).", "errors": ["VERSION_MISMATCH", "CHART_MODEL_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "CHART_MODEL_FORBIDDEN", "CHART_MODEL_NOT_FOUND", "CHART_MODEL_NAME_REQUIRED", "CHART_MODEL_NAME_IN_USE", "CHART_MODEL_SPECIALTY_INVALID", "CHART_MODEL_FIELDS_REQUIRED", "CHART_FIELD_INVALID", "CHART_MODEL_VALUE_INVALID"] },
+    { "name": "patient_chart_save", "signature": "ad.patient_chart_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Preenche (I), altera (U) ou exclui (D) uma ficha por especialidade do paciente (PATIENTS): copia os campos do modelo, valida tipo, opções, obrigatórios e o dente quando o modelo é por dente.", "errors": ["VERSION_MISMATCH", "CHART_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "CHART_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "CHART_MODEL_NOT_FOUND", "CHART_NOT_FOUND", "CHART_TOOTH_REQUIRED", "CHART_TOOTH_INVALID", "CHART_PROFESSIONAL_INVALID", "CHART_VALUE_INVALID", "CHART_FIELD_REQUIRED"] },
+    { "name": "patient_chart_list", "signature": "ad.patient_chart_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Fichas por especialidade do paciente (ler em PATIENTS) com os valores, profissional e quem preencheu; filtro por modelo.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED"] },
+    { "name": "perio_exam_save", "signature": "ad.perio_exam_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Registra (I), altera (U) ou exclui (D) um periograma (PATIENTS): dentes FDI permanentes com 6 pontos de sondagem, recessão, sangramento e placa, mobilidade, furca e ausente.", "errors": ["VERSION_MISMATCH", "PERIO_ACTION_INVALID", "RECORD_BRANCH_REQUIRED", "PERIO_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND", "PERIO_NOT_FOUND", "PERIO_PROFESSIONAL_INVALID", "PERIO_VALUE_INVALID", "PERIO_TOOTH_INVALID"] },
+    { "name": "perio_exam_list", "signature": "ad.perio_exam_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Periogramas do paciente (ler em PATIENTS) com os dentes e o resumo: % de sangramento e placa, sondagem média, pontos de 4-5 mm e de 6 mm ou mais e nível de inserção médio.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED"] },
     { "name": "patient_summary_get", "signature": "ad.patient_summary_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null.", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN", "PATIENT_REQUIRED", "PATIENT_NOT_FOUND"] },
     { "name": "report_get", "signature": "ad.report_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional.", "errors": ["VERSION_MISMATCH", "REPORT_BRANCH_REQUIRED", "REPORT_FORBIDDEN", "REPORT_INVALID", "REPORT_PERIOD_INVALID"] },
     { "name": "document_template_list", "signature": "ad.document_template_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS).", "errors": ["VERSION_MISMATCH", "RECORD_BRANCH_REQUIRED", "RECORD_FORBIDDEN"] },

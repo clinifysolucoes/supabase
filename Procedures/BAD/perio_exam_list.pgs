@@ -1,0 +1,103 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.perio_exam_list(jsonb)                                     ::
+  ::  UsedBy      : Flutter -> rpc('perio_exam_list') (prontuario > periograma)   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 13/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Periogramas do paciente (LER na tela PATIENTS), mais recentes primeiro,
+    com os dentes e o resumo de cada exame (dentes presentes, pontos medidos,
+    % de sangramento e de placa, sondagem media, pontos de 4-5 mm e >= 6 mm e
+    nivel de inserção medio = sondagem + recessao).
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+
+  Output jsonb:
+    {"exams": [{"nr_exam", "dt_exam", "nr_professional", "vc_professional", "vc_notes", "vc_user", "dh_created",
+                "summary": {"qt_teeth", "qt_sites", "pc_bleeding", "pc_plaque", "vl_probing_mean",
+                            "qt_sites_4_5", "qt_sites_6", "vl_attachment_mean"},
+                "teeth": [{"vc_tooth", "id_missing", "it_mobility", "it_furcation", "qt_probing",
+                           "qt_recession", "id_bleeding", "id_plaque"}]}],
+     "permission": {"id_create", "id_update"}}
+
+  Errors: VERSION_MISMATCH, RECORD_BRANCH_REQUIRED, RECORD_FORBIDDEN, PATIENT_REQUIRED
+*/
+create or replace function ad.perio_exam_list(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _nr_patient bigint;
+  _perm       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'perio_exam_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RECORD_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RECORD_FORBIDDEN');
+  end if;
+  _nr_patient := (p_json ->> 'nr_patient')::bigint;
+  if _nr_patient is null then
+    raise exception '%', ad.fn_message('PATIENT_REQUIRED');
+  end if;
+
+  return jsonb_build_object(
+    'exams', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_exam', e.nr_exam, 'dt_exam', e.dt_exam, 'nr_professional', e.nr_professional,
+               'vc_professional', r.vc_name, 'vc_notes', e.vc_notes, 'vc_user', u.vc_name, 'dh_created', e.dh_created,
+               'summary', (
+                 select jsonb_build_object(
+                          'qt_teeth', count(distinct s.vc_tooth),
+                          'qt_sites', count(s.probing),
+                          'pc_bleeding', case when count(s.bleeding) = 0 then null
+                                              else round(100.0 * count(*) filter (where s.bleeding) / count(s.bleeding), 1) end,
+                          'pc_plaque', case when count(s.plaque) = 0 then null
+                                            else round(100.0 * count(*) filter (where s.plaque) / count(s.plaque), 1) end,
+                          'vl_probing_mean', round(avg(s.probing), 1),
+                          'qt_sites_4_5', count(*) filter (where s.probing between 4 and 5),
+                          'qt_sites_6', count(*) filter (where s.probing >= 6),
+                          'vl_attachment_mean', round(avg(s.probing + s.recession), 1))
+                   from (select t.vc_tooth, t.qt_probing[i] as probing, t.qt_recession[i] as recession,
+                                t.id_bleeding[i] as bleeding, t.id_plaque[i] as plaque
+                           from od.perio_tooth t
+                           cross join generate_series(1, 6) i
+                          where t.nr_company = e.nr_company and t.nr_branch = e.nr_branch
+                            and t.nr_patient = e.nr_patient and t.nr_exam = e.nr_exam and not t.id_missing) s),
+               'teeth', coalesce((select jsonb_agg(jsonb_build_object(
+                    'vc_tooth', t.vc_tooth, 'id_missing', t.id_missing, 'it_mobility', t.it_mobility,
+                    'it_furcation', t.it_furcation, 'qt_probing', to_jsonb(t.qt_probing),
+                    'qt_recession', to_jsonb(t.qt_recession), 'id_bleeding', to_jsonb(t.id_bleeding),
+                    'id_plaque', to_jsonb(t.id_plaque)) order by t.vc_tooth)
+                  from od.perio_tooth t
+                 where t.nr_company = e.nr_company and t.nr_branch = e.nr_branch
+                   and t.nr_patient = e.nr_patient and t.nr_exam = e.nr_exam), '[]'::jsonb))
+             order by e.dt_exam desc, e.nr_exam desc)
+        from od.perio_exam e
+        left join od.professional r on r.nr_company = e.nr_company and r.nr_branch = e.nr_branch
+                                   and r.nr_professional = e.nr_professional
+        left join ad.app_user u on u.nr_user = e.nr_user
+       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+         and e.it_status = 1), '[]'::jsonb),
+    'permission', jsonb_build_object(
+      'id_create', coalesce((_perm ->> 'id_create')::boolean, false) or coalesce((_perm ->> 'id_update')::boolean, false),
+      'id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.perio_exam_list(jsonb) from public, anon;
+grant execute on function ad.perio_exam_list(jsonb) to authenticated;

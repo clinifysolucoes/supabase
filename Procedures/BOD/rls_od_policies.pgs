@@ -341,3 +341,39 @@ drop policy if exists notify_message_select on od.notify_message;
 create policy notify_message_select on od.notify_message
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.chart_model
+drop policy if exists chart_model_select on od.chart_model;
+create policy chart_model_select on od.chart_model
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.chart_field
+drop policy if exists chart_field_select on od.chart_field;
+create policy chart_field_select on od.chart_field
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_chart
+drop policy if exists patient_chart_select on od.patient_chart;
+create policy patient_chart_select on od.patient_chart
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.patient_chart_value
+drop policy if exists patient_chart_value_select on od.patient_chart_value;
+create policy patient_chart_value_select on od.patient_chart_value
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.perio_exam
+drop policy if exists perio_exam_select on od.perio_exam;
+create policy perio_exam_select on od.perio_exam
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.perio_tooth
+drop policy if exists perio_tooth_select on od.perio_tooth;
+create policy perio_tooth_select on od.perio_tooth
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
