@@ -1,0 +1,191 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_report_treatments(...)                                  ::
+  ::  UsedBy      : ad.report_get                                                 ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 17/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Relatorios do grupo Tratamentos (a permissao ja foi checada por
+    ad.report_get). Helper interno (sem grant).
+      open_treatments     orcamentos aprovados no periodo com itens ainda nao
+                          realizados (quantos, valor que falta)
+      pending_procedures  itens desses orcamentos ainda nao realizados
+      revenue             faturamento: contas a receber com competencia no
+                          periodo (recebido e em aberto); o profissional vem
+                          do orcamento ou da consulta da conta
+      implants            procedimentos realizados no periodo cuja
+                          especialidade tem "implant" no nome
+  Input:
+    p_nr_company, p_nr_branch, p_report, p_d0, p_d1 (datas), p_from, p_to
+    (mesmo periodo no fuso da filial), p_prof (profissional ou null), p_limit
+  Output: jsonb {"rows", "summary", "by_professional", "qt"}
+*/
+create or replace function od.fn_report_treatments(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_report     text,
+  p_d0         date,
+  p_d1         date,
+  p_from       timestamptz,
+  p_to         timestamptz,
+  p_prof       bigint,
+  p_limit      integer)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _rows    jsonb;
+  _summary jsonb;
+  _byprof  jsonb := '[]'::jsonb;
+  _qt      integer;
+begin
+  if p_report = 'open_treatments' then
+    with items as (
+      select bu.nr_budget, bu.dh_accepted, bu.vc_title, bu.nr_professional, bu.nr_patient,
+             count(*) as qt_items,
+             count(*) filter (where i.dt_done is not null) as qt_done,
+             coalesce(sum(i.vl_total), 0) as vl_total,
+             coalesce(sum(i.vl_total) filter (where i.dt_done is null), 0) as vl_pending
+        from od.budget bu
+        join od.budget_item i on i.nr_company = bu.nr_company and i.nr_branch = bu.nr_branch and i.nr_budget = bu.nr_budget
+       where bu.nr_company = p_nr_company and bu.nr_branch = p_nr_branch and bu.it_status = 3
+         and bu.dh_accepted >= p_from and bu.dh_accepted < p_to
+         and (p_prof is null or bu.nr_professional = p_prof)
+       group by bu.nr_budget, bu.dh_accepted, bu.vc_title, bu.nr_professional, bu.nr_patient
+    ), base as (
+      select x.*, p.vc_name as vc_patient, p.vc_mobile, pr.vc_name as vc_professional
+        from items x
+        join od.patient p on p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.nr_patient = x.nr_patient
+        left join od.professional pr on pr.nr_company = p_nr_company and pr.nr_branch = p_nr_branch
+                                    and pr.nr_professional = x.nr_professional
+       where x.qt_done < x.qt_items
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dh_accepted', b.dh_accepted, 'vc_patient', b.vc_patient,
+                'vc_mobile', b.vc_mobile, 'vc_professional', b.vc_professional, 'vc_title', b.vc_title,
+                'qt_items', b.qt_items, 'qt_done', b.qt_done, 'vl_total', b.vl_total, 'vl_pending', b.vl_pending)
+                order by b.dh_accepted), '[]'::jsonb)
+         from (select * from base order by dh_accepted limit p_limit) b),
+      jsonb_build_object('qt_budgets', count(*),
+                         'qt_items_pending', coalesce(sum(qt_items - qt_done), 0),
+                         'vl_pending', coalesce(sum(vl_pending), 0)),
+      (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', g.nr_professional, 'vc_professional', g.vc_professional,
+                'qt_budgets', g.qt, 'vl_pending', g.vl) order by g.vc_professional), '[]'::jsonb)
+         from (select nr_professional, vc_professional, count(*) as qt, sum(vl_pending) as vl
+                 from base group by nr_professional, vc_professional) g),
+      count(*)
+      into _rows, _summary, _byprof, _qt
+      from base;
+
+  elsif p_report = 'pending_procedures' then
+    with base as (
+      select bu.dh_accepted, bu.nr_professional, p.vc_name as vc_patient, pr.vc_name as vc_professional,
+             coalesce(pc.vc_name, i.vc_description) as vc_procedure, i.vc_tooth, i.vl_total
+        from od.budget bu
+        join od.budget_item i on i.nr_company = bu.nr_company and i.nr_branch = bu.nr_branch and i.nr_budget = bu.nr_budget
+        join od.patient p on p.nr_company = bu.nr_company and p.nr_branch = bu.nr_branch and p.nr_patient = bu.nr_patient
+        left join od.procedure pc on pc.nr_company = i.nr_company and pc.nr_branch = i.nr_branch
+                                 and pc.nr_procedure = i.nr_procedure
+        left join od.professional pr on pr.nr_company = bu.nr_company and pr.nr_branch = bu.nr_branch
+                                    and pr.nr_professional = bu.nr_professional
+       where bu.nr_company = p_nr_company and bu.nr_branch = p_nr_branch and bu.it_status = 3
+         and i.dt_done is null
+         and bu.dh_accepted >= p_from and bu.dh_accepted < p_to
+         and (p_prof is null or bu.nr_professional = p_prof)
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dh_accepted', b.dh_accepted, 'vc_patient', b.vc_patient,
+                'vc_professional', b.vc_professional, 'vc_procedure', b.vc_procedure, 'vc_tooth', b.vc_tooth,
+                'vl_total', b.vl_total) order by b.dh_accepted, b.vc_patient), '[]'::jsonb)
+         from (select * from base order by dh_accepted, vc_patient limit p_limit) b),
+      jsonb_build_object('qt_items', count(*), 'vl_total', coalesce(sum(vl_total), 0)),
+      (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', g.nr_professional, 'vc_professional', g.vc_professional,
+                'qt_items', g.qt, 'vl_total', g.vl) order by g.vc_professional), '[]'::jsonb)
+         from (select nr_professional, vc_professional, count(*) as qt, coalesce(sum(vl_total), 0) as vl
+                 from base group by nr_professional, vc_professional) g),
+      count(*)
+      into _rows, _summary, _byprof, _qt
+      from base;
+
+  elsif p_report = 'revenue' then
+    with base as (
+      select coalesce(e.dt_competence, e.dt_due) as dt_competence, e.vc_description, e.vl_amount, e.it_status,
+             e.dt_paid, e.vl_paid, e.nr_patient, p.vc_name as vc_patient,
+             coalesce(bu.nr_professional, a.nr_professional) as nr_professional, pr.vc_name as vc_professional
+        from od.fin_entry e
+        left join od.patient p on p.nr_company = e.nr_company and p.nr_branch = e.nr_branch and p.nr_patient = e.nr_patient
+        left join od.budget bu on bu.nr_company = e.nr_company and bu.nr_branch = e.nr_branch and bu.nr_budget = e.nr_budget
+        left join od.appointment a on a.nr_company = e.nr_company and a.nr_branch = e.nr_branch
+                                  and a.nr_appointment = e.nr_appointment
+        left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
+                                    and pr.nr_professional = coalesce(bu.nr_professional, a.nr_professional)
+       where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch and e.it_kind = 1 and e.it_status <> 90
+         and coalesce(e.dt_competence, e.dt_due) between p_d0 and p_d1
+         and (p_prof is null or coalesce(bu.nr_professional, a.nr_professional) = p_prof)
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dt_competence', b.dt_competence, 'vc_patient', b.vc_patient,
+                'vc_description', b.vc_description, 'vc_professional', b.vc_professional, 'vl_amount', b.vl_amount,
+                'it_status', b.it_status, 'dt_paid', b.dt_paid) order by b.dt_competence, b.vc_patient), '[]'::jsonb)
+         from (select * from base order by dt_competence, vc_patient limit p_limit) b),
+      jsonb_build_object(
+        'vl_total', coalesce(sum(vl_amount), 0),
+        'vl_received', coalesce(sum(coalesce(vl_paid, vl_amount)) filter (where it_status = 2), 0),
+        'vl_open', coalesce(sum(vl_amount) filter (where it_status = 1), 0),
+        'qt_patients', count(distinct nr_patient),
+        'vl_ticket', case when count(distinct nr_patient) = 0 then 0
+                          else round(sum(vl_amount) / count(distinct nr_patient), 2) end),
+      (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', g.nr_professional, 'vc_professional', g.vc_professional,
+                'vl_total', g.vl_total, 'vl_received', g.vl_received, 'vl_open', g.vl_open) order by g.vc_professional), '[]'::jsonb)
+         from (select nr_professional, vc_professional, sum(vl_amount) as vl_total,
+                      coalesce(sum(coalesce(vl_paid, vl_amount)) filter (where it_status = 2), 0) as vl_received,
+                      coalesce(sum(vl_amount) filter (where it_status = 1), 0) as vl_open
+                 from base group by nr_professional, vc_professional) g),
+      count(*)
+      into _rows, _summary, _byprof, _qt
+      from base;
+
+  else /* implants */
+    with base as (
+      select e.dh_evolution, e.nr_patient, e.nr_professional, p.vc_name as vc_patient, pr.vc_name as vc_professional,
+             coalesce(pc.vc_name, i.vc_description) as vc_procedure, coalesce(e.vc_tooth, i.vc_tooth) as vc_tooth
+        from od.clinical_evolution e
+        join od.patient p on p.nr_company = e.nr_company and p.nr_branch = e.nr_branch and p.nr_patient = e.nr_patient
+        left join od.budget_item i on i.nr_company = e.nr_company and i.nr_branch = e.nr_branch
+                                  and i.nr_budget = e.nr_budget and i.nr_item = e.nr_item
+        join od.procedure pc on pc.nr_company = e.nr_company and pc.nr_branch = e.nr_branch
+                            and pc.nr_procedure = coalesce(e.nr_procedure, i.nr_procedure)
+        join od.specialty s on s.nr_company = pc.nr_company and s.nr_branch = pc.nr_branch
+                           and s.nr_specialty = pc.nr_specialty and s.vc_name ilike '%implant%'
+        left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
+                                    and pr.nr_professional = e.nr_professional
+       where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch and e.it_status = 1
+         and e.dh_evolution >= p_from and e.dh_evolution < p_to
+         and (p_prof is null or e.nr_professional = p_prof)
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dh_evolution', b.dh_evolution, 'vc_patient', b.vc_patient,
+                'vc_professional', b.vc_professional, 'vc_procedure', b.vc_procedure, 'vc_tooth', b.vc_tooth)
+                order by b.dh_evolution), '[]'::jsonb)
+         from (select * from base order by dh_evolution limit p_limit) b),
+      jsonb_build_object('qt_procedures', count(*), 'qt_patients', count(distinct nr_patient)),
+      (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', g.nr_professional, 'vc_professional', g.vc_professional,
+                'qt_procedures', g.qt) order by g.vc_professional), '[]'::jsonb)
+         from (select nr_professional, vc_professional, count(*) as qt from base group by nr_professional, vc_professional) g),
+      count(*)
+      into _rows, _summary, _byprof, _qt
+      from base;
+  end if;
+
+  return jsonb_build_object('rows', _rows, 'summary', _summary, 'by_professional', _byprof, 'qt', _qt);
+end;
+$$;
+
+revoke all on function od.fn_report_treatments(bigint, bigint, text, date, date, timestamptz, timestamptz, bigint, integer)
+  from public, anon, authenticated;

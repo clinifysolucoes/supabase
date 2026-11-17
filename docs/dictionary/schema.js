@@ -10466,6 +10466,34 @@ window.DICTIONARY = {
       "description": "Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function."
     },
     {
+      "name": "fn_report_agenda",
+      "signature": "od.fn_report_agenda(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "Relatórios do grupo Agenda para ad.report_get: consultas do período por situação (appointments), primeira consulta do paciente (first_visit) e alertas de retorno com a próxima consulta (return_alerts). Devolve {rows, summary, by_professional, qt}."
+    },
+    {
+      "name": "fn_report_patients",
+      "signature": "od.fn_report_patients(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "Relatórios do grupo Pacientes para ad.report_get: faixa etária e sexo (age_groups), cidade e bairro (location), última consulta atendida sem retorno marcado (last_visit), orçamentos e conversão (budgets), contas a receber vencidas (overdue) e guias por convênio com glosa (health_plans). Devolve {rows, summary, by_professional, qt}."
+    },
+    {
+      "name": "fn_report_treatments",
+      "signature": "od.fn_report_treatments(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "Relatórios do grupo Tratamentos para ad.report_get: orçamentos aprovados com itens a realizar (open_treatments), itens não realizados (pending_procedures), faturamento por competência com recebido e em aberto (revenue) e procedimentos de especialidade de implante realizados (implants). Devolve {rows, summary, by_professional, qt}."
+    },
+    {
+      "name": "fn_report_general",
+      "signature": "od.fn_report_general(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "Relatórios do grupo Geral para ad.report_get: acessos por usuário e app (user_access), atividades do log por usuário e ação (user_actions) e mensagens de WhatsApp, e-mail e SMS por canal e tipo (messages). Devolve {rows, summary, by_professional, qt}."
+    },
+    {
       "name": "fn_chart_default",
       "signature": "od.fn_chart_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)",
       "kind": "helper",
@@ -11218,7 +11246,7 @@ window.DICTIONARY = {
       "signature": "ad.report_get(p_json jsonb)",
       "kind": "rpc",
       "grant": "authenticated",
-      "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE). Devolve linhas (até 2000), resumo e resumo por profissional.",
+      "description": "Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE); e, pelos helpers od.fn_report_*: agenda (appointments, first_visit, return_alerts), pacientes (age_groups e location sem período, last_visit, budgets, overdue, health_plans), tratamentos (open_treatments, pending_procedures, revenue, implants) e geral (user_access, user_actions, messages). overdue, health_plans e revenue exigem ler em FINANCE; budgets, open_treatments e pending_procedures em BUDGETS; user_access e user_actions em LOGS. Devolve linhas (até 2000), resumo e resumo por profissional.",
       "errors": [
         "VERSION_MISMATCH",
         "REPORT_BRANCH_REQUIRED",

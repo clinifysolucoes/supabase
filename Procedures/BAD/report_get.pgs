@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 09/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - relatorios de agenda, pacientes e tratamentos    ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Relatorios da filial num periodo (LER na tela REPORTS; ate 366 dias), com
@@ -22,11 +22,20 @@
       vc_report = 'commissions'  contas a pagar de profissional (comissoes) com
                                  competencia no periodo, pagas e a pagar
                                  (exige tambem LER em FINANCE)
+    Os demais ficam nos helpers od.fn_report_* (mesmo formato de saida):
+      agenda        appointments, first_visit, return_alerts
+      pacientes     age_groups, location (sem periodo), last_visit, budgets,
+                    overdue, health_plans
+      tratamentos   open_treatments, pending_procedures, revenue, implants
+      geral         user_access, user_actions, messages
+    Permissoes alem de LER em REPORTS: overdue, health_plans e revenue exigem
+    LER em FINANCE; budgets, open_treatments e pending_procedures exigem LER
+    em BUDGETS; user_access e user_actions exigem LER em LOGS.
 
   Input p_json:
     nr_version       integer  obrigatorio = 1
     nr_company, nr_branch  bigint  obrigatorios
-    vc_report        text     no_show | birthdays | procedures | commissions
+    vc_report        text     no_show | birthdays | procedures | commissions | os da lista acima
     dt_start, dt_end date     obrigatorios (dt_end >= dt_start, ate 366 dias)
     nr_professional  bigint   opcional (nao vale para birthdays)
 
@@ -75,11 +84,19 @@ begin
   _nr_user := private.fn_current_user_nr();
   if _nr_user is null
      or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'REPORTS') ->> 'id_read')::boolean, false)
-     or (_report = 'commissions'
-         and not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false)) then
+     or (_report in ('commissions', 'overdue', 'health_plans', 'revenue')
+         and not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false))
+     or (_report in ('budgets', 'open_treatments', 'pending_procedures')
+         and not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'BUDGETS') ->> 'id_read')::boolean, false))
+     or (_report in ('user_access', 'user_actions')
+         and not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'LOGS') ->> 'id_read')::boolean, false)) then
     raise exception '%', ad.fn_message('REPORT_FORBIDDEN');
   end if;
-  if _report not in ('no_show', 'birthdays', 'procedures', 'commissions') then
+  if _report not in ('no_show', 'birthdays', 'procedures', 'commissions',
+                     'appointments', 'first_visit', 'return_alerts',
+                     'age_groups', 'location', 'last_visit', 'budgets', 'overdue', 'health_plans',
+                     'open_treatments', 'pending_procedures', 'revenue', 'implants',
+                     'user_access', 'user_actions', 'messages') then
     raise exception '%', ad.fn_message('REPORT_INVALID');
   end if;
   begin
@@ -96,7 +113,22 @@ begin
   _from := _d0::timestamp at time zone _tz;
   _to   := (_d1 + 1)::timestamp at time zone _tz;
 
-  if _report = 'no_show' then
+  if _report not in ('no_show', 'birthdays', 'procedures', 'commissions') then
+    _rows := case
+      when _report in ('appointments', 'first_visit', 'return_alerts') then
+        od.fn_report_agenda(_nr_company, _nr_branch, _report, _d0, _d1, _from, _to, _prof, _limit)
+      when _report in ('age_groups', 'location', 'last_visit', 'budgets', 'overdue', 'health_plans') then
+        od.fn_report_patients(_nr_company, _nr_branch, _report, _d0, _d1, _from, _to, _prof, _limit)
+      when _report in ('open_treatments', 'pending_procedures', 'revenue', 'implants') then
+        od.fn_report_treatments(_nr_company, _nr_branch, _report, _d0, _d1, _from, _to, _prof, _limit)
+      else od.fn_report_general(_nr_company, _nr_branch, _report, _d0, _d1, _from, _to, _prof, _limit)
+    end;
+    _summary := _rows -> 'summary';
+    _byprof  := _rows -> 'by_professional';
+    _qt      := (_rows ->> 'qt')::integer;
+    _rows    := _rows -> 'rows';
+
+  elsif _report = 'no_show' then
     with base as (
       select a.*, pa.vc_name as vc_patient, pa.vc_mobile, pr.vc_name as vc_professional
         from od.appointment a
