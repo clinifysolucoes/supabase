@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 08/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - reenvio do lembrete                              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracao do WhatsApp da filial (LER na tela SETTINGS): numero, alertas
@@ -19,7 +19,7 @@
 
   Output jsonb:
     {"settings": {"id_enabled", "vc_phone_number_id", "vc_waba_id", "vc_display_phone", "vc_language",
-                  "id_reminder", "qt_reminder_hours", "vc_tpl_reminder", "id_booked", "vc_tpl_booked",
+                  "id_reminder", "qt_reminder_hours", "qt_resend", "qt_resend_hours", "vc_tpl_reminder", "id_booked", "vc_tpl_booked",
                   "id_birthday", "vc_tpl_birthday", "id_return", "vc_tpl_return", "qt_send_hour",
                   "id_token", "dh_token_saved", "id_saved"},
      "totals": {"<it_status>": qt, ...}, "permission": {"id_update"}}
@@ -60,6 +60,7 @@ begin
       'vc_phone_number_id', _w.vc_phone_number_id, 'vc_waba_id', _w.vc_waba_id,
       'vc_display_phone', _w.vc_display_phone, 'vc_language', coalesce(_w.vc_language, 'pt_BR'),
       'id_reminder', coalesce(_w.id_reminder, true), 'qt_reminder_hours', coalesce(_w.qt_reminder_hours, 24),
+      'qt_resend', coalesce(_w.qt_resend, 0), 'qt_resend_hours', coalesce(_w.qt_resend_hours, 4),
       'vc_tpl_reminder', coalesce(_w.vc_tpl_reminder, 'lembrete_consulta'),
       'id_booked', coalesce(_w.id_booked, false), 'vc_tpl_booked', coalesce(_w.vc_tpl_booked, 'consulta_agendada'),
       'id_birthday', coalesce(_w.id_birthday, false),

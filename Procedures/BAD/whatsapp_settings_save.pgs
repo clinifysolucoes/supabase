@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 08/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - reenvio do lembrete                              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava a configuracao do WhatsApp da filial (ALTERAR na tela SETTINGS), com
@@ -20,6 +20,7 @@
     nr_company, nr_branch  bigint  obrigatorios
     id_enabled, vc_phone_number_id, vc_waba_id, vc_display_phone, vc_language,
     id_reminder, qt_reminder_hours (1 a 72), vc_tpl_reminder, id_booked, vc_tpl_booked,
+    qt_resend (0 a 3 reenvios do lembrete sem resposta), qt_resend_hours (1 a 24),
     id_birthday, vc_tpl_birthday, id_return, vc_tpl_return, qt_send_hour (6 a 20)
     id_check_only       boolean  opcional: so valida a permissao (nao grava)
 
@@ -70,7 +71,8 @@ begin
   _js := (select coalesce(jsonb_object_agg(k, v), '{}'::jsonb) from jsonb_each(p_json) e(k, v)
            where k in ('id_enabled', 'vc_phone_number_id', 'vc_waba_id', 'vc_display_phone', 'vc_language',
                        'id_reminder', 'qt_reminder_hours', 'vc_tpl_reminder', 'id_booked', 'vc_tpl_booked',
-                       'id_birthday', 'vc_tpl_birthday', 'id_return', 'vc_tpl_return', 'qt_send_hour'));
+                       'id_birthday', 'vc_tpl_birthday', 'id_return', 'vc_tpl_return', 'qt_send_hour',
+                       'qt_resend', 'qt_resend_hours'));
   _js := _js || (select coalesce(jsonb_object_agg(k,
                    case when jsonb_typeof(v) = 'string' then
                           to_jsonb(nullif(case when k in ('vc_phone_number_id', 'vc_waba_id', 'vc_display_phone')
@@ -93,6 +95,8 @@ begin
   if _new.id_enabled is null or _new.id_reminder is null or _new.id_booked is null or _new.id_birthday is null
      or _new.id_return is null or _new.qt_reminder_hours is null or _new.qt_reminder_hours not between 1 and 72
      or _new.qt_send_hour is null or _new.qt_send_hour not between 6 and 20
+     or _new.qt_resend is null or _new.qt_resend not between 0 and 3
+     or _new.qt_resend_hours is null or _new.qt_resend_hours not between 1 and 24
      or _new.vc_language is null or _new.vc_language !~ '^[a-z]{2}(_[A-Z]{2})?$'
      or (_new.vc_phone_number_id is not null and _new.vc_phone_number_id !~ '^[0-9]{5,40}$')
      or (_new.vc_waba_id is not null and _new.vc_waba_id !~ '^[0-9]{5,40}$')
@@ -109,7 +113,8 @@ begin
     id_reminder = _new.id_reminder, qt_reminder_hours = _new.qt_reminder_hours, vc_tpl_reminder = _new.vc_tpl_reminder,
     id_booked = _new.id_booked, vc_tpl_booked = _new.vc_tpl_booked,
     id_birthday = _new.id_birthday, vc_tpl_birthday = _new.vc_tpl_birthday,
-    id_return = _new.id_return, vc_tpl_return = _new.vc_tpl_return, qt_send_hour = _new.qt_send_hour
+    id_return = _new.id_return, vc_tpl_return = _new.vc_tpl_return, qt_send_hour = _new.qt_send_hour,
+    qt_resend = _new.qt_resend, qt_resend_hours = _new.qt_resend_hours
    where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
 
   -- desligar cancela o que ainda estava na fila

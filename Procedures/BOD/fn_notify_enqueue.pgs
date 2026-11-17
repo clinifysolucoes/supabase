@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 12/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - reenvio do lembrete sem confirmacao              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Poe na fila (od.notify_message) os alertas por e-mail e SMS devidos de
@@ -21,7 +21,11 @@
       2 agendamento  consulta Agendado/Confirmado criada na ultima hora e futura
       4 retorno      dt_return_alert = hoje, a partir de qt_send_hour no fuso
                      da filial
-    O texto vem do modelo da filial (od.fn_notify_render). Helper interno.
+    O texto vem do modelo da filial (od.fn_notify_render).
+    Reenvio (qt_resend > 0): lembrete enviado ha qt_resend_hours horas ou mais,
+    sem confirmacao, de consulta futura ainda Agendado, ganha nova linha com
+    qt_resend + 1 (novo token), ate qt_resend vezes, so entre 07:00 e 21:59 no
+    fuso da filial. Helper interno.
   Output: integer (mensagens enfileiradas)
 */
 create or replace function od.fn_notify_enqueue()
@@ -112,6 +116,36 @@ begin
     on conflict do nothing;
     get diagnostics _k = row_count;
     _n := _n + _k;
+
+    -- reenvio do lembrete sem confirmacao
+    if _s.qt_resend > 0 and extract(hour from _now) between 7 and 21 then
+      with ult as (
+        select distinct on (m.it_channel, m.nr_appointment) m.*
+          from od.notify_message m
+         where m.nr_company = _s.nr_company and m.nr_branch = _s.nr_branch and m.it_kind = 1
+           and m.nr_appointment is not null
+         order by m.it_channel, m.nr_appointment, m.qt_resend desc
+      ), devido as (
+        select u.* from ult u
+          join od.appointment a on a.nr_company = u.nr_company and a.nr_branch = u.nr_branch
+                               and a.nr_appointment = u.nr_appointment
+         where u.it_status = 2 and u.dh_confirmed is null and u.qt_resend < _s.qt_resend
+           and u.dh_sent <= now() - make_interval(hours => _s.qt_resend_hours)
+           and a.it_status = 1 and a.dh_start > now()
+           and ((u.it_channel = 1 and _s.id_email) or (u.it_channel = 2 and _s.id_sms))
+      )
+      insert into od.notify_message (nr_company, nr_branch, nr_message, it_channel, it_kind, nr_patient, nr_appointment,
+                                     dt_ref, vc_to, vc_subject, tx_body, uu_token, qt_resend)
+      select d.nr_company, d.nr_branch,
+             (select coalesce(max(m.nr_message), 0) from od.notify_message m
+               where m.nr_company = _s.nr_company and m.nr_branch = _s.nr_branch) + row_number() over (),
+             d.it_channel, 1, d.nr_patient, d.nr_appointment, d.dt_ref, d.vc_to, d.vc_subject, d.tx_body,
+             gen_random_uuid(), d.qt_resend + 1
+        from devido d
+      on conflict do nothing;
+      get diagnostics _k = row_count;
+      _n := _n + _k;
+    end if;
   end loop;
   return _n;
 end;
