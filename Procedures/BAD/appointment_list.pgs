@@ -173,7 +173,7 @@ begin
                          from od.whatsapp_message m
                         where m.nr_company = a.nr_company and m.nr_branch = a.nr_branch
                           and m.nr_appointment = a.nr_appointment and m.it_kind = 1
-                        order by m.nr_message desc
+                        order by m.vc_reply is not null desc, m.nr_message desc
                         limit 1) wa on true
    where a.nr_company = _nr_company
      and a.nr_branch  = _nr_branch

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 08/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - reenvio do lembrete sem resposta                 ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Poe na fila (od.whatsapp_message) os alertas devidos de todas as filiais
@@ -20,7 +20,11 @@
       4 retorno      dt_return_alert = hoje, a partir de qt_send_hour
     Parametros do modelo (corpo): 1 primeiro nome, 2 clinica e, no lembrete e
     no agendamento, 3 data dd/mm, 4 hora, 5 profissional; no retorno 3 o texto
-    do alerta. Helper interno (sem grant).
+    do alerta.
+    Reenvio (qt_resend > 0): lembrete entregue/lido ha qt_resend_hours horas ou
+    mais, sem resposta, de consulta futura ainda Agendado, ganha nova linha
+    com qt_resend + 1, ate qt_resend vezes, so entre 07:00 e 21:59 no fuso da
+    filial. Helper interno (sem grant).
   Output: integer (mensagens enfileiradas)
 */
 create or replace function od.fn_whatsapp_enqueue()
@@ -114,6 +118,34 @@ begin
     on conflict do nothing;
     get diagnostics _k = row_count;
     _n := _n + _k;
+
+    -- reenvio do lembrete sem resposta
+    if _s.qt_resend > 0 and extract(hour from _now) between 7 and 21 then
+      with ult as (
+        select distinct on (m.nr_appointment) m.*
+          from od.whatsapp_message m
+         where m.nr_company = _s.nr_company and m.nr_branch = _s.nr_branch and m.it_kind = 1
+           and m.nr_appointment is not null
+         order by m.nr_appointment, m.qt_resend desc
+      ), devido as (
+        select u.* from ult u
+          join od.appointment a on a.nr_company = u.nr_company and a.nr_branch = u.nr_branch
+                               and a.nr_appointment = u.nr_appointment
+         where u.it_status in (2, 3, 4) and u.vc_reply is null and u.qt_resend < _s.qt_resend
+           and u.dh_sent <= now() - make_interval(hours => _s.qt_resend_hours)
+           and a.it_status = 1 and a.dh_start > now()
+      )
+      insert into od.whatsapp_message (nr_company, nr_branch, nr_message, it_kind, nr_patient, nr_appointment, dt_ref,
+                                       vc_to, vc_template, js_params, qt_resend)
+      select d.nr_company, d.nr_branch,
+             (select coalesce(max(m.nr_message), 0) from od.whatsapp_message m
+               where m.nr_company = _s.nr_company and m.nr_branch = _s.nr_branch) + row_number() over (),
+             1, d.nr_patient, d.nr_appointment, d.dt_ref, d.vc_to, d.vc_template, d.js_params, d.qt_resend + 1
+        from devido d
+      on conflict do nothing;
+      get diagnostics _k = row_count;
+      _n := _n + _k;
+    end if;
   end loop;
   return _n;
 end;

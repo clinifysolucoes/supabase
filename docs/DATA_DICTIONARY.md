@@ -770,6 +770,8 @@ erDiagram
     boolean id_return
     varchar vc_tpl_return
     smallint qt_send_hour
+    smallint qt_resend
+    smallint qt_resend_hours
   }
   whatsapp_secret {
     bigint nr_company PK, FK
@@ -795,6 +797,7 @@ erDiagram
     timestamptz dh_status
     varchar vc_reply
     timestamptz dh_reply
+    smallint qt_resend
   }
   fin_cash_session {
     bigint nr_company PK, FK
@@ -1200,6 +1203,8 @@ erDiagram
     varchar vc_tpl_reminder
     varchar vc_tpl_booked
     varchar vc_tpl_return
+    smallint qt_resend
+    smallint qt_resend_hours
   }
   notify_message {
     bigint nr_company PK, FK
@@ -1219,6 +1224,7 @@ erDiagram
     varchar vc_error
     timestamptz dh_sent
     timestamptz dh_confirmed
+    smallint qt_resend
   }
   chart_model {
     bigint nr_company PK, FK
@@ -2326,6 +2332,8 @@ WhatsApp Cloud API (Meta) da filial com o número da própria clínica: identifi
 | `id_return` | `boolean` |  | NOT NULL | `false` | Manda o aviso na data do alerta de retorno do paciente. |
 | `vc_tpl_return` | `varchar(80)` |  | NOT NULL | `'retorno_paciente'` | Modelo de retorno: {{1}} nome, {{2}} clínica, {{3}} texto do alerta. |
 | `qt_send_hour` | `smallint` |  | NOT NULL | `9` | A partir de que hora (fuso da filial) saem aniversário e retorno (6 a 20). |
+| `qt_resend` | `smallint` |  | NOT NULL | `0` | Reenvios do lembrete quando o paciente não confirma (0 a 3; 0 desliga). |
+| `qt_resend_hours` | `smallint` |  | NOT NULL | `4` | Horas entre um envio do lembrete e o reenvio (1 a 24); reenvia só entre 07:00 e 21:59 no fuso da filial. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -2375,6 +2383,7 @@ Fila e histórico dos alertas por WhatsApp: enfileirados por od.fn_whatsapp_enqu
 | `dh_status` | `timestamptz` |  | NULL |  | Última mudança de situação. |
 | `vc_reply` | `varchar(20)` |  | NULL |  | Resposta do paciente pelos botões. Valores: CONFIRM = Confirmou (a consulta Agendado vira Confirmado); RESCHEDULE = Pediu para remarcar (anotado na consulta). |
 | `dh_reply` | `timestamptz` |  | NULL |  | Quando respondeu. |
+| `qt_resend` | `smallint` |  | NOT NULL | `0` | Número do reenvio do lembrete (0 = primeiro envio; só lembretes têm reenvio). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3092,6 +3101,8 @@ Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais 
 | `vc_tpl_reminder` | `varchar(500)` |  | NOT NULL |  | Texto do lembrete ({{link}} = link para confirmar). |
 | `vc_tpl_booked` | `varchar(500)` |  | NOT NULL |  | Texto da consulta agendada. |
 | `vc_tpl_return` | `varchar(500)` |  | NOT NULL |  | Texto do retorno ({{retorno}} = texto do alerta da ficha). |
+| `qt_resend` | `smallint` |  | NOT NULL | `0` | Reenvios do lembrete quando o paciente não confirma (0 a 3; 0 desliga). |
+| `qt_resend_hours` | `smallint` |  | NOT NULL | `4` | Horas entre um envio do lembrete e o reenvio (1 a 24); reenvia só entre 07:00 e 21:59 no fuso da filial. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3123,6 +3134,7 @@ Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o 
 | `vc_error` | `varchar(500)` |  | NULL |  | Erro do envio. |
 | `dh_sent` | `timestamptz` |  | NULL |  | Data/hora do envio. |
 | `dh_confirmed` | `timestamptz` |  | NULL |  | Quando o paciente confirmou pelo link. |
+| `qt_resend` | `smallint` |  | NOT NULL | `0` | Número do reenvio do lembrete (0 = primeiro envio; só lembretes têm reenvio). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3357,8 +3369,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.stock_movement_list(p_json jsonb)` | authenticated | Movimentos de estoque num período (ler em STOCK; padrão 30 dias, até 366), por material e tipo, com fornecedor, paciente e usuário, e o resumo em valor (entradas, saídas, baixas pelos procedimentos, ajustes). |
 | `ad.referral_list(p_json jsonb)` | authenticated | Controle de Indicação (ler em REFERRALS) dos pacientes cadastrados no período (padrão 12 meses, até 2 anos): indicados com conversão (orçamento aprovado), valor aprovado (ler em BUDGETS) e recompensa; ranking de quem indicou com valor recebido dos indicados (ler em FINANCE) e recompensas pendentes; novos e convertidos por origem. |
 | `ad.referral_reward_save(p_json jsonb)` | authenticated | Registra (I) ou desfaz (D) a recompensa dada a quem indicou um paciente (alterar em REFERRALS): o que foi dado, data e valor; uma por paciente indicado. |
-| `ad.notify_settings_get(p_json jsonb)` | authenticated | Configuração dos alertas por e-mail e SMS da filial (ler em SETTINGS), com os padrões das colunas quando ainda não configurada, e o resumo dos últimos 30 dias por canal e situação. |
-| `ad.notify_settings_save(p_json jsonb)` | authenticated | Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila. |
+| `ad.notify_settings_get(p_json jsonb)` | authenticated | Configuração dos alertas por e-mail e SMS da filial (ler em SETTINGS), com os padrões das colunas quando ainda não configurada, e o resumo dos últimos 30 dias por canal e situação. Inclui qt_resend e qt_resend_hours. |
+| `ad.notify_settings_save(p_json jsonb)` | authenticated | Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila. Também qt_resend (0 a 3) e qt_resend_hours (1 a 24). |
 | `ad.notify_message_list(p_json jsonb)` | authenticated | Histórico dos alertas por e-mail e SMS (ler em SETTINGS) por canal, tipo e situação, paginado, com a confirmação pelo link. |
 | `ad.notify_dispatch(p_json jsonb)` | service_role | Lado servidor dos alertas por e-mail e SMS (só service_role, Edge Functions notify-send e notify-confirm): CLAIM enfileira o devido e entrega o lote, RESULT grava enviada/erro, CONFIRM confirma a consulta pelo token do link do lembrete. |
 | `ad.chart_model_list(p_json jsonb)` | authenticated | Modelos de ficha por especialidade com os campos (ler em PATIENTS ou SETTINGS); na primeira chamada cria os prontos (Ortodontia, Endodontia, Implantodontia, Periodontia). |
@@ -3378,8 +3390,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.patient_document_list(p_json jsonb)` | authenticated | Documentos emitidos do paciente (ler na tela PATIENTS) com os medicamentos, o paciente e o emitente para o PDF, e as permissões. Cada documento traz qt_signatures. |
 | `ad.signature_save(p_json jsonb)` | authenticated | Registra uma assinatura eletrônica simples coletada na tela: documento (criar ou alterar em PATIENTS) ou orçamento em aberto/aprovado (alterar em BUDGETS). Exige o aceite; guarda imagem, assinante, hash do conteúdo, código de verificação, IP e navegador. Grava event_log sem a imagem. |
 | `ad.signature_list(p_json jsonb)` | authenticated | Assinaturas de um documento (ler em PATIENTS) ou orçamento (ler em BUDGETS) com a imagem e id_valid (o conteúdo atual tem o mesmo hash da assinatura). |
-| `ad.whatsapp_settings_get(p_json jsonb)` | authenticated | Configuração do WhatsApp da filial (ler na tela SETTINGS), se a chave já foi salva (nunca a devolve) e o total de mensagens dos últimos 30 dias por situação. |
-| `ad.whatsapp_settings_save(p_json jsonb)` | authenticated | Grava a configuração do WhatsApp (alterar na tela SETTINGS), update parcial; id_check_only só valida a permissão. Chamada pela Edge Function whatsapp-config (a chave da Meta não passa por aqui). Ligar exige número e chave; desligar cancela a fila. Grava event_log. |
+| `ad.whatsapp_settings_get(p_json jsonb)` | authenticated | Configuração do WhatsApp da filial (ler na tela SETTINGS), se a chave já foi salva (nunca a devolve) e o total de mensagens dos últimos 30 dias por situação. Inclui qt_resend e qt_resend_hours. |
+| `ad.whatsapp_settings_save(p_json jsonb)` | authenticated | Grava a configuração do WhatsApp (alterar na tela SETTINGS), update parcial; id_check_only só valida a permissão. Chamada pela Edge Function whatsapp-config (a chave da Meta não passa por aqui). Ligar exige número e chave; desligar cancela a fila. Grava event_log. Também qt_resend (0 a 3) e qt_resend_hours (1 a 24). |
 | `ad.whatsapp_message_list(p_json jsonb)` | authenticated | Histórico dos alertas por WhatsApp da filial (ler na tela SETTINGS), mais recentes primeiro, com paciente, consulta, situação e resposta; filtro por tipo e situação, paginado. |
 | `ad.whatsapp_dispatch(p_json jsonb)` | service_role | Lado servidor do WhatsApp, só service_role (Edge Functions): CLAIM (enfileira e pega um lote com número e chave cifrada), RESULT (enviada/erro), WEBHOOK (situações e respostas: Confirmar confirma a consulta, Remarcar anota), SECRET (grava a chave cifrada) e CONFIG (dados para o teste). |
 | `ad.patient_file_save(p_json jsonb)` | authenticated | Registro das fotos e exames do paciente na tela PATIENTS, chamado pela Edge Function patient-file antes da URL assinada: I (criar ou alterar) reserva o caminho no bucket patient (até 20 MB; imagem, PDF ou DICOM em exame), U (alterar) muda categoria, data, dente e descrição, DELETE (alterar) devolve o caminho para apagar o arquivo. Grava event_log só com o nome do arquivo. |
@@ -3433,14 +3445,14 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_medication_default(p_nr_company bigint, p_nr_branch bigint, p_nr_user bigint)` | interna | Cria a lista inicial de 30 medicamentos usuais na odontologia com posologia de referência quando a filial ainda não tem nenhum; usado por medication_list. |
 | `od.fn_online_slots(p_nr_company bigint, p_nr_branch bigint, p_nr_professional bigint, p_date date, p_min_hours integer)` | interna | Horários livres de um profissional num dia (fuso da filial) na duração qt_slot_minutes: dentro do horário dele (ou da clínica), a partir de agora + antecedência, sem compromisso da clínica e abaixo de qt_max_parallel; encaixes não ocupam. |
 | `od.fn_signature_hash(p_nr_company bigint, p_nr_branch bigint, p_it_target smallint, p_nr_patient bigint, p_nr_key bigint)` | interna | SHA-256 (hex) do conteúdo assinável: documento (título, texto, data, medicamentos) ou orçamento (paciente, datas, itens, desconto, total, condição). Mesmo cálculo na assinatura e na conferência. |
-| `od.fn_whatsapp_enqueue()` | interna | Enfileira os alertas devidos de todas as filiais com WhatsApp ligado: lembrete (consultas Agendado nas próximas horas), aviso de agendamento (criadas na última hora), aniversário e retorno (a partir da hora de envio, no fuso da filial). Não repete. |
+| `od.fn_whatsapp_enqueue()` | interna | Enfileira os alertas devidos de todas as filiais com WhatsApp ligado: lembrete (consultas Agendado nas próximas horas), aviso de agendamento (criadas na última hora), aniversário e retorno (a partir da hora de envio, no fuso da filial). Não repete. Reenvio do lembrete sem confirmação: até qt_resend vezes, a cada qt_resend_hours horas, só entre 07:00 e 21:59 no fuso da filial, enquanto a consulta futura continuar Agendado. |
 | `od.fn_whatsapp_phone(p_phone text)` | interna | Celular brasileiro (só dígitos) no formato do WhatsApp (55 + DDD + 9 + número); fixo ou inválido devolve null. |
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
 | `od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)` | interna | Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo). |
 | `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
-| `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. |
+| `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. Reenvio do lembrete sem confirmação: até qt_resend vezes, a cada qt_resend_hours horas, só entre 07:00 e 21:59 no fuso da filial, enquanto a consulta futura continuar Agendado. |
 | `od.fn_notify_render(p_tpl text, p_vars jsonb)` | interna | Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function. |
 | `od.fn_report_agenda(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Agenda para ad.report_get: consultas do período por situação (appointments), primeira consulta do paciente (first_visit), alertas de retorno com a próxima consulta (return_alerts) e consultas por categoria (categories) e por marcador (markers). Devolve {rows, summary, by_professional, qt}. |
 | `od.fn_report_patients(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Pacientes para ad.report_get: faixa etária e sexo (age_groups), cidade e bairro (location), última consulta atendida sem retorno marcado (last_visit), orçamentos e conversão (budgets), contas a receber vencidas (overdue) e guias por convênio com glosa (health_plans). Devolve {rows, summary, by_professional, qt}. |

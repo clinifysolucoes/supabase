@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 12/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - reenvio do lembrete                              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava a configuracao dos alertas por e-mail e SMS da filial (ALTERAR na
@@ -20,7 +20,8 @@
     nr_company, nr_branch  bigint  obrigatorios
     id_email, id_sms, id_reminder, id_booked, id_return  boolean
     vc_email_from_name (ate 80), vc_email_reply_to (e-mail)
-    qt_reminder_hours (1 a 72), qt_send_hour (6 a 20)
+    qt_reminder_hours (1 a 72), qt_send_hour (6 a 20), qt_resend (0 a 3 reenvios do
+    lembrete sem confirmacao), qt_resend_hours (1 a 24 horas entre os reenvios)
     vc_tpl_reminder, vc_tpl_booked, vc_tpl_return  text (1 a 500)
 
   Output jsonb: {"id_email", "id_sms"}
@@ -65,7 +66,7 @@ begin
                                                    then to_jsonb(nullif(trim(v #>> '{}'), '')) else v end), '{}'::jsonb)
             from jsonb_each(p_json) e(k, v)
            where k in ('id_email', 'id_sms', 'vc_email_from_name', 'vc_email_reply_to', 'id_reminder',
-                       'qt_reminder_hours', 'id_booked', 'id_return', 'qt_send_hour',
+                       'qt_reminder_hours', 'id_booked', 'id_return', 'qt_send_hour', 'qt_resend', 'qt_resend_hours',
                        'vc_tpl_reminder', 'vc_tpl_booked', 'vc_tpl_return'));
   if _js ? 'vc_email_reply_to' and jsonb_typeof(_js -> 'vc_email_reply_to') = 'string' then
     _js := jsonb_set(_js, '{vc_email_reply_to}', to_jsonb(lower(_js ->> 'vc_email_reply_to')));
@@ -78,6 +79,8 @@ begin
   if _new.id_email is null or _new.id_sms is null or _new.id_reminder is null or _new.id_booked is null
      or _new.id_return is null or _new.qt_reminder_hours is null or _new.qt_reminder_hours not between 1 and 72
      or _new.qt_send_hour is null or _new.qt_send_hour not between 6 and 20
+     or _new.qt_resend is null or _new.qt_resend not between 0 and 3
+     or _new.qt_resend_hours is null or _new.qt_resend_hours not between 1 and 24
      or length(coalesce(_new.vc_email_from_name, '')) > 80 then
     raise exception '%', ad.fn_message('NOTIFY_VALUE_INVALID');
   end if;
@@ -95,6 +98,7 @@ begin
     vc_email_from_name = _new.vc_email_from_name, vc_email_reply_to = _new.vc_email_reply_to,
     id_reminder = _new.id_reminder, qt_reminder_hours = _new.qt_reminder_hours,
     id_booked = _new.id_booked, id_return = _new.id_return, qt_send_hour = _new.qt_send_hour,
+    qt_resend = _new.qt_resend, qt_resend_hours = _new.qt_resend_hours,
     vc_tpl_reminder = _new.vc_tpl_reminder, vc_tpl_booked = _new.vc_tpl_booked, vc_tpl_return = _new.vc_tpl_return
    where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
 
