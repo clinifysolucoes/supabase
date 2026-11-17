@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 09/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - relatorios de agenda, pacientes e tratamentos    ::
+  ::  Change      : 17/11/2026 - relatorios por categoria e por marcador          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Relatorios da filial num periodo (LER na tela REPORTS; ate 366 dias), com
@@ -23,7 +23,7 @@
                                  competencia no periodo, pagas e a pagar
                                  (exige tambem LER em FINANCE)
     Os demais ficam nos helpers od.fn_report_* (mesmo formato de saida):
-      agenda        appointments, first_visit, return_alerts
+      agenda        appointments, first_visit, return_alerts, categories, markers
       pacientes     age_groups, location (sem periodo), last_visit, budgets,
                     overdue, health_plans
       tratamentos   open_treatments, pending_procedures, revenue, implants
@@ -93,7 +93,7 @@ begin
     raise exception '%', ad.fn_message('REPORT_FORBIDDEN');
   end if;
   if _report not in ('no_show', 'birthdays', 'procedures', 'commissions',
-                     'appointments', 'first_visit', 'return_alerts',
+                     'appointments', 'first_visit', 'return_alerts', 'categories', 'markers',
                      'age_groups', 'location', 'last_visit', 'budgets', 'overdue', 'health_plans',
                      'open_treatments', 'pending_procedures', 'revenue', 'implants',
                      'user_access', 'user_actions', 'messages') then
@@ -115,7 +115,7 @@ begin
 
   if _report not in ('no_show', 'birthdays', 'procedures', 'commissions') then
     _rows := case
-      when _report in ('appointments', 'first_visit', 'return_alerts') then
+      when _report in ('appointments', 'first_visit', 'return_alerts', 'categories', 'markers') then
         od.fn_report_agenda(_nr_company, _nr_branch, _report, _d0, _d1, _from, _to, _prof, _limit)
       when _report in ('age_groups', 'location', 'last_visit', 'budgets', 'overdue', 'health_plans') then
         od.fn_report_patients(_nr_company, _nr_branch, _report, _d0, _d1, _from, _to, _prof, _limit)

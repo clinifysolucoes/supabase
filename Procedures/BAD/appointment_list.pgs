@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 09/11/2026 - lembrete do WhatsApp (it_wa_status, vc_wa_reply) ::
+  ::  Change      : 17/11/2026 - categoria, marcadores, cadeira e modo da agenda  ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda da filial num periodo (dia, semana ou mes): consultas e compromissos
@@ -37,7 +37,12 @@
                        fechamento esperado, 1 atendido sem recebimento, 2 recebimento em
                        aberto, 3 tudo recebido)}],
      "return_alerts": [{"nr_patient", "vc_name", "vc_mobile", "dt_return_alert", "vc_return_alert"}],
-     "vc_timezone": "America/Sao_Paulo"}
+     "vc_timezone": "America/Sao_Paulo",
+     "it_agenda_mode": 1 por profissional | 2 por cadeira, "id_color_by_category",
+     "categories" / "markers" / "chairs": [{"nr_item", "vc_name", "vc_color", "it_status"}] (todos)}
+    Cada agendamento tambem traz nr_category, vc_category, vc_category_color, nr_chair,
+    vc_chair, markers [{"nr_marker", "vc_name", "vc_color"}] e vc_display_color (cor do
+    cartao: a da categoria quando id_color_by_category, senao a do profissional).
 
   Errors: VERSION_MISMATCH, AGENDA_BRANCH_REQUIRED, AGENDA_FORBIDDEN, APPOINTMENT_LIST_PERIOD_INVALID
 */
@@ -61,6 +66,8 @@ declare
   _profs         bigint[];
   _appointments  jsonb;
   _alerts        jsonb;
+  _by_category   boolean;
+  _mode          smallint;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_list');
 
@@ -91,6 +98,10 @@ begin
   /* selo financeiro so para quem le o financeiro                          */
   _fin := coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false);
 
+  select coalesce(s.id_color_by_category, false), coalesce(s.it_agenda_mode, 1) into _by_category, _mode
+    from (select 1) x
+    left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
   if jsonb_typeof(p_json -> 'nr_professionals') = 'array' then
     select array_agg(x::bigint) into _profs from jsonb_array_elements_text(p_json -> 'nr_professionals') x;
   end if;
@@ -119,6 +130,14 @@ begin
              'vc_wa_reply',           wa.vc_reply,
              'vc_created_by',         u.vc_name,
              'dh_created',            a.dh_created,
+             'nr_category',           a.nr_category,
+             'vc_category',           ca.vc_name,
+             'vc_category_color',     ca.vc_color,
+             'nr_chair',              a.nr_chair,
+             'vc_chair',              ch.vc_name,
+             'markers',               coalesce(mk.markers, '[]'::jsonb),
+             'vc_display_color',      case when _by_category and ca.vc_color is not null then ca.vc_color
+                                           else pr.vc_color end,
              'it_fin_status',         case when not _fin then null
                                            when a.it_type <> 1 then null
                                            when fe.qt_open is null then case when a.it_status = 5 then 1 end
@@ -134,6 +153,17 @@ begin
     left join od.procedure pc    on pc.nr_company = a.nr_company and pc.nr_branch = a.nr_branch
                                 and pc.nr_procedure = a.nr_procedure
     left join ad.app_user u      on u.nr_user = a.nr_user_created
+    left join od.appointment_category ca on ca.nr_company = a.nr_company and ca.nr_branch = a.nr_branch
+                                        and ca.nr_category = a.nr_category
+    left join od.chair ch        on ch.nr_company = a.nr_company and ch.nr_branch = a.nr_branch
+                                and ch.nr_chair = a.nr_chair
+    left join lateral (select jsonb_agg(jsonb_build_object('nr_marker', k.nr_marker, 'vc_name', k.vc_name,
+                                                           'vc_color', k.vc_color) order by k.vc_name) as markers
+                         from od.appointment_tag t
+                         join od.appointment_marker k on k.nr_company = t.nr_company and k.nr_branch = t.nr_branch
+                                                     and k.nr_marker = t.nr_marker
+                        where t.nr_company = a.nr_company and t.nr_branch = a.nr_branch
+                          and t.nr_appointment = a.nr_appointment) mk on true
     left join lateral (select count(*) filter (where e.it_status = 1) as qt_open
                          from od.fin_entry e
                         where e.nr_company = a.nr_company and e.nr_branch = a.nr_branch
@@ -167,7 +197,17 @@ begin
      and p.it_status  = 1
      and p.dt_return_alert between _dt_start and _dt_end;
 
-  return jsonb_build_object('appointments', _appointments, 'return_alerts', _alerts, 'vc_timezone', _tz);
+  return jsonb_build_object('appointments', _appointments, 'return_alerts', _alerts, 'vc_timezone', _tz,
+    'it_agenda_mode', _mode, 'id_color_by_category', _by_category,
+    'categories', coalesce((select jsonb_agg(jsonb_build_object('nr_item', c.nr_category, 'vc_name', c.vc_name,
+                     'vc_color', c.vc_color, 'it_status', c.it_status) order by c.vc_name)
+                     from od.appointment_category c where c.nr_company = _nr_company and c.nr_branch = _nr_branch), '[]'::jsonb),
+    'markers', coalesce((select jsonb_agg(jsonb_build_object('nr_item', c.nr_marker, 'vc_name', c.vc_name,
+                  'vc_color', c.vc_color, 'it_status', c.it_status) order by c.vc_name)
+                  from od.appointment_marker c where c.nr_company = _nr_company and c.nr_branch = _nr_branch), '[]'::jsonb),
+    'chairs', coalesce((select jsonb_agg(jsonb_build_object('nr_item', c.nr_chair, 'vc_name', c.vc_name,
+                 'vc_color', c.vc_color, 'it_status', c.it_status) order by c.nr_chair)
+                 from od.chair c where c.nr_company = _nr_company and c.nr_branch = _nr_branch), '[]'::jsonb));
 end;
 $$;
 

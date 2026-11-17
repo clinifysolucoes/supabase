@@ -261,3 +261,19 @@ create or replace trigger perio_exam_audit
 create or replace trigger perio_tooth_audit
   before insert or update on od.perio_tooth
   for each row execute function ad.trg_audit();
+
+create or replace trigger appointment_category_audit
+  before insert or update on od.appointment_category
+  for each row execute function ad.trg_audit();
+
+create or replace trigger appointment_marker_audit
+  before insert or update on od.appointment_marker
+  for each row execute function ad.trg_audit();
+
+create or replace trigger appointment_tag_audit
+  before insert or update on od.appointment_tag
+  for each row execute function ad.trg_audit();
+
+create or replace trigger chair_audit
+  before insert or update on od.chair
+  for each row execute function ad.trg_audit();
