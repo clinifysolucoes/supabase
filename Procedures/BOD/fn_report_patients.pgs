@@ -1,0 +1,228 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_report_patients(...)                                    ::
+  ::  UsedBy      : ad.report_get                                                 ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 17/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Relatorios do grupo Pacientes (a permissao ja foi checada por
+    ad.report_get). Helper interno (sem grant).
+      age_groups    pacientes ativos por faixa etaria e sexo (sem periodo)
+      location      pacientes ativos por cidade e bairro (sem periodo)
+      last_visit    pacientes ativos cuja ultima consulta atendida foi no
+                    periodo e que nao tem consulta futura marcada
+      budgets       orcamentos do periodo (data do orcamento) e conversao
+      overdue       contas a receber em aberto que venceram no periodo (ate
+                    ontem, no fuso da filial)
+      health_plans  guias de convenio atendidas no periodo, por convenio
+  Input:
+    p_nr_company, p_nr_branch, p_report, p_d0, p_d1 (datas), p_from, p_to
+    (mesmo periodo no fuso da filial), p_prof (profissional ou null), p_limit
+  Output: jsonb {"rows", "summary", "by_professional", "qt"}
+*/
+create or replace function od.fn_report_patients(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_report     text,
+  p_d0         date,
+  p_d1         date,
+  p_from       timestamptz,
+  p_to         timestamptz,
+  p_prof       bigint,
+  p_limit      integer)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _rows    jsonb;
+  _summary jsonb;
+  _byprof  jsonb := '[]'::jsonb;
+  _qt      integer;
+  _today   date;
+  _tz      text;
+begin
+  select (now() at time zone b.vc_timezone)::date, b.vc_timezone into _today, _tz
+    from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch;
+
+  if p_report = 'age_groups' then
+    with base as (
+      select p.it_gender,
+             case when p.dt_birth is null then null
+                  else extract(year from age(_today, p.dt_birth))::int end as qt_age
+        from od.patient p
+       where p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.it_status = 1
+    ), banded as (
+      select b.*,
+             case when qt_age is null then 9
+                  when qt_age < 13 then 1 when qt_age < 18 then 2 when qt_age < 30 then 3
+                  when qt_age < 40 then 4 when qt_age < 50 then 5 when qt_age < 60 then 6
+                  else 7 end as it_band
+        from base b
+    ), total as (select count(*) as n from banded)
+    select coalesce(jsonb_agg(jsonb_build_object('it_band', g.it_band, 'qt_patients', g.qt,
+             'qt_female', g.qt_f, 'qt_male', g.qt_m,
+             'pc_patients', case when t.n = 0 then 0 else round(100.0 * g.qt / t.n, 1) end)
+             order by g.it_band), '[]'::jsonb),
+           jsonb_build_object('qt_patients', coalesce(max(t.n), 0),
+             'vl_mean_age', (select round(avg(qt_age), 1) from banded)),
+           count(*)
+      into _rows, _summary, _qt
+      from (select it_band, count(*) as qt,
+                   count(*) filter (where it_gender = 2) as qt_f,
+                   count(*) filter (where it_gender = 1) as qt_m
+              from banded group by it_band) g
+      cross join total t;
+
+  elsif p_report = 'location' then
+    with base as (
+      select coalesce(nullif(trim(p.vc_city), ''), '') as vc_city, coalesce(p.vc_state, '') as vc_state,
+             coalesce(nullif(trim(p.vc_district), ''), '') as vc_district
+        from od.patient p
+       where p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.it_status = 1
+    ), g as (
+      select vc_city, vc_state, vc_district, count(*) as qt from base group by vc_city, vc_state, vc_district
+    ), total as (select count(*) as n from base)
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('vc_city', x.vc_city, 'vc_state', x.vc_state,
+                'vc_district', x.vc_district, 'qt_patients', x.qt,
+                'pc_patients', case when t.n = 0 then 0 else round(100.0 * x.qt / t.n, 1) end)
+                order by x.qt desc, x.vc_city, x.vc_district), '[]'::jsonb)
+         from (select * from g order by qt desc, vc_city, vc_district limit p_limit) x),
+      jsonb_build_object('qt_patients', t.n,
+        'qt_cities', (select count(distinct (vc_city, vc_state)) from base where vc_city <> ''),
+        'qt_no_address', (select count(*) from base where vc_city = '')),
+      (select count(*) from g)
+      into _rows, _summary, _qt
+      from total t;
+
+  elsif p_report = 'last_visit' then
+    with last as (
+      select distinct on (a.nr_patient) a.nr_patient, a.dh_start, a.nr_professional
+        from od.appointment a
+       where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch and a.it_type = 1 and a.it_status = 5
+       order by a.nr_patient, a.dh_start desc
+    ), base as (
+      select l.dh_start, l.nr_professional, p.vc_name as vc_patient, p.vc_mobile, pr.vc_name as vc_professional,
+             _today - (l.dh_start at time zone _tz)::date as qt_days
+        from last l
+        join od.patient p on p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.nr_patient = l.nr_patient
+        left join od.professional pr on pr.nr_company = p_nr_company and pr.nr_branch = p_nr_branch
+                                    and pr.nr_professional = l.nr_professional
+       where p.it_status = 1 and l.dh_start >= p_from and l.dh_start < p_to
+         and (p_prof is null or l.nr_professional = p_prof)
+         and not exists (select 1 from od.appointment f
+                          where f.nr_company = p_nr_company and f.nr_branch = p_nr_branch
+                            and f.nr_patient = l.nr_patient and f.it_type = 1
+                            and f.it_status not in (7, 90) and f.dh_start >= now())
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dh_start', b.dh_start, 'vc_patient', b.vc_patient,
+                'vc_mobile', b.vc_mobile, 'vc_professional', b.vc_professional, 'qt_days', b.qt_days)
+                order by b.dh_start), '[]'::jsonb)
+         from (select * from base order by dh_start limit p_limit) b),
+      jsonb_build_object('qt_patients', count(*)),
+      (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', g.nr_professional, 'vc_professional', g.vc_professional,
+                'qt_patients', g.qt) order by g.vc_professional), '[]'::jsonb)
+         from (select nr_professional, vc_professional, count(*) as qt from base group by nr_professional, vc_professional) g),
+      count(*)
+      into _rows, _summary, _byprof, _qt
+      from base;
+
+  elsif p_report = 'budgets' then
+    with base as (
+      select bu.dt_budget, bu.vc_title, bu.vl_total, bu.it_status, bu.dh_accepted, bu.nr_professional,
+             p.vc_name as vc_patient, pr.vc_name as vc_professional
+        from od.budget bu
+        join od.patient p on p.nr_company = bu.nr_company and p.nr_branch = bu.nr_branch and p.nr_patient = bu.nr_patient
+        left join od.professional pr on pr.nr_company = bu.nr_company and pr.nr_branch = bu.nr_branch
+                                    and pr.nr_professional = bu.nr_professional
+       where bu.nr_company = p_nr_company and bu.nr_branch = p_nr_branch and bu.it_status <> 90
+         and bu.dt_budget between p_d0 and p_d1
+         and (p_prof is null or bu.nr_professional = p_prof)
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dt_budget', b.dt_budget, 'vc_patient', b.vc_patient,
+                'vc_professional', b.vc_professional, 'vc_title', b.vc_title, 'vl_total', b.vl_total,
+                'it_status', b.it_status, 'dh_accepted', b.dh_accepted) order by b.dt_budget, b.vc_patient), '[]'::jsonb)
+         from (select * from base order by dt_budget, vc_patient limit p_limit) b),
+      jsonb_build_object(
+        'qt_total', count(*),
+        'qt_approved', count(*) filter (where it_status = 3),
+        'qt_refused', count(*) filter (where it_status = 4),
+        'qt_open', count(*) filter (where it_status in (1, 2)),
+        'vl_total', coalesce(sum(vl_total), 0),
+        'vl_approved', coalesce(sum(vl_total) filter (where it_status = 3), 0),
+        'pc_conversion', case when count(*) = 0 then 0
+                              else round(100.0 * count(*) filter (where it_status = 3) / count(*), 1) end),
+      (select coalesce(jsonb_agg(jsonb_build_object('nr_professional', g.nr_professional, 'vc_professional', g.vc_professional,
+                'qt_total', g.qt_total, 'qt_approved', g.qt_approved, 'vl_approved', g.vl_approved,
+                'pc_conversion', g.pc_conversion) order by g.vc_professional), '[]'::jsonb)
+         from (select nr_professional, vc_professional, count(*) as qt_total,
+                      count(*) filter (where it_status = 3) as qt_approved,
+                      coalesce(sum(vl_total) filter (where it_status = 3), 0) as vl_approved,
+                      round(100.0 * count(*) filter (where it_status = 3) / count(*), 1) as pc_conversion
+                 from base group by nr_professional, vc_professional) g),
+      count(*)
+      into _rows, _summary, _byprof, _qt
+      from base;
+
+  elsif p_report = 'overdue' then
+    with base as (
+      select e.dt_due, e.vc_description, e.vl_amount, e.nr_patient, p.vc_name as vc_patient, p.vc_mobile,
+             _today - e.dt_due as qt_days_late
+        from od.fin_entry e
+        left join od.patient p on p.nr_company = e.nr_company and p.nr_branch = e.nr_branch and p.nr_patient = e.nr_patient
+       where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch and e.it_kind = 1 and e.it_status = 1
+         and e.dt_due between p_d0 and least(p_d1, _today - 1)
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('dt_due', b.dt_due, 'vc_patient', b.vc_patient,
+                'vc_mobile', b.vc_mobile, 'vc_description', b.vc_description, 'vl_amount', b.vl_amount,
+                'qt_days_late', b.qt_days_late) order by b.dt_due, b.vc_patient), '[]'::jsonb)
+         from (select * from base order by dt_due, vc_patient limit p_limit) b),
+      jsonb_build_object('qt_entries', count(*), 'qt_patients', count(distinct nr_patient),
+                         'vl_total', coalesce(sum(vl_amount), 0)),
+      count(*)
+      into _rows, _summary, _qt
+      from base;
+
+  else /* health_plans */
+    with base as (
+      select g.nr_plan, hp.vc_name as vc_plan, g.it_status, g.vl_total, g.vl_paid, g.vl_denied
+        from od.health_guide g
+        join od.health_plan hp on hp.nr_company = g.nr_company and hp.nr_branch = g.nr_branch and hp.nr_plan = g.nr_plan
+       where g.nr_company = p_nr_company and g.nr_branch = p_nr_branch and g.it_status <> 90
+         and g.dt_service between p_d0 and p_d1
+         and (p_prof is null or g.nr_professional = p_prof)
+    ), grp as (
+      select nr_plan, vc_plan, count(*) as qt_guides,
+             count(*) filter (where it_status = 1) as qt_open,
+             coalesce(sum(vl_total), 0) as vl_total,
+             coalesce(sum(vl_total) filter (where it_status in (2, 3)), 0) as vl_invoiced,
+             coalesce(sum(vl_paid) filter (where it_status = 3), 0) as vl_paid,
+             coalesce(sum(vl_denied) filter (where it_status = 3), 0) as vl_denied
+        from base group by nr_plan, vc_plan
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('vc_plan', x.vc_plan, 'qt_guides', x.qt_guides,
+                'qt_open', x.qt_open, 'vl_total', x.vl_total, 'vl_invoiced', x.vl_invoiced,
+                'vl_paid', x.vl_paid, 'vl_denied', x.vl_denied) order by x.vc_plan), '[]'::jsonb)
+         from grp x),
+      (select jsonb_build_object('qt_guides', coalesce(sum(qt_guides), 0), 'vl_total', coalesce(sum(vl_total), 0),
+                'vl_paid', coalesce(sum(vl_paid), 0), 'vl_denied', coalesce(sum(vl_denied), 0)) from grp),
+      (select count(*) from grp)
+      into _rows, _summary, _qt;
+  end if;
+
+  return jsonb_build_object('rows', _rows, 'summary', _summary, 'by_professional', _byprof, 'qt', _qt);
+end;
+$$;
+
+revoke all on function od.fn_report_patients(bigint, bigint, text, date, date, timestamptz, timestamptz, bigint, integer)
+  from public, anon, authenticated;

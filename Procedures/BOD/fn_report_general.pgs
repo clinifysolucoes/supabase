@@ -1,0 +1,126 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_report_general(...)                                     ::
+  ::  UsedBy      : ad.report_get                                                 ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 17/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Relatorios do grupo Geral (a permissao ja foi checada por ad.report_get).
+    Helper interno (sem grant).
+      user_access   acessos ao app na empresa no periodo, por usuario e app
+      user_actions  atividades gravadas no log (event_log) da empresa e da
+                    filial no periodo, por usuario e tipo de acao
+      messages      mensagens criadas no periodo (WhatsApp, e-mail e SMS), por
+                    canal e tipo: enviadas, com erro e confirmacoes
+  Input:
+    p_nr_company, p_nr_branch, p_report, p_d0, p_d1 (datas), p_from, p_to
+    (mesmo periodo no fuso da filial), p_prof (nao usado), p_limit
+  Output: jsonb {"rows", "summary", "by_professional", "qt"}
+*/
+create or replace function od.fn_report_general(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_report     text,
+  p_d0         date,
+  p_d1         date,
+  p_from       timestamptz,
+  p_to         timestamptz,
+  p_prof       bigint,
+  p_limit      integer)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _rows    jsonb;
+  _summary jsonb;
+  _qt      integer;
+  _tz      text;
+begin
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = p_nr_company and b.nr_branch = p_nr_branch;
+  if p_report = 'user_access' then
+    with grp as (
+      select l.nr_user, u.vc_name as vc_user, count(*) as qt_access,
+             count(*) filter (where l.it_app = 1) as qt_web,
+             count(*) filter (where l.it_app = 2) as qt_android,
+             count(*) filter (where l.it_app = 3) as qt_ios,
+             count(distinct (l.dh_access at time zone _tz)::date) as qt_days,
+             max(l.dh_access) as dh_last
+        from ad.access_log l
+        join ad.app_user u on u.nr_user = l.nr_user
+       where l.nr_company = p_nr_company and l.dh_access >= p_from and l.dh_access < p_to
+       group by l.nr_user, u.vc_name
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('vc_user', x.vc_user, 'qt_access', x.qt_access,
+                'qt_web', x.qt_web, 'qt_android', x.qt_android, 'qt_ios', x.qt_ios, 'qt_days', x.qt_days,
+                'dh_last', x.dh_last) order by x.qt_access desc, x.vc_user), '[]'::jsonb)
+         from (select * from grp order by qt_access desc, vc_user limit p_limit) x),
+      (select jsonb_build_object('qt_users', count(*), 'qt_access', coalesce(sum(qt_access), 0)) from grp),
+      (select count(*) from grp)
+      into _rows, _summary, _qt;
+
+  elsif p_report = 'user_actions' then
+    with grp as (
+      select ev.nr_user, u.vc_name as vc_user, count(*) as qt_events,
+             count(*) filter (where ev.vc_action = 'CREATE') as qt_create,
+             count(*) filter (where ev.vc_action = 'UPDATE') as qt_update,
+             count(*) filter (where ev.vc_action = 'DELETE') as qt_delete,
+             count(*) filter (where ev.vc_action not in ('CREATE', 'UPDATE', 'DELETE')) as qt_other,
+             max(ev.dh_event) as dh_last
+        from ad.event_log ev
+        join ad.app_user u on u.nr_user = ev.nr_user
+       where ev.nr_company = p_nr_company and (ev.nr_branch is null or ev.nr_branch = p_nr_branch)
+         and ev.dh_event >= p_from and ev.dh_event < p_to
+       group by ev.nr_user, u.vc_name
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('vc_user', x.vc_user, 'qt_events', x.qt_events,
+                'qt_create', x.qt_create, 'qt_update', x.qt_update, 'qt_delete', x.qt_delete,
+                'qt_other', x.qt_other, 'dh_last', x.dh_last) order by x.qt_events desc, x.vc_user), '[]'::jsonb)
+         from (select * from grp order by qt_events desc, vc_user limit p_limit) x),
+      (select jsonb_build_object('qt_users', count(*), 'qt_events', coalesce(sum(qt_events), 0)) from grp),
+      (select count(*) from grp)
+      into _rows, _summary, _qt;
+
+  else /* messages */
+    with msg as (
+      select 3 as it_channel, w.it_kind, w.it_status in (2, 3, 4) as id_sent, w.it_status = 9 as id_error,
+             w.vc_reply = 'CONFIRM' as id_confirmed
+        from od.whatsapp_message w
+       where w.nr_company = p_nr_company and w.nr_branch = p_nr_branch and w.it_kind <> 9
+         and w.dh_created >= p_from and w.dh_created < p_to
+      union all
+      select n.it_channel, n.it_kind, n.it_status = 2, n.it_status = 9, n.dh_confirmed is not null
+        from od.notify_message n
+       where n.nr_company = p_nr_company and n.nr_branch = p_nr_branch
+         and n.dh_created >= p_from and n.dh_created < p_to
+    ), grp as (
+      select it_channel, it_kind, count(*) as qt_total,
+             count(*) filter (where id_sent) as qt_sent,
+             count(*) filter (where id_error) as qt_error,
+             count(*) filter (where id_confirmed) as qt_confirmed
+        from msg group by it_channel, it_kind
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('it_channel', x.it_channel, 'it_kind', x.it_kind,
+                'qt_total', x.qt_total, 'qt_sent', x.qt_sent, 'qt_error', x.qt_error, 'qt_confirmed', x.qt_confirmed)
+                order by x.it_channel, x.it_kind), '[]'::jsonb)
+         from grp x),
+      (select jsonb_build_object('qt_total', coalesce(sum(qt_total), 0), 'qt_sent', coalesce(sum(qt_sent), 0),
+                'qt_error', coalesce(sum(qt_error), 0), 'qt_confirmed', coalesce(sum(qt_confirmed), 0)) from grp),
+      (select count(*) from grp)
+      into _rows, _summary, _qt;
+  end if;
+
+  return jsonb_build_object('rows', _rows, 'summary', _summary, 'by_professional', '[]'::jsonb, 'qt', _qt);
+end;
+$$;
+
+revoke all on function od.fn_report_general(bigint, bigint, text, date, date, timestamptz, timestamptz, bigint, integer)
+  from public, anon, authenticated;
