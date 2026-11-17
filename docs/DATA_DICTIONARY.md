@@ -98,6 +98,10 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.prosthetic_work_step`](#odprostheticworkstep) | Etapa do trabalho protético | Histórico das etapas do trabalho protético (envio, prova, retorno, instalação, cancelamento), com data, observação e quem registrou. |
 | [`od.stock_item`](#odstockitem) | Item de estoque | Materiais do catálogo (od.material) com controle de estoque: saldo em unidades de uso e estoque mínimo. O saldo só muda por movimento (od.fn_stock_move). |
 | [`od.stock_movement`](#odstockmovement) | Movimento de estoque | Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimentos registrados na evolução clínica (com estorno quando a evolução é excluída). Guarda o saldo depois do movimento. |
+| [`od.appointment_category`](#odappointmentcategory) | Categoria de agendamento | Categorias da agenda da filial (Avaliação, Retorno, Urgência...), com cor; com branch_setting.id_color_by_category o cartão da consulta usa a cor da categoria. |
+| [`od.appointment_marker`](#odappointmentmarker) | Marcador de agendamento | Marcadores (etiquetas) da agenda da filial; uma consulta pode ter vários (appointment_tag). |
+| [`od.chair`](#odchair) | Cadeira | Cadeiras (consultórios) da filial. A cadeira atende um agendamento por vez (encaixe libera) e a agenda pode ser organizada por cadeira (branch_setting.it_agenda_mode = 2). |
+| [`od.appointment_tag`](#odappointmenttag) | Marcador do agendamento | Marcadores de cada agendamento (substituídos inteiros pelo appointment_save). |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
@@ -214,6 +218,10 @@ erDiagram
   professional |o--o{ appointment : "atende"
   procedure |o--o{ appointment : "previsto em"
   patient ||--o{ patient_note : "notas"
+  appointment_category ||--o{ appointment : "categoria"
+  chair ||--o{ appointment : "cadeira"
+  appointment ||--o{ appointment_tag : "marcadores"
+  appointment_marker ||--o{ appointment_tag : "uso"
   app_user ||--o{ patient_note : "autor"
   auth_users {
     uuid id PK
@@ -476,6 +484,8 @@ erDiagram
     smallint it_origin
     smallint it_status
     bigint nr_user_created FK
+    bigint nr_category FK
+    bigint nr_chair FK
   }
   fin_account {
     bigint nr_company PK, FK
@@ -1001,6 +1011,8 @@ erDiagram
     numeric pc_dre_revenue_tax
     numeric pc_dre_income_tax
     numeric pc_dre_csll
+    boolean id_color_by_category
+    smallint it_agenda_mode
   }
   branch_hour {
     bigint nr_company PK, FK
@@ -1131,6 +1143,36 @@ erDiagram
     bigint nr_movement_ref
     varchar vc_notes
     bigint nr_user FK
+  }
+  appointment_category {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_category PK
+    varchar vc_name
+    varchar vc_color
+    smallint it_status
+  }
+  appointment_marker {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_marker PK
+    varchar vc_name
+    varchar vc_color
+    smallint it_status
+  }
+  chair {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_chair PK
+    varchar vc_name
+    varchar vc_color
+    smallint it_status
+  }
+  appointment_tag {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_appointment PK, FK
+    bigint nr_marker PK, FK
   }
   referral_reward {
     bigint nr_company PK, FK
@@ -1758,6 +1800,8 @@ Um horário na agenda da filial: consulta (paciente + profissional, procedimento
 | `it_origin` | `smallint` |  | NOT NULL | `1` | De onde veio a consulta. Valores: 1 = Agenda (usuário da clínica); 2 = Agendamento online (página pública). |
 | `it_status` | `smallint` |  | NOT NULL | `1` | Situação do atendimento (cancelado e faltou não ocupam o horário). Valores: 1 = Agendado; 2 = Confirmado; 3 = Em espera; 4 = Em atendimento; 5 = Atendido; 6 = Atrasado; 7 = Faltou; 90 = Cancelado. |
 | `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Quem agendou (usuário da sessão na criação). |
+| `nr_category` | `bigint` | FK → `appointment_category.nr_category` | NULL |  | Categoria do agendamento (opcional). |
+| `nr_chair` | `bigint` | FK → `chair.nr_chair` | NULL |  | Cadeira do agendamento (opcional); a cadeira atende um agendamento por vez, salvo encaixe. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -2703,6 +2747,8 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `pc_dre_revenue_tax` | `numeric(5,2)` |  | NOT NULL | `0` | DRE: impostos sobre a receita bruta para a estimativa (Simples, ISS, PIS/COFINS; % 0 a 50; zero não estima). |
 | `pc_dre_income_tax` | `numeric(5,2)` |  | NOT NULL | `0` | DRE: IRPJ sobre o resultado antes dos impostos (% 0 a 50; zero não estima). |
 | `pc_dre_csll` | `numeric(5,2)` |  | NOT NULL | `0` | DRE: CSLL sobre o resultado antes dos impostos (% 0 a 50; zero não estima). |
+| `id_color_by_category` | `boolean` |  | NOT NULL | `false` | Agenda: o cartão da consulta usa a cor da categoria (sem categoria, a do profissional). |
+| `it_agenda_mode` | `smallint` |  | NOT NULL | `1` | Agenda: colunas da visão do dia. Valores: 1 = Por profissional; 2 = Por cadeira. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -2917,6 +2963,84 @@ Entradas, saídas, ajustes de inventário e a baixa automática pelos procedimen
 | `nr_movement_ref` | `bigint` |  | NULL |  | Baixa estornada (no estorno, tipo 5). |
 | `vc_notes` | `varchar(500)` |  | NULL |  | Observação / motivo. |
 | `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que lançou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.appointment_category
+
+**Categoria de agendamento**
+
+Categorias da agenda da filial (Avaliação, Retorno, Urgência...), com cor; com branch_setting.id_color_by_category o cartão da consulta usa a cor da categoria.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via agenda_catalog_save (permissão na tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_category` | `bigint` | PK3 | NOT NULL |  | Número da categoria (sequencial por filial). |
+| `vc_name` | `varchar(40)` |  | NOT NULL |  | Nome (único na filial, sem diferenciar maiúsculas). |
+| `vc_color` | `varchar(7)` |  | NOT NULL |  | Cor no formato #RRGGBB. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.appointment_marker
+
+**Marcador de agendamento**
+
+Marcadores (etiquetas) da agenda da filial; uma consulta pode ter vários (appointment_tag).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via agenda_catalog_save (permissão na tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_marker` | `bigint` | PK3 | NOT NULL |  | Número do marcador (sequencial por filial). |
+| `vc_name` | `varchar(40)` |  | NOT NULL |  | Nome (único na filial, sem diferenciar maiúsculas). |
+| `vc_color` | `varchar(7)` |  | NOT NULL |  | Cor no formato #RRGGBB. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.chair
+
+**Cadeira**
+
+Cadeiras (consultórios) da filial. A cadeira atende um agendamento por vez (encaixe libera) e a agenda pode ser organizada por cadeira (branch_setting.it_agenda_mode = 2).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via agenda_catalog_save (permissão na tela SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_chair` | `bigint` | PK3 | NOT NULL |  | Número da cadeira (sequencial por filial). |
+| `vc_name` | `varchar(40)` |  | NOT NULL |  | Nome (único na filial, sem diferenciar maiúsculas). |
+| `vc_color` | `varchar(7)` |  | NOT NULL |  | Cor no formato #RRGGBB. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.appointment_tag
+
+**Marcador do agendamento**
+
+Marcadores de cada agendamento (substituídos inteiros pelo appointment_save).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via appointment_save (permissão na tela AGENDA).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `appointment.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `appointment.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_appointment` | `bigint` | PK3, FK → `appointment.nr_appointment` | NOT NULL |  | Agendamento. |
+| `nr_marker` | `bigint` | PK4, FK → `appointment_marker.nr_marker` | NOT NULL |  | Marcador. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3175,8 +3299,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.procedure_list(p_json jsonb)` | authenticated | Procedimentos da filial com especialidade, materiais, preço calculado (fn_pricing_calc; lucro do procedimento > especialidade > filial), preço mínimo, decomposição (cartão, comissão, taxas, IR, lucro), situação do valor cobrado hoje (it_price_status, lucro atual) e alertas (NO_TIME, NO_MATERIAL, MATERIAL_NO_PRICE, PERCENT_TOO_HIGH, PRICE_BELOW_COST, PRICE_BELOW_MIN, PRICE_BELOW_SUGGESTED). Filtros: nr_specialty, vc_search, id_include_inactive; it_tax_regime simula PF x PJ. Devolve também parâmetros e resumo. Exige leitura na tela PRICING. |
 | `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
 | `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING. |
-| `ad.appointment_list(p_json jsonb)` | authenticated | Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. Devolve it_origin (2 = agendamento online) e, do lembrete do WhatsApp, it_wa_status e vc_wa_reply (CONFIRM \| RESCHEDULE). |
-| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. Segue as configurações da filial: consultas do mesmo profissional no mesmo horário até o limite e, sem permissão de agendar fora do horário, a consulta precisa caber no horário de atendimento do profissional (encaixe passa por cima). Paciente com conta a receber vencida (od.fn_patient_overdue), conforme it_debt_rule da filial: avisa (devolve debt), só o administrador agenda confirmando com id_debt_override (fica no log) ou bloqueia; encaixe não libera. Também a regra de conta a receber em aberto (it_open_rule), valendo a mais forte. |
+| `ad.appointment_list(p_json jsonb)` | authenticated | Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. Devolve it_origin (2 = agendamento online) e, do lembrete do WhatsApp, it_wa_status e vc_wa_reply (CONFIRM \| RESCHEDULE). Traz em cada agendamento a categoria, a cadeira, os marcadores e a cor do cartão (vc_display_color: a da categoria quando id_color_by_category), e no topo o modo da agenda (it_agenda_mode) e as listas de categorias, marcadores e cadeiras. |
+| `ad.agenda_catalog_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) na tela SETTINGS uma categoria de agendamento, um marcador ou uma cadeira (vc_entity category \| marker \| chair): nome único na filial, cor #RRGGBB e situação. Grava event_log. |
+| `ad.appointment_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar; inclui mudar a situação) uma consulta ou compromisso. Valida a linha resultante inteira (paciente e profissional ativos na consulta, título no compromisso, período) e o conflito de horário com o mesmo profissional ou a clínica toda (encaixe não bloqueia nem é bloqueado; cancelado/faltou não ocupam; mudar só a situação não checa). Grava event_log sem dados pessoais. Segue as configurações da filial: consultas do mesmo profissional no mesmo horário até o limite e, sem permissão de agendar fora do horário, a consulta precisa caber no horário de atendimento do profissional (encaixe passa por cima). Paciente com conta a receber vencida (od.fn_patient_overdue), conforme it_debt_rule da filial: avisa (devolve debt), só o administrador agenda confirmando com id_debt_override (fica no log) ou bloqueia; encaixe não libera. Também a regra de conta a receber em aberto (it_open_rule), valendo a mais forte. Categoria (nr_category) e cadeira (nr_chair) precisam estar ativas se mudaram; nr_markers substitui os marcadores. A cadeira atende um agendamento por vez (APPOINTMENT_CHAIR_CONFLICT, encaixe libera). |
 | `ad.professional_list(p_json jsonb)` | authenticated | Profissionais da filial (colunas da agenda) com cor, intervalo, usuário vinculado e horário de atendimento por dia da semana; devolve também os usuários ativos da empresa para o vínculo. Filtro: id_include_inactive. Exige leitura na tela AGENDA. |
 | `ad.professional_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um profissional: nome, conselho, cor (sem cor = paleta padrão), intervalo, usuário vinculado, situação e, com schedules, substitui o horário de atendimento (faixas por dia sem sobreposição). Grava event_log. |
 | `ad.specialty_list(p_json jsonb)` | authenticated | Especialidades da filial com o lucro desejado e quantos procedimentos ativos cada uma tem. Filtro: id_include_inactive. Exige leitura na tela PRICING. |
@@ -3243,7 +3368,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.perio_exam_save(p_json jsonb)` | authenticated | Registra (I), altera (U) ou exclui (D) um periograma (PATIENTS): dentes FDI permanentes com 6 pontos de sondagem, recessão, sangramento e placa, mobilidade, furca e ausente. |
 | `ad.perio_exam_list(p_json jsonb)` | authenticated | Periogramas do paciente (ler em PATIENTS) com os dentes e o resumo: % de sangramento e placa, sondagem média, pontos de 4-5 mm e de 6 mm ou mais e nível de inserção médio. |
 | `ad.patient_summary_get(p_json jsonb)` | authenticated | Abas Agendamentos, Financeiro, Recibos e Plano de tratamento da ficha (ler em PATIENTS): consultas do paciente (ler em AGENDA), contas a receber com totais e recibos (ler em FINANCE) e orçamentos aprovados com os itens realizados e o progresso (ler em BUDGETS); a parte sem permissão vem null. |
-| `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE); e, pelos helpers od.fn_report_*: agenda (appointments, first_visit, return_alerts), pacientes (age_groups e location sem período, last_visit, budgets, overdue, health_plans), tratamentos (open_treatments, pending_procedures, revenue, implants) e geral (user_access, user_actions, messages). overdue, health_plans e revenue exigem ler em FINANCE; budgets, open_treatments e pending_procedures em BUDGETS; user_access e user_actions em LOGS. Devolve linhas (até 2000), resumo e resumo por profissional. |
+| `ad.report_get(p_json jsonb)` | authenticated | Relatórios da tela REPORTS (ler) num período de até 366 dias, com filtro de profissional: no_show (faltas e desmarcações, taxa de falta), birthdays (aniversariantes ativos), procedures (procedimentos executados na evolução, com o valor do item) e commissions (contas a pagar de profissional por competência; exige também ler em FINANCE); e, pelos helpers od.fn_report_*: agenda (appointments, first_visit, return_alerts, categories, markers), pacientes (age_groups e location sem período, last_visit, budgets, overdue, health_plans), tratamentos (open_treatments, pending_procedures, revenue, implants) e geral (user_access, user_actions, messages). overdue, health_plans e revenue exigem ler em FINANCE; budgets, open_treatments e pending_procedures em BUDGETS; user_access e user_actions em LOGS. Devolve linhas (até 2000), resumo e resumo por profissional. |
 | `ad.document_template_list(p_json jsonb)` | authenticated | Modelos de documento da filial (cria os padrão na primeira chamada) e os campos {{...}} disponíveis. Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
 | `ad.document_template_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um modelo de documento: tipo, nome, texto e situação. Exige alterar na tela SETTINGS. Grava event_log. |
 | `ad.medication_list(p_json jsonb)` | authenticated | Catálogo de medicamentos da filial com busca (cria a lista inicial na primeira chamada). Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = edita (alterar em SETTINGS). |
@@ -3270,8 +3395,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. Inclui id_color_by_category, it_agenda_mode e agenda_catalog (categorias, marcadores e cadeiras, inclusive inativos). |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). Também id_color_by_category e it_agenda_mode (1 por profissional, 2 por cadeira). |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. Inclui profissionais inativados (AGENDA). |
 | `ad.trash_restore(p_json jsonb)` | authenticated | Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS. Profissional pela professional_save. |
@@ -3317,7 +3442,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
 | `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. |
 | `od.fn_notify_render(p_tpl text, p_vars jsonb)` | interna | Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function. |
-| `od.fn_report_agenda(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Agenda para ad.report_get: consultas do período por situação (appointments), primeira consulta do paciente (first_visit) e alertas de retorno com a próxima consulta (return_alerts). Devolve {rows, summary, by_professional, qt}. |
+| `od.fn_report_agenda(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Agenda para ad.report_get: consultas do período por situação (appointments), primeira consulta do paciente (first_visit), alertas de retorno com a próxima consulta (return_alerts) e consultas por categoria (categories) e por marcador (markers). Devolve {rows, summary, by_professional, qt}. |
 | `od.fn_report_patients(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Pacientes para ad.report_get: faixa etária e sexo (age_groups), cidade e bairro (location), última consulta atendida sem retorno marcado (last_visit), orçamentos e conversão (budgets), contas a receber vencidas (overdue) e guias por convênio com glosa (health_plans). Devolve {rows, summary, by_professional, qt}. |
 | `od.fn_report_treatments(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Tratamentos para ad.report_get: orçamentos aprovados com itens a realizar (open_treatments), itens não realizados (pending_procedures), faturamento por competência com recebido e em aberto (revenue) e procedimentos de especialidade de implante realizados (implants). Devolve {rows, summary, by_professional, qt}. |
 | `od.fn_report_general(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Geral para ad.report_get: acessos por usuário e app (user_access), atividades do log por usuário e ação (user_actions) e mensagens de WhatsApp, e-mail e SMS por canal e tipo (messages). Devolve {rows, summary, by_professional, qt}. |
@@ -3363,6 +3488,13 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ACCESS_PROFILE_SCREENS_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_STATUS_INVALID` | `access_profile_save` |  |
 | `AGENDA_BRANCH_REQUIRED` | `appointment_list`, `appointment_save`, `professional_list`, `professional_save` |  |
+| `AGENDA_CATALOG_COLOR_INVALID` | `agenda_catalog_save` |  |
+| `AGENDA_CATALOG_FORBIDDEN` | `agenda_catalog_save` |  |
+| `AGENDA_CATALOG_INVALID` | `agenda_catalog_save` |  |
+| `AGENDA_CATALOG_NAME_IN_USE` | `agenda_catalog_save` |  |
+| `AGENDA_CATALOG_NAME_REQUIRED` | `agenda_catalog_save` |  |
+| `AGENDA_CATALOG_NOT_FOUND` | `agenda_catalog_save` |  |
+| `AGENDA_CATALOG_STATUS_INVALID` | `agenda_catalog_save` |  |
 | `AGENDA_FORBIDDEN` | `appointment_list`, `professional_list` |  |
 | `ANAMNESIS_MODEL_ACTION_INVALID` | `anamnesis_model_save` |  |
 | `ANAMNESIS_MODEL_FORBIDDEN` | `anamnesis_model_save` |  |
@@ -3373,12 +3505,16 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ANAMNESIS_MODEL_VALUE_INVALID` | `anamnesis_model_save` |  |
 | `ANAMNESIS_QUESTION_INVALID` | `anamnesis_model_save` |  |
 | `APPOINTMENT_ACTION_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_CATEGORY_INVALID` | `appointment_save` |  |
+| `APPOINTMENT_CHAIR_CONFLICT` | `appointment_save` |  |
+| `APPOINTMENT_CHAIR_INVALID` | `appointment_save` |  |
 | `APPOINTMENT_CONFLICT` | `appointment_save` |  |
 | `APPOINTMENT_DEBT_APPROVAL` | `appointment_save` |  |
 | `APPOINTMENT_DEBT_BLOCKED` | `appointment_save` |  |
 | `APPOINTMENT_DEBT_CONFIRM` | `appointment_save` |  |
 | `APPOINTMENT_FORBIDDEN` | `appointment_save` |  |
 | `APPOINTMENT_LIST_PERIOD_INVALID` | `appointment_list` |  |
+| `APPOINTMENT_MARKER_INVALID` | `appointment_save` |  |
 | `APPOINTMENT_NOT_FOUND` | `appointment_save` |  |
 | `APPOINTMENT_OPEN_APPROVAL` | `appointment_save` |  |
 | `APPOINTMENT_OPEN_BLOCKED` | `appointment_save` |  |
@@ -3842,7 +3978,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `SESSION_USER_INACTIVE` | `session_context` |  |
 | `SESSION_USER_NOT_FOUND` | `session_context` |  |
 | `SESSION_WITHOUT_PROFILE` | `session_context` |  |
-| `SETTINGS_BRANCH_REQUIRED` | `settings_get`, `settings_save` |  |
+| `SETTINGS_BRANCH_REQUIRED` | `agenda_catalog_save`, `settings_get`, `settings_save` |  |
 | `SETTINGS_BUDGET_INVALID` | `settings_save` |  |
 | `SETTINGS_DEBT_INVALID` | `settings_save` |  |
 | `SETTINGS_DRE_INVALID` | `settings_save` |  |
@@ -3904,7 +4040,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

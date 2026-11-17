@@ -377,3 +377,27 @@ drop policy if exists perio_tooth_select on od.perio_tooth;
 create policy perio_tooth_select on od.perio_tooth
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.appointment_category
+drop policy if exists appointment_category_select on od.appointment_category;
+create policy appointment_category_select on od.appointment_category
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.appointment_marker
+drop policy if exists appointment_marker_select on od.appointment_marker;
+create policy appointment_marker_select on od.appointment_marker
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.appointment_tag
+drop policy if exists appointment_tag_select on od.appointment_tag;
+create policy appointment_tag_select on od.appointment_tag
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.chair
+drop policy if exists chair_select on od.chair;
+create policy chair_select on od.chair
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

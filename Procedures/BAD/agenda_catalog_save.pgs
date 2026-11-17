@@ -1,0 +1,143 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.agenda_catalog_save(jsonb)                                 ::
+  ::  UsedBy      : Flutter -> rpc('agenda_catalog_save') (tela Configuracoes)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 17/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastros da agenda na tela Configuracoes: categorias de agendamento,
+    marcadores e cadeiras. Os tres tem nome (unico na filial), cor e situacao.
+      vc_action = 'I'  cria (numero sequencial por filial)  -> permissao CRIAR em SETTINGS
+      vc_action = 'U'  altera parcialmente                  -> permissao ALTERAR em SETTINGS
+    Inativar nao mexe nos agendamentos que ja usam o item.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    vc_action    text     'I' | 'U'
+    vc_entity    text     'category' | 'marker' | 'chair'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_item      bigint   obrigatorio em 'U'
+    vc_name      text     obrigatorio em 'I' (ate 40)
+    vc_color     text     '#RRGGBB' (padrao #0E8C86)
+    it_status    integer  1 ativo | 90 inativo
+
+  Output jsonb: {"vc_entity", "nr_item"}
+
+  Errors: VERSION_MISMATCH, AGENDA_CATALOG_INVALID, SETTINGS_BRANCH_REQUIRED, AGENDA_CATALOG_FORBIDDEN,
+    AGENDA_CATALOG_NOT_FOUND, AGENDA_CATALOG_NAME_REQUIRED, AGENDA_CATALOG_NAME_IN_USE,
+    AGENDA_CATALOG_COLOR_INVALID, AGENDA_CATALOG_STATUS_INVALID
+*/
+create or replace function ad.agenda_catalog_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _entity     text := lower(coalesce(p_json ->> 'vc_entity', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _nr_item    bigint;
+  _name       text;
+  _color      text;
+  _status     smallint;
+  _cur_name   text;
+  _cur_color  text;
+  _cur_status smallint;
+  _table      text;
+  _key        text;
+  _label      text;
+  _dup        bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'agenda_catalog_save');
+  if _action not in ('I', 'U') or _entity not in ('category', 'marker', 'chair') then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('SETTINGS_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'U' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_FORBIDDEN');
+  end if;
+
+  _table := case _entity when 'category' then 'appointment_category' when 'marker' then 'appointment_marker' else 'chair' end;
+  _key   := case _entity when 'category' then 'nr_category' when 'marker' then 'nr_marker' else 'nr_chair' end;
+  _label := case _entity when 'category' then 'Categoria' when 'marker' then 'Marcador' else 'Cadeira' end;
+
+  if _action = 'U' then
+    _nr_item := (p_json ->> 'nr_item')::bigint;
+    execute format('select vc_name, vc_color, it_status from od.%I where nr_company = $1 and nr_branch = $2 and %I = $3 for update',
+                   _table, _key)
+       into _cur_name, _cur_color, _cur_status using _nr_company, _nr_branch, _nr_item;
+    if _cur_name is null then
+      raise exception '%', ad.fn_message('AGENDA_CATALOG_NOT_FOUND');
+    end if;
+  else
+    _cur_color := '#0E8C86';
+    _cur_status := 1;
+  end if;
+
+  _name   := case when p_json ? 'vc_name' then nullif(trim(p_json ->> 'vc_name'), '') else _cur_name end;
+  _color  := case when p_json ? 'vc_color' then upper(coalesce(nullif(trim(p_json ->> 'vc_color'), ''), '#0E8C86'))
+                  else _cur_color end;
+  begin
+    _status := case when p_json ? 'it_status' then (p_json ->> 'it_status')::smallint else _cur_status end;
+  exception when others then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_STATUS_INVALID');
+  end;
+
+  if _name is null then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_NAME_REQUIRED');
+  end if;
+  _name := left(_name, 40);
+  if _color !~ '^#[0-9A-F]{6}$' then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_COLOR_INVALID');
+  end if;
+  if _status is null or _status not in (1, 90) then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_STATUS_INVALID');
+  end if;
+  execute format('select %I from od.%I where nr_company = $1 and nr_branch = $2 and lower(vc_name) = lower($3)', _key, _table)
+     into _dup using _nr_company, _nr_branch, _name;
+  if _dup is not null and _dup is distinct from _nr_item then
+    raise exception '%', ad.fn_message('AGENDA_CATALOG_NAME_IN_USE', jsonb_build_object('Name', _name));
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    execute format('select coalesce(max(%I), 0) + 1 from od.%I where nr_company = $1 and nr_branch = $2', _key, _table)
+       into _nr_item using _nr_company, _nr_branch;
+    execute format('insert into od.%I (nr_company, nr_branch, %I, vc_name, vc_color, it_status, nr_operator)
+                    values ($1, $2, $3, $4, $5, $6, $7)', _table, _key)
+      using _nr_company, _nr_branch, _nr_item, _name, _color, _status, _nr_user;
+  else
+    execute format('update od.%I set vc_name = $4, vc_color = $5, it_status = $6
+                     where nr_company = $1 and nr_branch = $2 and %I = $3', _table, _key)
+      using _nr_company, _nr_branch, _nr_item, _name, _color, _status;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS',
+    case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    _table, _nr_company::text || '/' || _nr_branch::text || '/' || _nr_item::text,
+    format('%s "%s" %s', _label, _name, case when _action = 'I' then 'criada' else 'alterada' end),
+    jsonb_build_object('vc_name', _name, 'vc_color', _color, 'it_status', _status));
+
+  return jsonb_build_object('vc_entity', _entity, 'nr_item', _nr_item);
+end;
+$$;
+
+revoke all on function ad.agenda_catalog_save(jsonb) from public, anon;
+grant execute on function ad.agenda_catalog_save(jsonb) to authenticated;

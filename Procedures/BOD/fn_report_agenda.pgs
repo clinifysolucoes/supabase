@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 17/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - relatorios por categoria e por marcador          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Relatorios do grupo Agenda (a permissao ja foi checada por ad.report_get).
@@ -16,6 +16,9 @@
                      tenha sido cancelada)
       return_alerts  pacientes ativos com alerta de retorno no periodo e a
                      proxima consulta marcada (se houver)
+      categories     consultas do periodo por categoria (sem categoria a parte)
+      markers        consultas do periodo por marcador (uma consulta conta em
+                     cada marcador que tiver)
   Input:
     p_nr_company, p_nr_branch, p_report, p_d0, p_d1 (datas), p_from, p_to
     (mesmo periodo no fuso da filial), p_prof (profissional ou null), p_limit
@@ -114,6 +117,46 @@ begin
       count(*)
       into _rows, _summary, _byprof, _qt
       from base;
+
+  elsif p_report in ('categories', 'markers') then
+    with appt as (
+      select a.nr_company, a.nr_branch, a.nr_appointment, a.nr_category, a.it_status
+        from od.appointment a
+       where a.nr_company = p_nr_company and a.nr_branch = p_nr_branch and a.it_type = 1
+         and a.dh_start >= p_from and a.dh_start < p_to
+         and (p_prof is null or a.nr_professional = p_prof)
+    ), base as (
+      select c.vc_name, c.vc_color, x.it_status
+        from appt x
+        left join od.appointment_category c on c.nr_company = x.nr_company and c.nr_branch = x.nr_branch
+                                           and c.nr_category = x.nr_category
+       where p_report = 'categories'
+      union all
+      select k.vc_name, k.vc_color, x.it_status
+        from appt x
+        join od.appointment_tag t on t.nr_company = x.nr_company and t.nr_branch = x.nr_branch
+                                 and t.nr_appointment = x.nr_appointment
+        join od.appointment_marker k on k.nr_company = t.nr_company and k.nr_branch = t.nr_branch
+                                    and k.nr_marker = t.nr_marker
+       where p_report = 'markers'
+    ), grp as (
+      select vc_name, vc_color, count(*) as qt_total,
+             count(*) filter (where it_status = 5) as qt_done,
+             count(*) filter (where it_status = 7) as qt_no_show,
+             count(*) filter (where it_status = 90) as qt_cancelled
+        from base group by vc_name, vc_color
+    )
+    select
+      (select coalesce(jsonb_agg(jsonb_build_object('vc_name', g.vc_name, 'vc_color', g.vc_color,
+                'qt_total', g.qt_total, 'qt_done', g.qt_done, 'qt_no_show', g.qt_no_show,
+                'qt_cancelled', g.qt_cancelled,
+                'pc_total', round(100.0 * g.qt_total / nullif((select count(*) from appt), 0), 1))
+                order by g.vc_name is null, g.qt_total desc, g.vc_name), '[]'::jsonb)
+         from grp g),
+      jsonb_build_object('qt_appointments', (select count(*) from appt),
+                         'qt_groups', (select count(*) from grp where vc_name is not null)),
+      (select count(*) from grp)
+      into _rows, _summary, _qt;
 
   else /* return_alerts */
     with base as (
