@@ -1,0 +1,201 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.aligner_save(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> rpc('aligner_save') (tela Casos de Alinhadores)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 18/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria ou altera um caso de alinhadores.
+      vc_action = 'I'  cria (numero sequencial por filial) -> permissao CRIAR em ALIGNERS
+      vc_action = 'U'  altera parcialmente                 -> permissao ALTERAR em ALIGNERS
+    Situacao (it_status): 1 iniciado, 2 pendencia da clinica, 3 pendencia da
+    empresa (fabricante), 4 em tratamento, 5 finalizado, 90 cancelado.
+    Pendencia (2 ou 3) pede vc_pending. Finalizar grava dt_finished (hoje
+    ou o informado) e o alinhador atual vira o ultimo. A criacao e cada mudanca
+    de situacao ou de alinhador atual entram no historico (vc_event_text
+    opcional). Grava ad.event_log sem dados pessoais.
+
+  Input p_json:
+    nr_version      integer  obrigatorio = 1
+    vc_action       text     'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_case         bigint   obrigatorio em 'U'
+    nr_patient      bigint   obrigatorio em 'I' (paciente ativo)
+    nr_professional bigint   opcional (profissional ativo)
+    vc_system       text     obrigatorio em 'I' (fabricante/sistema, ate 60)
+    vc_case_number  text     opcional (numero do caso no fabricante, ate 60)
+    nr_budget       bigint   opcional (orcamento do paciente)
+    qt_aligners     integer  1..200 (padrao 1)
+    qt_current      integer  0..qt_aligners (alinhador em uso)
+    qt_days_change  integer  1..60 (troca a cada N dias; padrao 14)
+    dt_start        date     opcional (padrao hoje)
+    dt_finished     date     opcional ao finalizar
+    vc_pending      text     pendencia (ate 500)
+    vc_notes        text     observacoes (ate 1000)
+    it_status       integer  ver acima (padrao 1)
+    vc_event_text   text     opcional (anotacao do historico, ate 500)
+
+  Output jsonb: {"nr_case"}
+
+  Errors: VERSION_MISMATCH, ALIGNER_ACTION_INVALID, ALIGNER_BRANCH_REQUIRED, ALIGNER_FORBIDDEN,
+    ALIGNER_NOT_FOUND, ALIGNER_VALUE_INVALID, ALIGNER_PATIENT_INVALID, ALIGNER_PROFESSIONAL_INVALID,
+    ALIGNER_BUDGET_INVALID, ALIGNER_SYSTEM_REQUIRED, ALIGNER_PENDING_REQUIRED, ALIGNER_STATUS_INVALID
+*/
+create or replace function ad.aligner_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _cur        od.aligner_case%rowtype;
+  _new        od.aligner_case%rowtype;
+  _nr         bigint;
+  _tz         text;
+  _today      date;
+  _event      text := left(nullif(trim(p_json ->> 'vc_event_text'), ''), 500);
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'aligner_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('ALIGNER_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('ALIGNER_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'ALIGNERS');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'U' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('ALIGNER_FORBIDDEN');
+  end if;
+  select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  _today := (now() at time zone coalesce(_tz, 'America/Sao_Paulo'))::date;
+
+  if _action = 'U' then
+    _nr := (p_json ->> 'nr_case')::bigint;
+    select * into _cur from od.aligner_case a
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_case = _nr for update;
+    if not found then
+      raise exception '%', ad.fn_message('ALIGNER_NOT_FOUND');
+    end if;
+  else
+    _cur.qt_aligners    := 1;
+    _cur.qt_current     := 0;
+    _cur.qt_days_change := 14;
+    _cur.dt_start       := _today;
+    _cur.it_status      := 1;
+  end if;
+
+  begin
+    _new := _cur;
+    _new.nr_patient      := case when p_json ? 'nr_patient'      then (p_json ->> 'nr_patient')::bigint      else _cur.nr_patient end;
+    _new.nr_professional := case when p_json ? 'nr_professional' then (p_json ->> 'nr_professional')::bigint else _cur.nr_professional end;
+    _new.vc_system       := case when p_json ? 'vc_system'       then left(nullif(trim(p_json ->> 'vc_system'), ''), 60) else _cur.vc_system end;
+    _new.vc_case_number  := case when p_json ? 'vc_case_number'  then left(nullif(trim(p_json ->> 'vc_case_number'), ''), 60) else _cur.vc_case_number end;
+    _new.nr_budget       := case when p_json ? 'nr_budget'       then (p_json ->> 'nr_budget')::bigint       else _cur.nr_budget end;
+    _new.qt_aligners     := case when p_json ? 'qt_aligners'     then (p_json ->> 'qt_aligners')::smallint   else _cur.qt_aligners end;
+    _new.qt_current      := case when p_json ? 'qt_current'      then (p_json ->> 'qt_current')::smallint    else _cur.qt_current end;
+    _new.qt_days_change  := case when p_json ? 'qt_days_change'  then (p_json ->> 'qt_days_change')::smallint else _cur.qt_days_change end;
+    _new.dt_start        := case when p_json ? 'dt_start'        then coalesce((p_json ->> 'dt_start')::date, _today) else _cur.dt_start end;
+    _new.dt_finished     := case when p_json ? 'dt_finished'     then (p_json ->> 'dt_finished')::date       else _cur.dt_finished end;
+    _new.vc_pending      := case when p_json ? 'vc_pending'      then left(nullif(trim(p_json ->> 'vc_pending'), ''), 500) else _cur.vc_pending end;
+    _new.vc_notes        := case when p_json ? 'vc_notes'        then left(nullif(trim(p_json ->> 'vc_notes'), ''), 1000) else _cur.vc_notes end;
+    _new.it_status       := case when p_json ? 'it_status'       then (p_json ->> 'it_status')::smallint     else _cur.it_status end;
+  exception when others then
+    raise exception '%', ad.fn_message('ALIGNER_VALUE_INVALID');
+  end;
+
+  if _new.it_status is null or _new.it_status not in (1, 2, 3, 4, 5, 90) then
+    raise exception '%', ad.fn_message('ALIGNER_STATUS_INVALID');
+  end if;
+  if _new.vc_system is null then
+    raise exception '%', ad.fn_message('ALIGNER_SYSTEM_REQUIRED');
+  end if;
+  if _new.it_status in (2, 3) and _new.vc_pending is null then
+    raise exception '%', ad.fn_message('ALIGNER_PENDING_REQUIRED');
+  end if;
+  if _new.it_status = 5 then
+    _new.dt_finished := coalesce(_new.dt_finished, _today);
+    _new.qt_current  := coalesce(_new.qt_aligners, _new.qt_current);
+  else
+    _new.dt_finished := null;
+  end if;
+  if _new.qt_aligners is null or _new.qt_aligners not between 1 and 200
+     or _new.qt_current is null or _new.qt_current not between 0 and _new.qt_aligners
+     or _new.qt_days_change is null or _new.qt_days_change not between 1 and 60
+     or _new.dt_start is null or _new.dt_finished < _new.dt_start then
+    raise exception '%', ad.fn_message('ALIGNER_VALUE_INVALID');
+  end if;
+  if _new.nr_patient is null or not exists (
+       select 1 from od.patient p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _new.nr_patient
+          and (p.it_status = 1 or _new.nr_patient is not distinct from _cur.nr_patient)) then
+    raise exception '%', ad.fn_message('ALIGNER_PATIENT_INVALID');
+  end if;
+  if _new.nr_professional is not null and not exists (
+       select 1 from od.professional p
+        where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_professional = _new.nr_professional
+          and (p.it_status = 1 or _new.nr_professional is not distinct from _cur.nr_professional)) then
+    raise exception '%', ad.fn_message('ALIGNER_PROFESSIONAL_INVALID');
+  end if;
+  if _new.nr_budget is not null and not exists (
+       select 1 from od.budget b
+        where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_budget = _new.nr_budget
+          and b.nr_patient = _new.nr_patient) then
+    raise exception '%', ad.fn_message('ALIGNER_BUDGET_INVALID');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(a.nr_case), 0) + 1 into _nr
+      from od.aligner_case a where a.nr_company = _nr_company and a.nr_branch = _nr_branch;
+    insert into od.aligner_case (nr_company, nr_branch, nr_case, nr_patient, nr_professional, vc_system, vc_case_number,
+                                 nr_budget, qt_aligners, qt_current, qt_days_change, dt_start, dt_finished, vc_pending,
+                                 vc_notes, it_status, nr_user, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _new.nr_patient, _new.nr_professional, _new.vc_system, _new.vc_case_number,
+            _new.nr_budget, _new.qt_aligners, _new.qt_current, _new.qt_days_change, _new.dt_start, _new.dt_finished,
+            _new.vc_pending, _new.vc_notes, _new.it_status, _nr_user, _nr_user);
+  else
+    update od.aligner_case a set
+      nr_patient = _new.nr_patient, nr_professional = _new.nr_professional, vc_system = _new.vc_system,
+      vc_case_number = _new.vc_case_number, nr_budget = _new.nr_budget, qt_aligners = _new.qt_aligners,
+      qt_current = _new.qt_current, qt_days_change = _new.qt_days_change, dt_start = _new.dt_start,
+      dt_finished = _new.dt_finished, vc_pending = _new.vc_pending, vc_notes = _new.vc_notes,
+      it_status = _new.it_status
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch and a.nr_case = _nr;
+  end if;
+
+  -- historico: criacao e cada mudanca de situacao ou de alinhador atual
+  if _action = 'I' or _new.it_status <> _cur.it_status or _new.qt_current <> _cur.qt_current or _event is not null then
+    insert into od.aligner_case_event (nr_company, nr_branch, nr_case, nr_event, it_status, qt_current, vc_text,
+                                       nr_user, nr_operator)
+    select _nr_company, _nr_branch, _nr, coalesce(max(e.nr_event), 0) + 1, _new.it_status, _new.qt_current,
+           coalesce(_event, case when _new.it_status in (2, 3) then _new.vc_pending end), _nr_user, _nr_user
+      from od.aligner_case_event e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_case = _nr;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'ALIGNERS', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'aligner_case', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Caso de alinhadores %s %s', _nr, case when _action = 'I' then 'criado' else 'alterado' end),
+    jsonb_build_object('nr_patient', _new.nr_patient, 'it_status', _new.it_status, 'qt_current', _new.qt_current));
+
+  return jsonb_build_object('nr_case', _nr);
+end;
+$$;
+
+revoke all on function ad.aligner_save(jsonb) from public, anon;
+grant execute on function ad.aligner_save(jsonb) to authenticated;

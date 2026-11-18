@@ -413,3 +413,15 @@ drop policy if exists price_table_item_select on od.price_table_item;
 create policy price_table_item_select on od.price_table_item
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.aligner_case
+drop policy if exists aligner_case_select on od.aligner_case;
+create policy aligner_case_select on od.aligner_case
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.aligner_case_event
+drop policy if exists aligner_case_event_select on od.aligner_case_event;
+create policy aligner_case_event_select on od.aligner_case_event
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

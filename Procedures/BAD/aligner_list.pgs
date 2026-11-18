@@ -1,0 +1,131 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.aligner_list(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> rpc('aligner_list') (tela Casos de Alinhadores)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 18/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Casos de alinhadores da filial (LER na tela ALIGNERS), com o historico,
+    a previsao de termino (inicio + alinhadores x dias de troca) e os totais
+    por situacao (iniciados, pendencias da clinica e da empresa, em
+    tratamento, finalizados), como no painel do Clinicorp.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_status        integer  opcional (uma situacao; sem = todas menos canceladas)
+    dt_start, dt_end date     opcionais (casos iniciados no periodo)
+    nr_professional  bigint   opcional
+    nr_patient       bigint   opcional
+    vc_search        text     opcional (paciente, sistema ou numero do caso)
+
+  Output jsonb: {"cases": [{nr_case, nr_patient, vc_patient, nr_professional, vc_professional, vc_system,
+                            vc_case_number, nr_budget, qt_aligners, qt_current, qt_days_change, dt_start,
+                            dt_finished, dt_forecast, vc_pending, vc_notes, it_status,
+                            events: [{nr_event, dh_event, it_status, qt_current, vc_text, vc_user}]}],
+                 "totals": {qt_started, qt_pending_clinic, qt_pending_company, qt_treatment, qt_finished},
+                 "id_truncated"}
+
+  Errors: VERSION_MISMATCH, ALIGNER_BRANCH_REQUIRED, ALIGNER_FORBIDDEN, ALIGNER_VALUE_INVALID
+*/
+create or replace function ad.aligner_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _status     smallint;
+  _d0         date;
+  _d1         date;
+  _prof       bigint;
+  _patient    bigint;
+  _search     text := nullif(trim(coalesce(p_json ->> 'vc_search', '')), '');
+  _limit      constant integer := 500;
+  _cases      jsonb;
+  _qt         integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'aligner_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('ALIGNER_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'ALIGNERS') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('ALIGNER_FORBIDDEN');
+  end if;
+  begin
+    _status  := (p_json ->> 'it_status')::smallint;
+    _d0      := (p_json ->> 'dt_start')::date;
+    _d1      := (p_json ->> 'dt_end')::date;
+    _prof    := (p_json ->> 'nr_professional')::bigint;
+    _patient := (p_json ->> 'nr_patient')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('ALIGNER_VALUE_INVALID');
+  end;
+
+  with base as (
+    select a.*, pa.vc_name as vc_patient, pr.vc_name as vc_professional,
+           a.dt_start + a.qt_aligners * a.qt_days_change as dt_forecast
+      from od.aligner_case a
+      join od.patient pa on pa.nr_company = a.nr_company and pa.nr_branch = a.nr_branch and pa.nr_patient = a.nr_patient
+      left join od.professional pr on pr.nr_company = a.nr_company and pr.nr_branch = a.nr_branch
+                                  and pr.nr_professional = a.nr_professional
+     where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+       and (case when _status is null then a.it_status <> 90 else a.it_status = _status end)
+       and (_d0 is null or a.dt_start >= _d0)
+       and (_d1 is null or a.dt_start <= _d1)
+       and (_prof is null or a.nr_professional = _prof)
+       and (_patient is null or a.nr_patient = _patient)
+       and (_search is null or pa.vc_name ilike '%' || _search || '%' or a.vc_system ilike '%' || _search || '%'
+            or coalesce(a.vc_case_number, '') ilike '%' || _search || '%')
+  ), lim as (
+    select * from base order by it_status, dt_start desc, nr_case desc limit _limit
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'nr_case', l.nr_case, 'nr_patient', l.nr_patient, 'vc_patient', l.vc_patient,
+           'nr_professional', l.nr_professional, 'vc_professional', l.vc_professional,
+           'vc_system', l.vc_system, 'vc_case_number', l.vc_case_number, 'nr_budget', l.nr_budget,
+           'qt_aligners', l.qt_aligners, 'qt_current', l.qt_current, 'qt_days_change', l.qt_days_change,
+           'dt_start', l.dt_start, 'dt_finished', l.dt_finished, 'dt_forecast', l.dt_forecast,
+           'vc_pending', l.vc_pending, 'vc_notes', l.vc_notes, 'it_status', l.it_status,
+           'events', coalesce((
+             select jsonb_agg(jsonb_build_object('nr_event', e.nr_event, 'dh_event', e.dh_event,
+                      'it_status', e.it_status, 'qt_current', e.qt_current, 'vc_text', e.vc_text,
+                      'vc_user', u.vc_name) order by e.nr_event desc)
+               from od.aligner_case_event e
+               left join ad.app_user u on u.nr_user = e.nr_user
+              where e.nr_company = l.nr_company and e.nr_branch = l.nr_branch and e.nr_case = l.nr_case), '[]'::jsonb))
+           order by l.it_status, l.dt_start desc, l.nr_case desc), '[]'::jsonb),
+         (select count(*) from base)
+    into _cases, _qt
+    from lim l;
+
+  return jsonb_build_object(
+    'cases', _cases,
+    'totals', (select jsonb_build_object(
+                 'qt_started',         count(*) filter (where a.it_status = 1),
+                 'qt_pending_clinic',  count(*) filter (where a.it_status = 2),
+                 'qt_pending_company', count(*) filter (where a.it_status = 3),
+                 'qt_treatment',       count(*) filter (where a.it_status = 4),
+                 'qt_finished',        count(*) filter (where a.it_status = 5))
+                 from od.aligner_case a
+                where a.nr_company = _nr_company and a.nr_branch = _nr_branch
+                  and (_d0 is null or a.dt_start >= _d0)
+                  and (_d1 is null or a.dt_start <= _d1)
+                  and (_prof is null or a.nr_professional = _prof)
+                  and (_patient is null or a.nr_patient = _patient)),
+    'id_truncated', _qt > _limit);
+end;
+$$;
+
+revoke all on function ad.aligner_list(jsonb) from public, anon;
+grant execute on function ad.aligner_list(jsonb) to authenticated;
