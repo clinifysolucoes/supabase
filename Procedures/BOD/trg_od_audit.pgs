@@ -277,3 +277,11 @@ create or replace trigger appointment_tag_audit
 create or replace trigger chair_audit
   before insert or update on od.chair
   for each row execute function ad.trg_audit();
+
+create or replace trigger price_table_audit
+  before insert or update on od.price_table
+  for each row execute function ad.trg_audit();
+
+create or replace trigger price_table_item_audit
+  before insert or update on od.price_table_item
+  for each row execute function ad.trg_audit();

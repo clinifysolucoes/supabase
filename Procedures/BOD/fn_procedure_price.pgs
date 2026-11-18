@@ -1,0 +1,37 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_procedure_price(bigint, bigint, bigint, bigint)         ::
+  ::  UsedBy      : ad.budget_save                                                ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 18/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Preco de tabela do procedimento: o da tabela de preco informada
+    (od.price_table_item) ou, sem tabela ou sem preco nela, o valor cobrado
+    hoje (od.procedure.vl_current_price). Helper interno (sem grant).
+  Input:
+    p_nr_company, p_nr_branch, p_nr_procedure, p_nr_price_table (ou null)
+  Output: numeric (null quando nao ha preco nenhum)
+*/
+create or replace function od.fn_procedure_price(
+  p_nr_company     bigint,
+  p_nr_branch      bigint,
+  p_nr_procedure   bigint,
+  p_nr_price_table bigint)
+returns numeric
+language sql
+stable
+set search_path = ''
+as $$
+  select coalesce(
+    (select t.vl_price from od.price_table_item t
+      where t.nr_company = p_nr_company and t.nr_branch = p_nr_branch
+        and t.nr_price_table = p_nr_price_table and t.nr_procedure = p_nr_procedure),
+    (select p.vl_current_price from od.procedure p
+      where p.nr_company = p_nr_company and p.nr_branch = p_nr_branch and p.nr_procedure = p_nr_procedure));
+$$;
+
+revoke all on function od.fn_procedure_price(bigint, bigint, bigint, bigint) from public, anon, authenticated;
