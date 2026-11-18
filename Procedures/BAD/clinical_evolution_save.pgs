@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 07/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - bloqueios do tratamento                          ::
+  ::  Change      : 18/11/2026 - sessoes, retorno e tempo de execucao             ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Evolucao clinica do paciente (tela PATIENTS).
@@ -31,8 +31,17 @@
     nr_budget, nr_item        opcionais (item de orcamento aprovado do paciente, ainda nao realizado)
     nr_evolution     bigint   obrigatorio em 'D'
     id_block_override boolean opcional (administrador confirma registrar com pendencia)
+    qt_minutes       integer  opcional 1..600 (tempo de execucao; so com id_record_time)
+    Sessoes (od.branch_setting.id_record_sessions): o item do orcamento fica
+    realizado (dt_done) so quando qt_sessions_done chega a qt_sessions; cada
+    evolucao do item e uma sessao (nr_session). Sem sessoes, uma evolucao
+    conclui o item. A exclusao desfaz a sessao.
+    Retorno (id_record_return): ao concluir um procedimento com qt_return_days,
+    o alerta de retorno do paciente passa para a data da evolucao + N dias (se
+    ele nao tiver alerta futuro mais proximo).
 
-  Output jsonb: {"nr_evolution", "block": {"vc_kind", "qt_entries", "vl_total"} | null}
+  Output jsonb: {"nr_evolution", "nr_session" (null sem sessoes), "id_item_done", "dt_return_alert" (novo
+                 alerta, se houver), "block": {"vc_kind", "qt_entries", "vl_total"} | null}
     Bloqueios do tratamento (od.fn_patient_block 'TREAT'): na inclusao, conta
     vencida, conta em aberto ou contrato sem assinatura conforme as regras
     it_treat_* da filial: 2 registra e devolve "block", 3 so o administrador
@@ -43,7 +52,7 @@
     CLINICAL_EVOLUTION_VALUE_INVALID, CLINICAL_EVOLUTION_PROFESSIONAL_INVALID,
     CLINICAL_EVOLUTION_PROCEDURE_INVALID, CLINICAL_EVOLUTION_ITEM_INVALID, CLINICAL_EVOLUTION_NOT_FOUND,
     CLINICAL_EVOLUTION_BLOCKED {Kind, Amount}, CLINICAL_EVOLUTION_APPROVAL {Kind, Amount},
-    CLINICAL_EVOLUTION_CONFIRM {Kind, Amount}
+    CLINICAL_EVOLUTION_CONFIRM {Kind, Amount}, CLINICAL_EVOLUTION_MINUTES_INVALID
 */
 create or replace function ad.clinical_evolution_save(p_json jsonb)
 returns jsonb
@@ -67,6 +76,14 @@ declare
   _budget     bigint;
   _item       smallint;
   _block      jsonb;
+  _set        od.branch_setting%rowtype;
+  _minutes    smallint;
+  _session    smallint;
+  _done       boolean := false;
+  _ret_days   smallint;
+  _ret_date   date;
+  _ret_name   text;
+  _tz         text;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'clinical_evolution_save');
   if _action not in ('I', 'D') then
@@ -104,8 +121,14 @@ begin
     if not found then
       raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_NOT_FOUND');
     end if;
-    update od.budget_item i set dt_done = null, nr_evolution = null
-     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_evolution = _nr_evol
+    -- desfaz a sessao (e a conclusao) do item do orcamento
+    update od.budget_item i set dt_done = null, nr_evolution = null,
+                                qt_sessions_done = greatest(0, i.qt_sessions_done - 1)
+      from od.clinical_evolution e
+     where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient
+       and e.nr_evolution = _nr_evol and e.nr_budget is not null
+       and i.nr_company = e.nr_company and i.nr_branch = e.nr_branch and i.nr_budget = e.nr_budget
+       and i.nr_item = e.nr_item
        and exists (select 1 from od.budget b where b.nr_company = i.nr_company and b.nr_branch = i.nr_branch
                                                and b.nr_budget = i.nr_budget and b.nr_patient = _nr_patient);
     perform od.fn_stock_evolution(_nr_company, _nr_branch, _nr_patient, _nr_evol, _nr_user, true);
@@ -143,6 +166,17 @@ begin
     if _dh > now() + interval '5 minutes' or (_budget is null) <> (_item is null) then
       raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_VALUE_INVALID');
     end if;
+    select * into _set from od.branch_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+    if coalesce(_set.id_record_time, false) and p_json ? 'qt_minutes' and (p_json ->> 'qt_minutes') is not null then
+      begin
+        _minutes := (p_json ->> 'qt_minutes')::smallint;
+      exception when others then
+        raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_MINUTES_INVALID');
+      end;
+      if _minutes not between 1 and 600 then
+        raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_MINUTES_INVALID');
+      end if;
+    end if;
     if _prof is not null and not exists (
          select 1 from od.professional r where r.nr_company = _nr_company and r.nr_branch = _nr_branch
                                            and r.nr_professional = _prof) then
@@ -172,13 +206,44 @@ begin
     select coalesce(max(e.nr_evolution), 0) + 1 into _nr_evol
       from od.clinical_evolution e
      where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _nr_patient;
-    insert into od.clinical_evolution (nr_company, nr_branch, nr_patient, nr_evolution, dh_evolution, nr_professional,
-                                       vc_text, vc_tooth, nr_procedure, nr_budget, nr_item, nr_user, nr_operator)
-    values (_nr_company, _nr_branch, _nr_patient, _nr_evol, _dh, _prof, _text,
-            left(nullif(trim(p_json ->> 'vc_tooth'), ''), 40), _proc, _budget, _item, _nr_user, _nr_user);
     if _budget is not null then
-      update od.budget_item i set dt_done = _dh::date, nr_evolution = _nr_evol
+      -- sessao: so com a configuracao ligada e item com mais de uma sessao
+      select case when coalesce(_set.id_record_sessions, false) and i.qt_sessions > 1 then i.qt_sessions_done + 1 end,
+             not coalesce(_set.id_record_sessions, false) or i.qt_sessions_done + 1 >= i.qt_sessions
+        into _session, _done
+        from od.budget_item i
        where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _budget and i.nr_item = _item;
+    else
+      _done := _proc is not null;
+    end if;
+    insert into od.clinical_evolution (nr_company, nr_branch, nr_patient, nr_evolution, dh_evolution, nr_professional,
+                                       vc_text, vc_tooth, nr_procedure, nr_budget, nr_item, nr_session, qt_minutes,
+                                       nr_user, nr_operator)
+    values (_nr_company, _nr_branch, _nr_patient, _nr_evol, _dh, _prof, _text,
+            left(nullif(trim(p_json ->> 'vc_tooth'), ''), 40), _proc, _budget, _item, _session, _minutes,
+            _nr_user, _nr_user);
+    if _budget is not null then
+      update od.budget_item i set
+        qt_sessions_done = least(i.qt_sessions, i.qt_sessions_done + 1),
+        dt_done          = case when _done then _dh::date else i.dt_done end,
+        nr_evolution     = case when _done then _nr_evol else i.nr_evolution end
+       where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_budget = _budget and i.nr_item = _item;
+    end if;
+    -- retorno automatico do procedimento concluido
+    if _done and _proc is not null and coalesce(_set.id_record_return, false) then
+      select p.qt_return_days, p.vc_name into _ret_days, _ret_name
+        from od.procedure p where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_procedure = _proc;
+      if _ret_days is not null then
+        select b.vc_timezone into _tz from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+        _ret_date := (_dh at time zone _tz)::date + _ret_days;
+        update od.patient p set dt_return_alert = _ret_date, vc_return_alert = left('Retorno: ' || _ret_name, 200)
+         where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_patient = _nr_patient
+           and (p.dt_return_alert is null or p.dt_return_alert < (now() at time zone _tz)::date
+                or p.dt_return_alert > _ret_date);
+        if not found then
+          _ret_date := null;
+        end if;
+      end if;
     end if;
     perform od.fn_stock_evolution(_nr_company, _nr_branch, _nr_patient, _nr_evol, _nr_user, false);
   end if;
@@ -189,7 +254,8 @@ begin
     format('Evolução %s no paciente %s', case when _action = 'I' then 'registrada' else 'excluída' end, _vc_name),
     jsonb_build_object('nr_patient', _nr_patient, 'nr_evolution', _nr_evol, 'nr_budget', _budget, 'nr_item', _item));
 
-  return jsonb_build_object('nr_evolution', _nr_evol, 'block', _block);
+  return jsonb_build_object('nr_evolution', _nr_evol, 'nr_session', _session, 'id_item_done', _done and _budget is not null,
+                            'dt_return_alert', _ret_date, 'block', _block);
 end;
 $$;
 

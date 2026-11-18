@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - bloqueios no check-in e no tratamento            ::
+  ::  Change      : 18/11/2026 - sessoes, retorno e tempo no prontuario           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracoes da filial: dados da clinica (ad.branch), preferencias da
@@ -34,7 +34,8 @@
                   "id_budget_request_approval", "id_budget_admin_below_min", "id_budget_reduction_as_discount",
                   "it_open_rule", "it_late_edit", "id_color_by_category", "it_agenda_mode",
                   "it_contract_rule", "it_checkin_debt_rule", "it_checkin_open_rule", "it_checkin_contract_rule",
-                  "it_treat_debt_rule", "it_treat_open_rule", "it_treat_contract_rule"},
+                  "it_treat_debt_rule", "it_treat_open_rule", "it_treat_contract_rule",
+                  "id_record_sessions", "id_record_return", "id_record_time"},
      "agenda_catalog": {"categories", "markers", "chairs": [{"nr_item", "vc_name", "vc_color", "it_status"}]},
      "hours": [{"it_weekday", "qt_minute_start", "qt_minute_end"}],
      "security": {"it_mfa_policy"},          (2FA da empresa: 0 nao | 1 admins | 2 todos)
@@ -112,7 +113,10 @@ begin
       'it_checkin_contract_rule', coalesce(_s.it_checkin_contract_rule, 1),
       'it_treat_debt_rule', coalesce(_s.it_treat_debt_rule, 1),
       'it_treat_open_rule', coalesce(_s.it_treat_open_rule, 1),
-      'it_treat_contract_rule', coalesce(_s.it_treat_contract_rule, 1)),
+      'it_treat_contract_rule', coalesce(_s.it_treat_contract_rule, 1),
+      'id_record_sessions', coalesce(_s.id_record_sessions, false),
+      'id_record_return', coalesce(_s.id_record_return, false),
+      'id_record_time', coalesce(_s.id_record_time, false)),
     'agenda_catalog', jsonb_build_object(
       'categories', coalesce((select jsonb_agg(jsonb_build_object('nr_item', c.nr_category, 'vc_name', c.vc_name,
                       'vc_color', c.vc_color, 'it_status', c.it_status) order by c.vc_name)

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 14/10/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 18/11/2026 - sessoes e retorno do procedimento                ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cadastro de procedimentos precificados.
@@ -27,6 +27,8 @@
     vc_name            text     obrigatorio em 'I' (ate 80, unico na filial)
     nr_specialty       bigint   opcional (especialidade ativa da filial; null limpa)
     qt_minutes         numeric  >= 0 (tempo de cadeira)
+    qt_sessions        integer  1..60 (sessoes previstas; padrao 1)
+    qt_return_days     integer  1..730 ou null (retorno depois de concluir)
     vl_lab_cost        numeric  >= 0 (laboratorio / terceiros)
     vl_material_other  numeric  >= 0 (materiais sem cadastro, valor informado)
     vl_current_price   numeric  >= 0 ou null (valor cobrado hoje, so comparacao)
@@ -42,7 +44,7 @@
     PROCEDURE_MINUTES_INVALID, PROCEDURE_VALUE_INVALID {Field}, PROCEDURE_PERCENT_INVALID {Field},
     PROCEDURE_STATUS_INVALID, PROCEDURE_MATERIALS_INVALID, PROCEDURE_MATERIAL_INVALID {Material},
     PROCEDURE_QUANTITY_INVALID {Material}, PROCEDURE_SPECIALTY_INVALID, PROCEDURE_REQUIRED,
-    PROCEDURE_NOT_FOUND
+    PROCEDURE_NOT_FOUND, PROCEDURE_SESSIONS_INVALID
 */
 create or replace function ad.procedure_save(p_json jsonb)
 returns jsonb
@@ -97,6 +99,15 @@ begin
   if p_json ? 'qt_minutes' and coalesce((p_json ->> 'qt_minutes')::numeric, -1) < 0 then
     raise exception '%', ad.fn_message('PROCEDURE_MINUTES_INVALID');
   end if;
+  begin
+    if (p_json ? 'qt_sessions' and coalesce((p_json ->> 'qt_sessions')::integer, 0) not between 1 and 60)
+       or (p_json ? 'qt_return_days' and (p_json ->> 'qt_return_days') is not null
+           and (p_json ->> 'qt_return_days')::integer not between 1 and 730) then
+      raise exception 'x';
+    end if;
+  exception when others then
+    raise exception '%', ad.fn_message('PROCEDURE_SESSIONS_INVALID');
+  end;
   foreach _field in array array['vl_lab_cost', 'vl_material_other', 'vl_current_price'] loop
     if p_json ? _field and (p_json ->> _field) is not null and (p_json ->> _field)::numeric < 0 then
       raise exception '%', ad.fn_message('PROCEDURE_VALUE_INVALID', jsonb_build_object('Field', _field));
@@ -172,7 +183,7 @@ begin
 
     insert into od.procedure (
       nr_company, nr_branch, nr_procedure, vc_code, vc_name, nr_specialty, qt_minutes, vl_lab_cost,
-      vl_material_other, vl_current_price, pc_commission, pc_profit, it_status, nr_operator)
+      vl_material_other, vl_current_price, pc_commission, pc_profit, qt_sessions, qt_return_days, it_status, nr_operator)
     values (
       _nr_company, _nr_branch, _nr_procedure, _vc_code, _vc_name, _nr_specialty,
       coalesce((p_json ->> 'qt_minutes')::numeric, 0),
@@ -181,6 +192,8 @@ begin
       (p_json ->> 'vl_current_price')::numeric,
       (p_json ->> 'pc_commission')::numeric,
       (p_json ->> 'pc_profit')::numeric,
+      coalesce((p_json ->> 'qt_sessions')::smallint, 1),
+      (p_json ->> 'qt_return_days')::smallint,
       1, _nr_user)
     returning * into _row;
 
@@ -219,6 +232,8 @@ begin
       vl_current_price  = case when p_json ? 'vl_current_price'  then (p_json ->> 'vl_current_price')::numeric                 else p.vl_current_price end,
       pc_commission     = case when p_json ? 'pc_commission'     then (p_json ->> 'pc_commission')::numeric                    else p.pc_commission end,
       pc_profit         = case when p_json ? 'pc_profit'         then (p_json ->> 'pc_profit')::numeric                        else p.pc_profit end,
+      qt_sessions       = case when p_json ? 'qt_sessions'       then (p_json ->> 'qt_sessions')::smallint                     else p.qt_sessions end,
+      qt_return_days    = case when p_json ? 'qt_return_days'    then (p_json ->> 'qt_return_days')::smallint                  else p.qt_return_days end,
       it_status         = case when p_json ? 'it_status'         then (p_json ->> 'it_status')::smallint                       else p.it_status end
     where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_procedure = _nr_procedure
     returning p.* into _row;

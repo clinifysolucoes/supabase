@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 07/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 18/11/2026 - sessoes, tempo e configuracao do prontuario      ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Prontuario do paciente (LER na tela PATIENTS): anamneses com respostas,
@@ -22,9 +22,12 @@
      "anamneses": [{"nr_anamnesis", "nr_model", "vc_model", "dt_filled", "vc_notes", "vc_user", "dh_created",
                     "answers": [{"nr_question", "vc_question", "it_type", "id_yes", "vc_text", "id_alert"}]}],
      "evolutions": [{"nr_evolution", "dh_evolution", "nr_professional", "vc_professional", "vc_text",
-                     "vc_tooth", "nr_procedure", "vc_procedure", "nr_budget", "nr_item", "vc_user"}],
+                     "vc_tooth", "nr_procedure", "vc_procedure", "nr_budget", "nr_item", "nr_session",
+                     "qt_minutes", "vc_user"}],
      "marks": [{"nr_mark", "vc_tooth", "it_condition", "vc_faces", "it_situation", "vc_notes", "dt_mark"}],
-     "pending_items": [{"nr_budget", "nr_item", "vc_description", "vc_tooth", "nr_procedure", "dt_budget"}],
+     "pending_items": [{"nr_budget", "nr_item", "vc_description", "vc_tooth", "nr_procedure", "dt_budget",
+                        "qt_sessions", "qt_sessions_done"}],
+     "record_settings": {"id_sessions", "id_return", "id_time"},
      "done_items": [{"nr_budget", "nr_item", "vc_description", "vc_tooth", "dt_done", "nr_evolution"}],
      "permission": {"id_create", "id_update"}}
 
@@ -96,7 +99,8 @@ begin
                'nr_evolution', e.nr_evolution, 'dh_evolution', e.dh_evolution,
                'nr_professional', e.nr_professional, 'vc_professional', pr.vc_name,
                'vc_text', e.vc_text, 'vc_tooth', e.vc_tooth, 'nr_procedure', e.nr_procedure,
-               'vc_procedure', pc.vc_name, 'nr_budget', e.nr_budget, 'nr_item', e.nr_item, 'vc_user', u.vc_name)
+               'vc_procedure', pc.vc_name, 'nr_budget', e.nr_budget, 'nr_item', e.nr_item,
+               'nr_session', e.nr_session, 'qt_minutes', e.qt_minutes, 'vc_user', u.vc_name)
              order by e.dh_evolution desc, e.nr_evolution desc)
         from od.clinical_evolution e
         left join od.professional pr on pr.nr_company = e.nr_company and pr.nr_branch = e.nr_branch
@@ -117,7 +121,8 @@ begin
     'pending_items', coalesce((
       select jsonb_agg(jsonb_build_object(
                'nr_budget', i.nr_budget, 'nr_item', i.nr_item, 'vc_description', i.vc_description,
-               'vc_tooth', i.vc_tooth, 'nr_procedure', i.nr_procedure, 'dt_budget', b.dt_budget)
+               'vc_tooth', i.vc_tooth, 'nr_procedure', i.nr_procedure, 'dt_budget', b.dt_budget,
+               'qt_sessions', i.qt_sessions, 'qt_sessions_done', i.qt_sessions_done)
              order by b.dt_budget, i.nr_budget, i.nr_item)
         from od.budget b
         join od.budget_item i on i.nr_company = b.nr_company and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget
@@ -132,6 +137,11 @@ begin
         join od.budget_item i on i.nr_company = b.nr_company and i.nr_branch = b.nr_branch and i.nr_budget = b.nr_budget
        where b.nr_company = _nr_company and b.nr_branch = _nr_branch and b.nr_patient = _nr_patient
          and i.dt_done is not null), '[]'::jsonb),
+    'record_settings', (select jsonb_build_object('id_sessions', coalesce(s.id_record_sessions, false),
+                                                  'id_return', coalesce(s.id_record_return, false),
+                                                  'id_time', coalesce(s.id_record_time, false))
+                          from (select 1) x
+                          left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch),
     'permission', jsonb_build_object(
       'id_create', coalesce((_perm ->> 'id_create')::boolean, false) or coalesce((_perm ->> 'id_update')::boolean, false),
       'id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
