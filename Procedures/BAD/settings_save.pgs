@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - cor por categoria e agenda por cadeira           ::
+  ::  Change      : 17/11/2026 - bloqueios no check-in e no tratamento            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava as preferencias da filial (od.branch_setting, criada na primeira
@@ -45,6 +45,11 @@
     it_late_edit            integer  opcional 0 editaveis | 1 so administrador | 2 nao editaveis
     id_color_by_category    boolean  opcional (cartao da agenda com a cor da categoria)
     it_agenda_mode          integer  opcional 1 por profissional | 2 por cadeira
+    it_contract_rule, it_checkin_debt_rule, it_checkin_open_rule, it_checkin_contract_rule,
+    it_treat_debt_rule, it_treat_open_rule, it_treat_contract_rule
+                            integer  opcionais 1..4 (bloqueios: contrato sem assinatura ao
+                                     agendar; vencida, em aberto e contrato no check-in e
+                                     no tratamento)
 
   Output jsonb: o mesmo de ad.settings_get
 
@@ -110,6 +115,13 @@ begin
     _cur.it_late_edit := 0;
     _cur.id_color_by_category := false;
     _cur.it_agenda_mode := 1;
+    _cur.it_contract_rule := 1;
+    _cur.it_checkin_debt_rule := 1;
+    _cur.it_checkin_open_rule := 1;
+    _cur.it_checkin_contract_rule := 1;
+    _cur.it_treat_debt_rule := 1;
+    _cur.it_treat_open_rule := 1;
+    _cur.it_treat_contract_rule := 1;
   end if;
 
   begin
@@ -148,6 +160,13 @@ begin
     _new.id_color_by_category := case when p_json ? 'id_color_by_category' then (p_json ->> 'id_color_by_category')::boolean
                                       else _cur.id_color_by_category end;
     _new.it_agenda_mode := case when p_json ? 'it_agenda_mode' then (p_json ->> 'it_agenda_mode')::smallint else _cur.it_agenda_mode end;
+    _new.it_contract_rule := case when p_json ? 'it_contract_rule' then (p_json ->> 'it_contract_rule')::smallint else _cur.it_contract_rule end;
+    _new.it_checkin_debt_rule := case when p_json ? 'it_checkin_debt_rule' then (p_json ->> 'it_checkin_debt_rule')::smallint else _cur.it_checkin_debt_rule end;
+    _new.it_checkin_open_rule := case when p_json ? 'it_checkin_open_rule' then (p_json ->> 'it_checkin_open_rule')::smallint else _cur.it_checkin_open_rule end;
+    _new.it_checkin_contract_rule := case when p_json ? 'it_checkin_contract_rule' then (p_json ->> 'it_checkin_contract_rule')::smallint else _cur.it_checkin_contract_rule end;
+    _new.it_treat_debt_rule := case when p_json ? 'it_treat_debt_rule' then (p_json ->> 'it_treat_debt_rule')::smallint else _cur.it_treat_debt_rule end;
+    _new.it_treat_open_rule := case when p_json ? 'it_treat_open_rule' then (p_json ->> 'it_treat_open_rule')::smallint else _cur.it_treat_open_rule end;
+    _new.it_treat_contract_rule := case when p_json ? 'it_treat_contract_rule' then (p_json ->> 'it_treat_contract_rule')::smallint else _cur.it_treat_contract_rule end;
     if p_json ? 'it_payment_methods' then
       if jsonb_typeof(p_json -> 'it_payment_methods') <> 'array' then
         raise exception '%', ad.fn_message('SETTINGS_METHODS_INVALID');
@@ -195,6 +214,15 @@ begin
   if _new.it_open_rule is null or _new.it_open_rule not in (1, 2, 3, 4) then
     raise exception '%', ad.fn_message('SETTINGS_DEBT_INVALID');
   end if;
+  if coalesce(_new.it_contract_rule, 0) not between 1 and 4
+     or coalesce(_new.it_checkin_debt_rule, 0) not between 1 and 4
+     or coalesce(_new.it_checkin_open_rule, 0) not between 1 and 4
+     or coalesce(_new.it_checkin_contract_rule, 0) not between 1 and 4
+     or coalesce(_new.it_treat_debt_rule, 0) not between 1 and 4
+     or coalesce(_new.it_treat_open_rule, 0) not between 1 and 4
+     or coalesce(_new.it_treat_contract_rule, 0) not between 1 and 4 then
+    raise exception '%', ad.fn_message('SETTINGS_DEBT_INVALID');
+  end if;
   if _new.id_color_by_category is null or _new.it_agenda_mode is null or _new.it_agenda_mode not in (1, 2) then
     raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
   end if;
@@ -221,14 +249,16 @@ begin
                                  pc_late_interest, pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll,
                                  vc_receipt_prefix, nr_next_receipt, pc_budget_max_discount, qt_budget_valid_days,
                                  id_budget_request_approval, id_budget_admin_below_min, id_budget_reduction_as_discount,
-                                 it_open_rule, it_late_edit, id_color_by_category, it_agenda_mode, nr_operator)
+                                 it_open_rule, it_late_edit, id_color_by_category, it_agenda_mode,
+                                 it_contract_rule, it_checkin_debt_rule, it_checkin_open_rule, it_checkin_contract_rule, it_treat_debt_rule, it_treat_open_rule, it_treat_contract_rule, nr_operator)
   values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
           _new.id_auto_record_number, _new.nr_next_record, _new.vc_patient_required,
           _new.it_debt_rule, _new.qt_debt_days, _new.id_cash_enabled, _new.it_payment_methods, _new.pc_late_fee,
           _new.pc_late_interest, _new.pc_dre_revenue_tax, _new.pc_dre_income_tax, _new.pc_dre_csll,
           _new.vc_receipt_prefix, _new.nr_next_receipt, _new.pc_budget_max_discount, _new.qt_budget_valid_days,
           _new.id_budget_request_approval, _new.id_budget_admin_below_min, _new.id_budget_reduction_as_discount,
-          _new.it_open_rule, _new.it_late_edit, _new.id_color_by_category, _new.it_agenda_mode, _nr_user)
+          _new.it_open_rule, _new.it_late_edit, _new.id_color_by_category, _new.it_agenda_mode,
+          _new.it_contract_rule, _new.it_checkin_debt_rule, _new.it_checkin_open_rule, _new.it_checkin_contract_rule, _new.it_treat_debt_rule, _new.it_treat_open_rule, _new.it_treat_contract_rule, _nr_user)
   on conflict (nr_company, nr_branch) do update set
     qt_slot_minutes        = excluded.qt_slot_minutes,
     qt_max_parallel        = excluded.qt_max_parallel,
@@ -255,7 +285,14 @@ begin
     it_open_rule           = excluded.it_open_rule,
     it_late_edit           = excluded.it_late_edit,
     id_color_by_category   = excluded.id_color_by_category,
-    it_agenda_mode         = excluded.it_agenda_mode;
+    it_agenda_mode         = excluded.it_agenda_mode,
+    it_contract_rule = excluded.it_contract_rule,
+    it_checkin_debt_rule = excluded.it_checkin_debt_rule,
+    it_checkin_open_rule = excluded.it_checkin_open_rule,
+    it_checkin_contract_rule = excluded.it_checkin_contract_rule,
+    it_treat_debt_rule = excluded.it_treat_debt_rule,
+    it_treat_open_rule = excluded.it_treat_open_rule,
+    it_treat_contract_rule = excluded.it_treat_contract_rule;
 
   if p_json ? 'hours' then
     if jsonb_typeof(p_json -> 'hours') <> 'array' then

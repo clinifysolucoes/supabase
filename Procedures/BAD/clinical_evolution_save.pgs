@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 07/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 17/11/2026 - bloqueios do tratamento                          ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Evolucao clinica do paciente (tela PATIENTS).
@@ -30,13 +30,20 @@
     nr_procedure     bigint   opcional
     nr_budget, nr_item        opcionais (item de orcamento aprovado do paciente, ainda nao realizado)
     nr_evolution     bigint   obrigatorio em 'D'
+    id_block_override boolean opcional (administrador confirma registrar com pendencia)
 
-  Output jsonb: {"nr_evolution"}
+  Output jsonb: {"nr_evolution", "block": {"vc_kind", "qt_entries", "vl_total"} | null}
+    Bloqueios do tratamento (od.fn_patient_block 'TREAT'): na inclusao, conta
+    vencida, conta em aberto ou contrato sem assinatura conforme as regras
+    it_treat_* da filial: 2 registra e devolve "block", 3 so o administrador
+    registra confirmando com id_block_override, 4 bloqueia.
 
   Errors: VERSION_MISMATCH, CLINICAL_EVOLUTION_ACTION_INVALID, RECORD_BRANCH_REQUIRED,
     CLINICAL_EVOLUTION_FORBIDDEN, PATIENT_REQUIRED, PATIENT_NOT_FOUND, CLINICAL_EVOLUTION_TEXT_REQUIRED,
     CLINICAL_EVOLUTION_VALUE_INVALID, CLINICAL_EVOLUTION_PROFESSIONAL_INVALID,
-    CLINICAL_EVOLUTION_PROCEDURE_INVALID, CLINICAL_EVOLUTION_ITEM_INVALID, CLINICAL_EVOLUTION_NOT_FOUND
+    CLINICAL_EVOLUTION_PROCEDURE_INVALID, CLINICAL_EVOLUTION_ITEM_INVALID, CLINICAL_EVOLUTION_NOT_FOUND,
+    CLINICAL_EVOLUTION_BLOCKED {Kind, Amount}, CLINICAL_EVOLUTION_APPROVAL {Kind, Amount},
+    CLINICAL_EVOLUTION_CONFIRM {Kind, Amount}
 */
 create or replace function ad.clinical_evolution_save(p_json jsonb)
 returns jsonb
@@ -59,6 +66,7 @@ declare
   _proc       bigint;
   _budget     bigint;
   _item       smallint;
+  _block      jsonb;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'clinical_evolution_save');
   if _action not in ('I', 'D') then
@@ -105,6 +113,24 @@ begin
     if _text is null then
       raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_TEXT_REQUIRED');
     end if;
+    -- pendencias do paciente no tratamento
+    _block := od.fn_patient_block(_nr_company, _nr_branch, _nr_patient, 'TREAT');
+    if (_block ->> 'it_rule')::smallint = 4 then
+      raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_BLOCKED',
+        jsonb_build_object('Kind', lower(_block ->> 'vc_kind'), 'Amount', _block -> 'vl_total'));
+    elsif (_block ->> 'it_rule')::smallint = 3 then
+      if not private.fn_is_company_admin(_nr_company) then
+        raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_APPROVAL',
+          jsonb_build_object('Kind', lower(_block ->> 'vc_kind'), 'Amount', _block -> 'vl_total'));
+      end if;
+      if not coalesce((p_json ->> 'id_block_override')::boolean, false) then
+        raise exception '%', ad.fn_message('CLINICAL_EVOLUTION_CONFIRM',
+          jsonb_build_object('Kind', lower(_block ->> 'vc_kind'), 'Amount', _block -> 'vl_total'));
+      end if;
+    end if;
+    _block := case when (_block ->> 'it_rule')::smallint > 1
+                   then jsonb_build_object('vc_kind', lower(_block ->> 'vc_kind'), 'qt_entries', _block -> 'qt_entries',
+                                           'vl_total', _block -> 'vl_total') end;
     begin
       _dh     := coalesce((p_json ->> 'dh_evolution')::timestamptz, now());
       _prof   := (p_json ->> 'nr_professional')::bigint;
@@ -163,7 +189,7 @@ begin
     format('Evolução %s no paciente %s', case when _action = 'I' then 'registrada' else 'excluída' end, _vc_name),
     jsonb_build_object('nr_patient', _nr_patient, 'nr_evolution', _nr_evol, 'nr_budget', _budget, 'nr_item', _item));
 
-  return jsonb_build_object('nr_evolution', _nr_evol);
+  return jsonb_build_object('nr_evolution', _nr_evol, 'block', _block);
 end;
 $$;
 
