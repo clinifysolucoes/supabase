@@ -438,6 +438,8 @@ erDiagram
     numeric pc_commission
     numeric pc_profit
     smallint it_status
+    smallint qt_sessions
+    smallint qt_return_days
   }
   procedure_material {
     bigint nr_company PK, FK
@@ -587,6 +589,8 @@ erDiagram
     numeric vl_total
     date dt_done
     bigint nr_evolution
+    smallint qt_sessions
+    smallint qt_sessions_done
   }
   anamnesis_model {
     bigint nr_company PK, FK
@@ -643,6 +647,8 @@ erDiagram
     smallint nr_item FK
     smallint it_status
     bigint nr_user FK
+    smallint nr_session
+    smallint qt_minutes
   }
   tooth_mark {
     bigint nr_company PK, FK
@@ -1023,6 +1029,9 @@ erDiagram
     smallint it_treat_debt_rule
     smallint it_treat_open_rule
     smallint it_treat_contract_rule
+    boolean id_record_sessions
+    boolean id_record_return
+    boolean id_record_time
   }
   branch_hour {
     bigint nr_company PK, FK
@@ -1719,6 +1728,8 @@ Procedimento precificado, ligado a uma especialidade: tempo de cadeira, laborat�
 | `pc_commission` | `numeric(5,2)` |  | NULL |  | Comissão própria (% sobre o preço). Nula = usa pricing_param.pc_commission. |
 | `pc_profit` | `numeric(5,2)` |  | NULL |  | Lucro desejado próprio (% sobre o preço). Nulo = usa o lucro da especialidade e, se ela também não tiver, pricing_param.pc_profit. |
 | `it_status` | `smallint` |  | NOT NULL | `1` | Situação do procedimento. Valores: 1 = Ativo; 90 = Inativo. |
+| `qt_sessions` | `smallint` |  | NOT NULL | `1` | Sessões previstas para realizar o procedimento (1 a 60). |
+| `qt_return_days` | `smallint` |  | NULL |  | Retorno em N dias depois de concluir o procedimento (1 a 730; vazio = sem retorno). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -1988,6 +1999,8 @@ Procedimento (ou item livre) do orçamento com dente/região, quantidade e valor
 | `vl_total` | `numeric(14,2)` |  | NOT NULL | `0` | Quantidade × valor unitário. |
 | `dt_done` | `date` |  | NULL |  | Data em que o item foi realizado (evolução clínica ligada); nulo = a fazer. |
 | `nr_evolution` | `bigint` |  | NULL |  | Evolução clínica (clinical_evolution.nr_evolution do paciente) que registrou a realização. |
+| `qt_sessions` | `smallint` |  | NOT NULL | `1` | Sessões do item (copiado do procedimento na hora do orçamento). |
+| `qt_sessions_done` | `smallint` |  | NOT NULL | `0` | Sessões já realizadas na evolução; o item fica realizado quando chega a qt_sessions. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -2104,6 +2117,8 @@ Registro do atendimento no prontuário: texto, profissional, dente/região, proc
 | `nr_item` | `smallint` | FK → `budget_item.nr_item` | NULL |  | Item do orçamento realizado. |
 | `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Excluído. |
 | `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Usuário que registrou. |
+| `nr_session` | `smallint` |  | NULL |  | Número da sessão do item do orçamento (com sessões ligadas e item de mais de uma sessão). |
+| `qt_minutes` | `smallint` |  | NULL |  | Tempo de execução registrado (1 a 600 minutos; com id_record_time). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -2772,6 +2787,9 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `it_treat_debt_rule` | `smallint` |  | NOT NULL | `1` | Tratamento (consulta vai para Em atendimento e evolução clínica): paciente com conta vencida. Valores: 1 = Não bloquear; 2 = Avisar; 3 = Só o administrador libera; 4 = Bloquear. |
 | `it_treat_open_rule` | `smallint` |  | NOT NULL | `1` | Tratamento: paciente com conta a receber em aberto. Valores: 1 = Não bloquear; 2 = Avisar; 3 = Só o administrador libera; 4 = Bloquear. |
 | `it_treat_contract_rule` | `smallint` |  | NOT NULL | `1` | Tratamento: paciente com contrato sem assinatura. Valores: 1 = Não bloquear; 2 = Avisar; 3 = Só o administrador libera; 4 = Bloquear. |
+| `id_record_sessions` | `boolean` |  | NOT NULL | `false` | Prontuário: item do orçamento realizado em várias sessões (qt_sessions do procedimento). |
+| `id_record_return` | `boolean` |  | NOT NULL | `false` | Prontuário: ao concluir um procedimento com qt_return_days, cria o alerta de retorno do paciente. |
+| `id_record_time` | `boolean` |  | NOT NULL | `false` | Prontuário: registrar o tempo de execução de cada evolução (qt_minutes). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3322,8 +3340,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.pricing_param_save(p_json jsonb)` | authenticated | Salva parâmetros (parcial; vl_structure_hour_manual null volta ao cálculo), despesas e taxas adicionais (listas substituídas) da filial; valida que os percentuais do regime deixam divisor positivo. Permissão criar (1ª vez) / alterar na tela PRICING. Grava event_log. |
 | `ad.material_list(p_json jsonb)` | authenticated | Catálogo de materiais da filial com o custo por unidade de uso e em quantos procedimentos cada um é usado. Filtros: id_include_inactive, vc_search. Exige leitura na tela PRICING. |
 | `ad.material_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um material: embalagem, preço, rendimento, unidade, perda, origem do preço (manual / pesquisa de mercado), situação. Grava event_log. |
-| `ad.procedure_list(p_json jsonb)` | authenticated | Procedimentos da filial com especialidade, materiais, preço calculado (fn_pricing_calc; lucro do procedimento > especialidade > filial), preço mínimo, decomposição (cartão, comissão, taxas, IR, lucro), situação do valor cobrado hoje (it_price_status, lucro atual) e alertas (NO_TIME, NO_MATERIAL, MATERIAL_NO_PRICE, PERCENT_TOO_HIGH, PRICE_BELOW_COST, PRICE_BELOW_MIN, PRICE_BELOW_SUGGESTED). Filtros: nr_specialty, vc_search, id_include_inactive; it_tax_regime simula PF x PJ. Devolve também parâmetros e resumo. Exige leitura na tela PRICING. |
-| `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. |
+| `ad.procedure_list(p_json jsonb)` | authenticated | Procedimentos da filial com especialidade, materiais, preço calculado (fn_pricing_calc; lucro do procedimento > especialidade > filial), preço mínimo, decomposição (cartão, comissão, taxas, IR, lucro), situação do valor cobrado hoje (it_price_status, lucro atual) e alertas (NO_TIME, NO_MATERIAL, MATERIAL_NO_PRICE, PERCENT_TOO_HIGH, PRICE_BELOW_COST, PRICE_BELOW_MIN, PRICE_BELOW_SUGGESTED). Filtros: nr_specialty, vc_search, id_include_inactive; it_tax_regime simula PF x PJ. Devolve também parâmetros e resumo. Exige leitura na tela PRICING. Inclui qt_sessions e qt_return_days. |
+| `ad.procedure_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou atualiza parcialmente (U, permissão alterar) um procedimento (especialidade em nr_specialty, que precisa estar ativa) e, quando materials está presente, substitui seus materiais x quantidades. Grava event_log. Também qt_sessions (1 a 60) e qt_return_days (1 a 730 ou null). |
 | `ad.procedure_suggest(p_json jsonb)` | authenticated | Auto complete do cadastro de procedimento: itens do catálogo de referência (procedure_template) da especialidade que a filial ainda não cadastrou e procedimentos já cadastrados (com materiais ativos) para copiar. Filtros: nr_specialty, vc_search; até 200 de cada. Exige leitura na tela PRICING. |
 | `ad.appointment_list(p_json jsonb)` | authenticated | Agenda da filial num período de até 62 dias (dt_start..dt_end, no fuso da filial): consultas e compromissos com paciente, profissional (nome e cor), procedimento, situação, quem agendou e, para quem lê o financeiro, o selo it_fin_status (1 atendido sem recebimento, 2 recebimento em aberto, 3 recebido); filtros nr_professionals (compromissos da clínica toda sempre vêm) e id_include_cancelled. Devolve também os alertas de retorno de pacientes no período e o fuso. Exige leitura na tela AGENDA. Devolve it_origin (2 = agendamento online) e, do lembrete do WhatsApp, it_wa_status e vc_wa_reply (CONFIRM \| RESCHEDULE). Traz em cada agendamento a categoria, a cadeira, os marcadores e a cor do cartão (vc_display_color: a da categoria quando id_color_by_category), e no topo o modo da agenda (it_agenda_mode) e as listas de categorias, marcadores e cadeiras. |
 | `ad.agenda_catalog_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) na tela SETTINGS uma categoria de agendamento, um marcador ou uma cadeira (vc_entity category \| marker \| chair): nome único na filial, cor #RRGGBB e situação. Grava event_log. |
@@ -3370,9 +3388,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.anamnesis_model_list(p_json jsonb)` | authenticated | Modelos de anamnese da filial com as perguntas (cria o modelo Geral na primeira chamada). Exige ler na tela PATIENTS ou SETTINGS; permission.id_update = pode editar (alterar em SETTINGS). |
 | `ad.anamnesis_model_save(p_json jsonb)` | authenticated | Cria (I) ou altera parcialmente (U) um modelo de anamnese: nome, especialidade, situação e as perguntas (substituídas inteiras). Exige alterar na tela SETTINGS. Grava event_log. |
 | `ad.patient_anamnesis_save(p_json jsonb)` | authenticated | Preenche (I, criar ou alterar) ou exclui (D, alterar) uma anamnese do paciente na tela PATIENTS: copia as perguntas do modelo e grava as respostas; "sim" em pergunta de alerta vira alerta. Grava event_log sem as respostas. |
-| `ad.clinical_evolution_save(p_json jsonb)` | authenticated | Registra (I, criar ou alterar) ou exclui (D, alterar) uma evolução clínica na tela PATIENTS; com nr_budget/nr_item marca o item do orçamento aprovado como realizado (e a exclusão desmarca). Grava event_log sem o texto. O procedimento registrado baixa do estoque os materiais da ficha técnica com controle ativo (od.fn_stock_evolution); a exclusão estorna. Na inclusão aplica os bloqueios do tratamento (it_treat_*): avisa devolvendo block, só o administrador registra confirmando com id_block_override, ou bloqueia. |
+| `ad.clinical_evolution_save(p_json jsonb)` | authenticated | Registra (I, criar ou alterar) ou exclui (D, alterar) uma evolução clínica na tela PATIENTS; com nr_budget/nr_item marca o item do orçamento aprovado como realizado (e a exclusão desmarca). Grava event_log sem o texto. O procedimento registrado baixa do estoque os materiais da ficha técnica com controle ativo (od.fn_stock_evolution); a exclusão estorna. Na inclusão aplica os bloqueios do tratamento (it_treat_*): avisa devolvendo block, só o administrador registra confirmando com id_block_override, ou bloqueia. Com sessões ligadas, cada evolução do item é uma sessão e o item só fica realizado na última (a exclusão desfaz a sessão); com retorno ligado, concluir um procedimento com qt_return_days ajusta o alerta de retorno do paciente; com tempo ligado, grava qt_minutes. |
 | `ad.tooth_mark_save(p_json jsonb)` | authenticated | Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log. |
-| `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. |
+| `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. Evoluções com sessão e tempo; itens pendentes com sessões previstas e realizadas; record_settings com as opções do prontuário. |
 | `ad.dashboard_get(p_json jsonb)` | authenticated | Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null. |
 | `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
 | `ad.prosthetic_save(p_json jsonb)` | authenticated | Cadastra (criar em PROSTHETIC) ou altera (alterar) um trabalho protético com update parcial: paciente, profissional, laboratório, item de orçamento, descrição, dente, cor, observações, previsão e custo. Nasce na etapa A enviar; com a conta a pagar gerada, custo e laboratório não mudam. |
@@ -3415,14 +3433,14 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.online_booking_public(p_json jsonb)` | service_role | Página pública de agendamento, só para service_role (Edge Function online-booking): INFO (clínica, mensagem, janela, profissionais), SLOTS (horários livres de um profissional num dia) e BOOK (confere o horário com a filial travada, acha ou cria a ficha pelo CPF e cria a consulta Agendado com it_origin 2; até 2 consultas online futuras por CPF). Não expõe dados de pacientes. |
 | `ad.budget_list(p_json jsonb)` | authenticated | Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS. |
 | `ad.budget_get(p_json jsonb)` | authenticated | Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. |
-| `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. |
+| `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. Cada item copia as sessões previstas do procedimento (qt_sessions). |
 | `ad.budget_status(p_json jsonb)` | authenticated | Situação do orçamento (alterar na tela BUDGETS): APPROVE_DISCOUNT (só o administrador), ACCEPT (paciente aprovou dentro da validade: gera as contas a receber parceladas na categoria Tratamentos), REFUSE, CANCEL (aprovado só sem pagamento; cancela as contas em aberto) e REOPEN. Grava event_log. |
 | `ad.fin_attachment_save(p_json jsonb)` | authenticated | Registro dos anexos de uma conta, chamado pela Edge Function fin-attachment com o JWT do usuário antes da URL assinada: I reserva o caminho no Storage (PDF ou imagem, até 10 MB; conta não cancelada); DELETE exclui (lógico) e devolve o caminho para apagar o arquivo. Permissão de alterar na tela FINANCE. Grava event_log. |
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. Inclui id_color_by_category, it_agenda_mode e agenda_catalog (categorias, marcadores e cadeiras, inclusive inativos). Inclui as regras de bloqueio do contrato, do check-in e do tratamento. |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). Também id_color_by_category e it_agenda_mode (1 por profissional, 2 por cadeira). Também as regras de bloqueio it_contract_rule, it_checkin_* e it_treat_* (1 a 4). |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. Inclui id_color_by_category, it_agenda_mode e agenda_catalog (categorias, marcadores e cadeiras, inclusive inativos). Inclui as regras de bloqueio do contrato, do check-in e do tratamento. Inclui id_record_sessions, id_record_return e id_record_time. |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). Também id_color_by_category e it_agenda_mode (1 por profissional, 2 por cadeira). Também as regras de bloqueio it_contract_rule, it_checkin_* e it_treat_* (1 a 4). Também id_record_sessions, id_record_return e id_record_time. |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. Inclui profissionais inativados (AGENDA). |
 | `ad.trash_restore(p_json jsonb)` | authenticated | Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS. Profissional pela professional_save. |
@@ -3630,6 +3648,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `CLINICAL_EVOLUTION_CONFIRM` | `clinical_evolution_save` |  |
 | `CLINICAL_EVOLUTION_FORBIDDEN` | `clinical_evolution_save` |  |
 | `CLINICAL_EVOLUTION_ITEM_INVALID` | `clinical_evolution_save` |  |
+| `CLINICAL_EVOLUTION_MINUTES_INVALID` | `clinical_evolution_save` |  |
 | `CLINICAL_EVOLUTION_NOT_FOUND` | `clinical_evolution_save` |  |
 | `CLINICAL_EVOLUTION_PROCEDURE_INVALID` | `clinical_evolution_save` |  |
 | `CLINICAL_EVOLUTION_PROFESSIONAL_INVALID` | `clinical_evolution_save` |  |
@@ -3958,6 +3977,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROCEDURE_PERCENT_INVALID` | `procedure_save` | Field |
 | `PROCEDURE_QUANTITY_INVALID` | `procedure_save` | Material |
 | `PROCEDURE_REQUIRED` | `procedure_save` |  |
+| `PROCEDURE_SESSIONS_INVALID` | `procedure_save` |  |
 | `PROCEDURE_SPECIALTY_INVALID` | `procedure_save` |  |
 | `PROCEDURE_STATUS_INVALID` | `procedure_save` |  |
 | `PROCEDURE_VALUE_INVALID` | `procedure_save` | Field |

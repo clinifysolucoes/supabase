@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : 07/11/2026 - preco minimo e reducao como desconto             ::
+  ::  Change      : 18/11/2026 - sessoes do procedimento no item                  ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Cria (I, permissao CRIAR) ou altera parcialmente (U, permissao ALTERAR)
@@ -206,9 +206,10 @@ begin
         raise exception '%', ad.fn_message('BUDGET_ITEM_INVALID', jsonb_build_object('Item', _i));
       end if;
       insert into od.budget_item (nr_company, nr_branch, nr_budget, nr_item, nr_procedure, vc_description, vc_tooth,
-                                  qt_quantity, vl_unit, vl_total, nr_operator)
+                                  qt_quantity, vl_unit, vl_total, qt_sessions, nr_operator)
       values (_nr_company, _nr_branch, _nr_budget, _i, _proc.nr_procedure, _desc,
-              left(nullif(trim(_it ->> 'vc_tooth'), ''), 40), _qt, _unit, round(_qt * _unit, 2), _nr_user);
+              left(nullif(trim(_it ->> 'vc_tooth'), ''), 40), _qt, _unit, round(_qt * _unit, 2),
+              coalesce(_proc.qt_sessions, 1), _nr_user);
     end loop;
   end if;
 
