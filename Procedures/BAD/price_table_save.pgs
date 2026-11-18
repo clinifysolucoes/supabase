@@ -1,0 +1,165 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.price_table_save(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> rpc('price_table_save') (tela Precificacao)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 18/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cria ou altera uma tabela de preco particular e os precos dos
+    procedimentos nela.
+      vc_action = 'I'  cria (numero sequencial por filial) -> permissao CRIAR em PRICING
+      vc_action = 'U'  altera parcialmente                 -> permissao ALTERAR em PRICING
+    Marcar id_default tira a marca da outra tabela padrao. Inativar a tabela
+    tira a marca de padrao; os orcamentos que ja a usam nao mudam.
+    Grava ad.event_log.
+
+  Input p_json:
+    nr_version       integer  obrigatorio = 1
+    vc_action        text     'I' | 'U'
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_price_table   bigint   obrigatorio em 'U'
+    vc_name          text     obrigatorio em 'I' (ate 60, unico na filial)
+    id_default       boolean  opcional (tabela que o orcamento novo ja traz)
+    vc_notes         text     opcional (ate 500)
+    it_status        integer  1 ativa | 90 inativa (so em 'U')
+    items            array    opcional [{"nr_procedure", "vl_price"}] (presente substitui todos)
+
+  Output jsonb: {"nr_price_table"}
+
+  Errors: VERSION_MISMATCH, PRICE_TABLE_ACTION_INVALID, PRICING_BRANCH_REQUIRED, PRICE_TABLE_FORBIDDEN,
+    PRICE_TABLE_NOT_FOUND, PRICE_TABLE_NAME_REQUIRED, PRICE_TABLE_NAME_IN_USE, PRICE_TABLE_VALUE_INVALID,
+    PRICE_TABLE_ITEM_INVALID {Item}
+*/
+create or replace function ad.price_table_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _cur        od.price_table%rowtype;
+  _new        od.price_table%rowtype;
+  _nr         bigint;
+  _it         jsonb;
+  _i          integer := 0;
+  _proc       bigint;
+  _price      numeric;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'price_table_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('PRICE_TABLE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('PRICING_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'PRICING');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'U' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('PRICE_TABLE_FORBIDDEN');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  if _action = 'U' then
+    _nr := (p_json ->> 'nr_price_table')::bigint;
+    select * into _cur from od.price_table t
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_price_table = _nr;
+    if not found then
+      raise exception '%', ad.fn_message('PRICE_TABLE_NOT_FOUND');
+    end if;
+  else
+    _cur.id_default := false;
+    _cur.it_status  := 1;
+  end if;
+
+  begin
+    _new := _cur;
+    _new.vc_name    := case when p_json ? 'vc_name' then left(nullif(trim(p_json ->> 'vc_name'), ''), 60) else _cur.vc_name end;
+    _new.vc_notes   := case when p_json ? 'vc_notes' then left(nullif(trim(p_json ->> 'vc_notes'), ''), 500) else _cur.vc_notes end;
+    _new.id_default := case when p_json ? 'id_default' then coalesce((p_json ->> 'id_default')::boolean, false) else _cur.id_default end;
+    _new.it_status  := case when _action = 'U' and p_json ? 'it_status' then (p_json ->> 'it_status')::smallint else _cur.it_status end;
+  exception when others then
+    raise exception '%', ad.fn_message('PRICE_TABLE_VALUE_INVALID');
+  end;
+  if _new.vc_name is null then
+    raise exception '%', ad.fn_message('PRICE_TABLE_NAME_REQUIRED');
+  end if;
+  if _new.it_status not in (1, 90) then
+    raise exception '%', ad.fn_message('PRICE_TABLE_VALUE_INVALID');
+  end if;
+  if _new.it_status = 90 then
+    _new.id_default := false;
+  end if;
+  if exists (select 1 from od.price_table t
+              where t.nr_company = _nr_company and t.nr_branch = _nr_branch and lower(t.vc_name) = lower(_new.vc_name)
+                and t.nr_price_table is distinct from _nr) then
+    raise exception '%', ad.fn_message('PRICE_TABLE_NAME_IN_USE', jsonb_build_object('Name', _new.vc_name));
+  end if;
+
+  if _new.id_default then
+    update od.price_table t set id_default = false
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.id_default
+       and t.nr_price_table is distinct from _nr;
+  end if;
+
+  if _action = 'I' then
+    select coalesce(max(t.nr_price_table), 0) + 1 into _nr
+      from od.price_table t where t.nr_company = _nr_company and t.nr_branch = _nr_branch;
+    insert into od.price_table (nr_company, nr_branch, nr_price_table, vc_name, id_default, vc_notes, it_status, nr_operator)
+    values (_nr_company, _nr_branch, _nr, _new.vc_name, _new.id_default, _new.vc_notes, 1, _nr_user);
+  else
+    update od.price_table t set vc_name = _new.vc_name, id_default = _new.id_default, vc_notes = _new.vc_notes,
+                                it_status = _new.it_status
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_price_table = _nr;
+  end if;
+
+  if p_json ? 'items' then
+    if jsonb_typeof(p_json -> 'items') <> 'array' then
+      raise exception '%', ad.fn_message('PRICE_TABLE_VALUE_INVALID');
+    end if;
+    delete from od.price_table_item t
+     where t.nr_company = _nr_company and t.nr_branch = _nr_branch and t.nr_price_table = _nr;
+    for _it in select * from jsonb_array_elements(p_json -> 'items') loop
+      _i := _i + 1;
+      begin
+        _proc  := (_it ->> 'nr_procedure')::bigint;
+        _price := round((_it ->> 'vl_price')::numeric, 2);
+      exception when others then
+        raise exception '%', ad.fn_message('PRICE_TABLE_ITEM_INVALID', jsonb_build_object('Item', _i));
+      end;
+      if _proc is null or _price is null or _price < 0
+         or not exists (select 1 from od.procedure p
+                         where p.nr_company = _nr_company and p.nr_branch = _nr_branch and p.nr_procedure = _proc) then
+        raise exception '%', ad.fn_message('PRICE_TABLE_ITEM_INVALID', jsonb_build_object('Item', _i));
+      end if;
+      insert into od.price_table_item (nr_company, nr_branch, nr_price_table, nr_procedure, vl_price, nr_operator)
+      values (_nr_company, _nr_branch, _nr, _proc, _price, _nr_user)
+      on conflict (nr_company, nr_branch, nr_price_table, nr_procedure) do update set vl_price = excluded.vl_price;
+    end loop;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PRICING', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'price_table', _nr_company::text || '/' || _nr_branch::text || '/' || _nr::text,
+    format('Tabela de preço "%s" %s', _new.vc_name, case when _action = 'I' then 'criada' else 'alterada' end),
+    jsonb_build_object('id_default', _new.id_default, 'it_status', _new.it_status,
+                       'qt_items', case when p_json ? 'items' then jsonb_array_length(p_json -> 'items') end));
+
+  return jsonb_build_object('nr_price_table', _nr);
+end;
+$$;
+
+revoke all on function ad.price_table_save(jsonb) from public, anon;
+grant execute on function ad.price_table_save(jsonb) to authenticated;

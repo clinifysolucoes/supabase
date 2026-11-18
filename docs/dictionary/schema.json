@@ -569,7 +569,8 @@
         { "name": "nr_user_discount", "type": "bigint", "fk": "app_user.nr_user", "nullable": true, "description": "Administrador que aprovou o desconto." },
         { "name": "dh_discount", "type": "timestamptz", "nullable": true, "description": "Quando o desconto foi aprovado." },
         { "name": "dh_accepted", "type": "timestamptz", "nullable": true, "description": "Quando o paciente aprovou (gerou as contas a receber)." },
-        { "name": "nr_user_created", "type": "bigint", "fk": "app_user.nr_user", "nullable": true, "description": "Usuário que criou." }
+        { "name": "nr_user_created", "type": "bigint", "fk": "app_user.nr_user", "nullable": true, "description": "Usuário que criou." },
+        { "name": "nr_price_table", "type": "bigint", "fk": "price_table.nr_price_table", "nullable": true, "description": "Tabela de preço particular do orçamento (null = valor cobrado hoje)." }
       ]
     },
     {
@@ -1484,6 +1485,36 @@
     },
     {
       "schema": "od",
+      "name": "price_table",
+      "title": "Tabela de preço",
+      "description": "Tabelas de preço particulares da filial (além da tabela de cada convênio); uma pode ser a padrão, que o orçamento novo já traz.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via price_table_save (permissão na tela PRICING).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "branch.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "branch.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_price_table", "type": "bigint", "pk": 3, "nullable": false, "description": "Número da tabela (sequencial por filial)." },
+        { "name": "vc_name", "type": "varchar(60)", "nullable": false, "description": "Nome da tabela (único na filial)." },
+        { "name": "id_default", "type": "boolean", "nullable": false, "default": "false", "description": "Tabela padrão do orçamento novo (no máximo uma por filial, ativa)." },
+        { "name": "vc_notes", "type": "varchar(500)", "nullable": true, "description": "Observações." },
+        { "name": "it_status", "type": "smallint", "nullable": false, "default": "1", "description": "Situação.", "values": {"1":"Ativa","90":"Inativa"} }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "price_table_item",
+      "title": "Preço na tabela",
+      "description": "Preço de um procedimento numa tabela de preço particular (sem linha = valor cobrado hoje do procedimento).",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via price_table_save (permissão na tela PRICING).",
+      "columns": [
+        { "name": "nr_company", "type": "bigint", "pk": 1, "fk": "price_table.nr_company", "nullable": false, "description": "Número da empresa." },
+        { "name": "nr_branch", "type": "bigint", "pk": 2, "fk": "price_table.nr_branch", "nullable": false, "description": "Número da filial." },
+        { "name": "nr_price_table", "type": "bigint", "pk": 3, "fk": "price_table.nr_price_table", "nullable": false, "description": "Tabela de preço." },
+        { "name": "nr_procedure", "type": "bigint", "pk": 4, "fk": "procedure.nr_procedure", "nullable": false, "description": "Procedimento." },
+        { "name": "vl_price", "type": "numeric(12,2)", "nullable": false, "description": "Preço do procedimento nesta tabela." }
+      ]
+    },
+    {
+      "schema": "od",
       "name": "referral_reward",
       "title": "Recompensa por indicação",
       "description": "Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90.",
@@ -1771,6 +1802,9 @@
     { "from": "professional", "to": "appointment", "card": "|o--o{", "label": "atende" },
     { "from": "procedure", "to": "appointment", "card": "|o--o{", "label": "previsto em" },
     { "from": "patient", "to": "patient_note", "card": "||--o{", "label": "notas" },
+    { "from": "price_table", "to": "price_table_item", "card": "||--o{", "label": "preços" },
+    { "from": "procedure", "to": "price_table_item", "card": "||--o{", "label": "preço na tabela" },
+    { "from": "price_table", "to": "budget", "card": "||--o{", "label": "tabela" },
     { "from": "appointment_category", "to": "appointment", "card": "||--o{", "label": "categoria" },
     { "from": "chair", "to": "appointment", "card": "||--o{", "label": "cadeira" },
     { "from": "appointment", "to": "appointment_tag", "card": "||--o{", "label": "marcadores" },
@@ -1939,6 +1973,7 @@
     { "name": "fn_fin_open_session", "signature": "od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)", "kind": "helper", "grant": "interna", "description": "Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela." },
     { "name": "fn_fin_late_charge", "signature": "od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)", "kind": "helper", "grant": "interna", "description": "Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}." },
     { "name": "fn_patient_overdue", "signature": "od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)", "kind": "helper", "grant": "interna", "description": "Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}." },
+    { "name": "fn_procedure_price", "signature": "od.fn_procedure_price(p_nr_company bigint, p_nr_branch bigint, p_nr_procedure bigint, p_nr_price_table bigint)", "kind": "helper", "grant": "interna", "description": "Preço do procedimento na tabela de preço informada ou, sem tabela ou sem preço nela, o valor cobrado hoje." },
     { "name": "fn_patient_block", "signature": "od.fn_patient_block(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_stage text)", "kind": "helper", "grant": "interna", "description": "Pendências do paciente que a filial barra num momento (AGENDA, CHECKIN ou TREAT): conta vencida, conta em aberto e contrato sem assinatura do paciente ou responsável. Devolve a regra mais forte {it_rule, vc_kind, qt_entries, vl_total}." },
     { "name": "fn_stock_move", "signature": "od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)", "kind": "helper", "grant": "interna", "description": "Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo)." },
     { "name": "fn_stock_evolution", "signature": "od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)", "kind": "helper", "grant": "interna", "description": "Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída." },
@@ -2030,8 +2065,10 @@
     { "name": "online_booking_settings_save", "signature": "ad.online_booking_settings_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Grava a configuração do agendamento online (alterar na tela SETTINGS), update parcial, e quais profissionais aparecem. Endereço único; ligado exige profissional marcado. Grava event_log.", "errors": ["VERSION_MISMATCH", "ONLINE_BOOKING_BRANCH_REQUIRED", "ONLINE_BOOKING_FORBIDDEN", "ONLINE_BOOKING_VALUE_INVALID", "ONLINE_BOOKING_SLUG_INVALID", "ONLINE_BOOKING_SLUG_TAKEN", "ONLINE_BOOKING_PROFESSIONAL_INVALID", "ONLINE_BOOKING_NO_PROFESSIONAL"] },
     { "name": "online_booking_public", "signature": "ad.online_booking_public(p_json jsonb)", "kind": "rpc", "grant": "service_role", "description": "Página pública de agendamento, só para service_role (Edge Function online-booking): INFO (clínica, mensagem, janela, profissionais), SLOTS (horários livres de um profissional num dia) e BOOK (confere o horário com a filial travada, acha ou cria a ficha pelo CPF e cria a consulta Agendado com it_origin 2; até 2 consultas online futuras por CPF). Não expõe dados de pacientes.", "errors": ["VERSION_MISMATCH", "ONLINE_BOOKING_ACTION_INVALID", "ONLINE_BOOKING_NOT_FOUND", "ONLINE_BOOKING_PROFESSIONAL_INVALID", "ONLINE_BOOKING_DATE_INVALID", "ONLINE_BOOKING_SLOT_TAKEN", "ONLINE_BOOKING_NAME_REQUIRED", "ONLINE_BOOKING_CPF_INVALID", "ONLINE_BOOKING_BIRTH_INVALID", "ONLINE_BOOKING_MOBILE_INVALID", "ONLINE_BOOKING_EMAIL_INVALID", "ONLINE_BOOKING_LIMIT", "ONLINE_BOOKING_PATIENT_INACTIVE"] },
     { "name": "budget_list", "signature": "ad.budget_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS.", "errors": ["VERSION_MISMATCH", "BUDGET_BRANCH_REQUIRED", "BUDGET_FORBIDDEN", "BUDGET_FILTER_INVALID"] },
-    { "name": "budget_get", "signature": "ad.budget_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS.", "errors": ["VERSION_MISMATCH", "BUDGET_BRANCH_REQUIRED", "BUDGET_FORBIDDEN", "BUDGET_NOT_FOUND"] },
-    { "name": "budget_save", "signature": "ad.budget_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. Cada item copia as sessões previstas do procedimento (qt_sessions).", "errors": ["VERSION_MISMATCH","BUDGET_ACTION_INVALID","BUDGET_BRANCH_REQUIRED","BUDGET_FORBIDDEN","BUDGET_REQUIRED","BUDGET_NOT_FOUND","BUDGET_STATUS_INVALID","BUDGET_VALUE_INVALID","BUDGET_PATIENT_INVALID","BUDGET_PROFESSIONAL_INVALID","BUDGET_DATE_INVALID","BUDGET_ITEMS_REQUIRED","BUDGET_ITEM_INVALID","BUDGET_PROCEDURE_INVALID","BUDGET_DISCOUNT_INVALID","BUDGET_DISCOUNT_OVER_MAX","BUDGET_BELOW_MIN"] },
+    { "name": "budget_get", "signature": "ad.budget_get(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. Inclui a tabela de preço (nr_price_table, vc_price_table).", "errors": ["VERSION_MISMATCH","BUDGET_BRANCH_REQUIRED","BUDGET_FORBIDDEN","BUDGET_NOT_FOUND"] },
+    { "name": "price_table_save", "signature": "ad.price_table_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) na tela PRICING uma tabela de preço particular: nome único, padrão (tira a marca da outra), observações, situação e, com items, substitui os preços dos procedimentos. Grava event_log.", "errors": ["VERSION_MISMATCH","PRICE_TABLE_ACTION_INVALID","PRICING_BRANCH_REQUIRED","PRICE_TABLE_FORBIDDEN","PRICE_TABLE_NOT_FOUND","PRICE_TABLE_NAME_REQUIRED","PRICE_TABLE_NAME_IN_USE","PRICE_TABLE_VALUE_INVALID","PRICE_TABLE_ITEM_INVALID"] },
+    { "name": "price_table_list", "signature": "ad.price_table_list(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Tabelas de preço particulares da filial com os preços dos procedimentos (e o valor cobrado hoje para comparar). Exige ler em PRICING ou em BUDGETS. Filtro: id_include_inactive.", "errors": ["VERSION_MISMATCH","PRICING_BRANCH_REQUIRED","PRICE_TABLE_FORBIDDEN"] },
+    { "name": "budget_save", "signature": "ad.budget_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. Cada item copia as sessões previstas do procedimento (qt_sessions). Tabela de preço particular (nr_price_table; no orçamento novo, a padrão da filial): o item com procedimento e sem valor pega o preço da tabela, e a redução como desconto compara com ele.", "errors": ["VERSION_MISMATCH","BUDGET_ACTION_INVALID","BUDGET_BRANCH_REQUIRED","BUDGET_FORBIDDEN","BUDGET_REQUIRED","BUDGET_NOT_FOUND","BUDGET_STATUS_INVALID","BUDGET_VALUE_INVALID","BUDGET_PATIENT_INVALID","BUDGET_PROFESSIONAL_INVALID","BUDGET_DATE_INVALID","BUDGET_ITEMS_REQUIRED","BUDGET_ITEM_INVALID","BUDGET_PROCEDURE_INVALID","BUDGET_DISCOUNT_INVALID","BUDGET_DISCOUNT_OVER_MAX","BUDGET_BELOW_MIN","BUDGET_PRICE_TABLE_INVALID"] },
     { "name": "budget_status", "signature": "ad.budget_status(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Situação do orçamento (alterar na tela BUDGETS): APPROVE_DISCOUNT (só o administrador), ACCEPT (paciente aprovou dentro da validade: gera as contas a receber parceladas na categoria Tratamentos), REFUSE, CANCEL (aprovado só sem pagamento; cancela as contas em aberto) e REOPEN. Grava event_log.", "errors": ["VERSION_MISMATCH", "BUDGET_BRANCH_REQUIRED", "BUDGET_FORBIDDEN", "BUDGET_REQUIRED", "BUDGET_NOT_FOUND", "BUDGET_ACTION_INVALID", "BUDGET_STATUS_INVALID", "BUDGET_DISCOUNT_FORBIDDEN", "BUDGET_EXPIRED", "BUDGET_VALUE_INVALID", "BUDGET_EMPTY", "BUDGET_HAS_PAYMENTS", "BUDGET_BELOW_MIN"] },
     { "name": "fin_attachment_save", "signature": "ad.fin_attachment_save(p_json jsonb)", "kind": "rpc", "grant": "authenticated", "description": "Registro dos anexos de uma conta, chamado pela Edge Function fin-attachment com o JWT do usuário antes da URL assinada: I reserva o caminho no Storage (PDF ou imagem, até 10 MB; conta não cancelada); DELETE exclui (lógico) e devolve o caminho para apagar o arquivo. Permissão de alterar na tela FINANCE. Grava event_log.",
       "errors": ["VERSION_MISMATCH", "FIN_ATTACHMENT_ACTION_INVALID", "FINANCE_BRANCH_REQUIRED", "FIN_ATTACHMENT_FORBIDDEN", "FIN_ENTRY_REQUIRED", "FIN_ENTRY_NOT_FOUND", "FIN_ENTRY_CANCELLED_LOCKED", "FIN_ATTACHMENT_VALUE_INVALID", "FIN_ATTACHMENT_TYPE_INVALID", "FIN_ATTACHMENT_TOO_LARGE", "FIN_ATTACHMENT_REQUIRED", "FIN_ATTACHMENT_NOT_FOUND"] },

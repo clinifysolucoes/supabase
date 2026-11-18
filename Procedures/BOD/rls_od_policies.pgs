@@ -401,3 +401,15 @@ drop policy if exists chair_select on od.chair;
 create policy chair_select on od.chair
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.price_table
+drop policy if exists price_table_select on od.price_table;
+create policy price_table_select on od.price_table
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.price_table_item
+drop policy if exists price_table_item_select on od.price_table_item;
+create policy price_table_item_select on od.price_table_item
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

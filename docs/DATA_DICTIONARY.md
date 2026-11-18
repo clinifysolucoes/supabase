@@ -102,6 +102,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.appointment_marker`](#odappointmentmarker) | Marcador de agendamento | Marcadores (etiquetas) da agenda da filial; uma consulta pode ter vários (appointment_tag). |
 | [`od.chair`](#odchair) | Cadeira | Cadeiras (consultórios) da filial. A cadeira atende um agendamento por vez (encaixe libera) e a agenda pode ser organizada por cadeira (branch_setting.it_agenda_mode = 2). |
 | [`od.appointment_tag`](#odappointmenttag) | Marcador do agendamento | Marcadores de cada agendamento (substituídos inteiros pelo appointment_save). |
+| [`od.price_table`](#odpricetable) | Tabela de preço | Tabelas de preço particulares da filial (além da tabela de cada convênio); uma pode ser a padrão, que o orçamento novo já traz. |
+| [`od.price_table_item`](#odpricetableitem) | Preço na tabela | Preço de um procedimento numa tabela de preço particular (sem linha = valor cobrado hoje do procedimento). |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
@@ -218,6 +220,9 @@ erDiagram
   professional |o--o{ appointment : "atende"
   procedure |o--o{ appointment : "previsto em"
   patient ||--o{ patient_note : "notas"
+  price_table ||--o{ price_table_item : "preços"
+  procedure ||--o{ price_table_item : "preço na tabela"
+  price_table ||--o{ budget : "tabela"
   appointment_category ||--o{ appointment : "categoria"
   chair ||--o{ appointment : "cadeira"
   appointment ||--o{ appointment_tag : "marcadores"
@@ -575,6 +580,7 @@ erDiagram
     timestamptz dh_discount
     timestamptz dh_accepted
     bigint nr_user_created FK
+    bigint nr_price_table FK
   }
   budget_item {
     bigint nr_company PK, FK
@@ -1192,6 +1198,22 @@ erDiagram
     bigint nr_branch PK, FK
     bigint nr_appointment PK, FK
     bigint nr_marker PK, FK
+  }
+  price_table {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_price_table PK
+    varchar vc_name
+    boolean id_default
+    varchar vc_notes
+    smallint it_status
+  }
+  price_table_item {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_price_table PK, FK
+    bigint nr_procedure PK, FK
+    numeric vl_price
   }
   referral_reward {
     bigint nr_company PK, FK
@@ -1973,6 +1995,7 @@ Orçamento (plano de tratamento) do paciente: itens, desconto, validade e condi�
 | `dh_discount` | `timestamptz` |  | NULL |  | Quando o desconto foi aprovado. |
 | `dh_accepted` | `timestamptz` |  | NULL |  | Quando o paciente aprovou (gerou as contas a receber). |
 | `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NULL |  | Usuário que criou. |
+| `nr_price_table` | `bigint` | FK → `price_table.nr_price_table` | NULL |  | Tabela de preço particular do orçamento (null = valor cobrado hoje). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3086,6 +3109,46 @@ Marcadores de cada agendamento (substituídos inteiros pelo appointment_save).
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.price_table
+
+**Tabela de preço**
+
+Tabelas de preço particulares da filial (além da tabela de cada convênio); uma pode ser a padrão, que o orçamento novo já traz.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via price_table_save (permissão na tela PRICING).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_price_table` | `bigint` | PK3 | NOT NULL |  | Número da tabela (sequencial por filial). |
+| `vc_name` | `varchar(60)` |  | NOT NULL |  | Nome da tabela (único na filial). |
+| `id_default` | `boolean` |  | NOT NULL | `false` | Tabela padrão do orçamento novo (no máximo uma por filial, ativa). |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observações. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativa; 90 = Inativa. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.price_table_item
+
+**Preço na tabela**
+
+Preço de um procedimento numa tabela de preço particular (sem linha = valor cobrado hoje do procedimento).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via price_table_save (permissão na tela PRICING).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `price_table.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `price_table.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_price_table` | `bigint` | PK3, FK → `price_table.nr_price_table` | NOT NULL |  | Tabela de preço. |
+| `nr_procedure` | `bigint` | PK4, FK → `procedure.nr_procedure` | NOT NULL |  | Procedimento. |
+| `vl_price` | `numeric(12,2)` |  | NOT NULL |  | Preço do procedimento nesta tabela. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.referral_reward
 
 **Recompensa por indicação**
@@ -3432,8 +3495,10 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.online_booking_settings_save(p_json jsonb)` | authenticated | Grava a configuração do agendamento online (alterar na tela SETTINGS), update parcial, e quais profissionais aparecem. Endereço único; ligado exige profissional marcado. Grava event_log. |
 | `ad.online_booking_public(p_json jsonb)` | service_role | Página pública de agendamento, só para service_role (Edge Function online-booking): INFO (clínica, mensagem, janela, profissionais), SLOTS (horários livres de um profissional num dia) e BOOK (confere o horário com a filial travada, acha ou cria a ficha pelo CPF e cria a consulta Agendado com it_origin 2; até 2 consultas online futuras por CPF). Não expõe dados de pacientes. |
 | `ad.budget_list(p_json jsonb)` | authenticated | Orçamentos da filial ou de um paciente, por situação (em aberto, aguardando, aprovados, recusados, cancelados, vencidos) e período, com busca e totais. Exige ler na tela BUDGETS. |
-| `ad.budget_get(p_json jsonb)` | authenticated | Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. |
-| `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. Cada item copia as sessões previstas do procedimento (qt_sessions). |
+| `ad.budget_get(p_json jsonb)` | authenticated | Um orçamento com itens, contas a receber geradas, paciente, emitente (para o PDF), desconto máximo da filial e permissões. Exige ler na tela BUDGETS. Inclui a tabela de preço (nr_price_table, vc_price_table). |
+| `ad.price_table_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) na tela PRICING uma tabela de preço particular: nome único, padrão (tira a marca da outra), observações, situação e, com items, substitui os preços dos procedimentos. Grava event_log. |
+| `ad.price_table_list(p_json jsonb)` | authenticated | Tabelas de preço particulares da filial com os preços dos procedimentos (e o valor cobrado hoje para comparar). Exige ler em PRICING ou em BUDGETS. Filtro: id_include_inactive. |
+| `ad.budget_save(p_json jsonb)` | authenticated | Cria (I, criar) ou altera parcialmente (U, alterar) um orçamento em aberto/aguardando: itens (procedimento ou livre; valor padrão = valor cobrado hoje), desconto em valor ou %, validade, condição de pagamento. Desconto acima do máximo: o administrador já aprova; os demais deixam aguardando. Grava event_log sem dados pessoais. Item abaixo do preço mínimo da precificação também precisa do administrador (ou é recusado); a redução do valor cobrado pode contar como desconto; sem pedido de aprovação, desconto acima do máximo é recusado. Cada item copia as sessões previstas do procedimento (qt_sessions). Tabela de preço particular (nr_price_table; no orçamento novo, a padrão da filial): o item com procedimento e sem valor pega o preço da tabela, e a redução como desconto compara com ele. |
 | `ad.budget_status(p_json jsonb)` | authenticated | Situação do orçamento (alterar na tela BUDGETS): APPROVE_DISCOUNT (só o administrador), ACCEPT (paciente aprovou dentro da validade: gera as contas a receber parceladas na categoria Tratamentos), REFUSE, CANCEL (aprovado só sem pagamento; cancela as contas em aberto) e REOPEN. Grava event_log. |
 | `ad.fin_attachment_save(p_json jsonb)` | authenticated | Registro dos anexos de uma conta, chamado pela Edge Function fin-attachment com o JWT do usuário antes da URL assinada: I reserva o caminho no Storage (PDF ou imagem, até 10 MB; conta não cancelada); DELETE exclui (lógico) e devolve o caminho para apagar o arquivo. Permissão de alterar na tela FINANCE. Grava event_log. |
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
@@ -3482,6 +3547,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_fin_open_session(p_nr_company bigint, p_nr_branch bigint, p_nr_account bigint)` | interna | Sessão de caixa aberta na conta (ou nula): o pagamento feito nessa conta entra no fechamento dela. |
 | `od.fn_fin_late_charge(p_nr_company bigint, p_nr_branch bigint, p_vl_amount numeric, p_dt_due date, p_dt_ref date)` | interna | Multa (pc_late_fee, uma vez) e juros de mora (pc_late_interest ao mês, pro rata por dia) de uma conta a receber na data de referência; zero sem atraso ou sem configuração. Devolve {qt_days, vl_fine, vl_interest, vl_total}. |
 | `od.fn_patient_overdue(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint)` | interna | Contas a receber do paciente em aberto vencidas há mais que a tolerância da filial (qt_debt_days), com hoje no fuso da filial. Devolve {qt_entries, vl_total}. |
+| `od.fn_procedure_price(p_nr_company bigint, p_nr_branch bigint, p_nr_procedure bigint, p_nr_price_table bigint)` | interna | Preço do procedimento na tabela de preço informada ou, sem tabela ou sem preço nela, o valor cobrado hoje. |
 | `od.fn_patient_block(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_stage text)` | interna | Pendências do paciente que a filial barra num momento (AGENDA, CHECKIN ou TREAT): conta vencida, conta em aberto e contrato sem assinatura do paciente ou responsável. Devolve a regra mais forte {it_rule, vc_kind, qt_entries, vl_total}. |
 | `od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)` | interna | Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo). |
 | `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
@@ -3614,6 +3680,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `BUDGET_ITEMS_REQUIRED` | `budget_save` |  |
 | `BUDGET_NOT_FOUND` | `budget_get`, `budget_save`, `budget_status` |  |
 | `BUDGET_PATIENT_INVALID` | `budget_save` |  |
+| `BUDGET_PRICE_TABLE_INVALID` | `budget_save` |  |
 | `BUDGET_PROCEDURE_INVALID` | `budget_save` |  |
 | `BUDGET_PROFESSIONAL_INVALID` | `budget_save` |  |
 | `BUDGET_REQUIRED` | `budget_save`, `budget_status` |  |
@@ -3953,7 +4020,14 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PERIO_PROFESSIONAL_INVALID` | `perio_exam_save` |  |
 | `PERIO_TOOTH_INVALID` | `perio_exam_save` |  |
 | `PERIO_VALUE_INVALID` | `perio_exam_save` |  |
-| `PRICING_BRANCH_REQUIRED` | `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `specialty_list`, `specialty_save` |  |
+| `PRICE_TABLE_ACTION_INVALID` | `price_table_save` |  |
+| `PRICE_TABLE_FORBIDDEN` | `price_table_save`, `price_table_list` |  |
+| `PRICE_TABLE_ITEM_INVALID` | `price_table_save` |  |
+| `PRICE_TABLE_NAME_IN_USE` | `price_table_save` |  |
+| `PRICE_TABLE_NAME_REQUIRED` | `price_table_save` |  |
+| `PRICE_TABLE_NOT_FOUND` | `price_table_save` |  |
+| `PRICE_TABLE_VALUE_INVALID` | `price_table_save` |  |
+| `PRICING_BRANCH_REQUIRED` | `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `specialty_list`, `specialty_save`, `price_table_save`, `price_table_list` |  |
 | `PRICING_EXPENSE_AMOUNT_INVALID` | `pricing_param_save` | Expense |
 | `PRICING_EXPENSE_NAME_REQUIRED` | `pricing_param_save` |  |
 | `PRICING_EXPENSE_TYPE_INVALID` | `pricing_param_save` | Expense |
@@ -4093,7 +4167,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
