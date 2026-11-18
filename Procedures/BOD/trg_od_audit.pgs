@@ -285,3 +285,11 @@ create or replace trigger price_table_audit
 create or replace trigger price_table_item_audit
   before insert or update on od.price_table_item
   for each row execute function ad.trg_audit();
+
+create or replace trigger aligner_case_audit
+  before insert or update on od.aligner_case
+  for each row execute function ad.trg_audit();
+
+create or replace trigger aligner_case_event_audit
+  before insert or update on od.aligner_case_event
+  for each row execute function ad.trg_audit();

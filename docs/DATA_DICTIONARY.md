@@ -105,6 +105,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.appointment_tag`](#odappointmenttag) | Marcador do agendamento | Marcadores de cada agendamento (substituídos inteiros pelo appointment_save). |
 | [`od.price_table`](#odpricetable) | Tabela de preço | Tabelas de preço particulares da filial (além da tabela de cada convênio); uma pode ser a padrão, que o orçamento novo já traz. |
 | [`od.price_table_item`](#odpricetableitem) | Preço na tabela | Preço de um procedimento numa tabela de preço particular (sem linha = valor cobrado hoje do procedimento). |
+| [`od.aligner_case`](#odalignercase) | Caso de alinhadores | Caso de alinhadores ortodônticos do paciente: sistema/fabricante, número do caso no fabricante, quantidade de alinhadores, alinhador atual, troca a cada N dias e a situação (iniciado, pendências, em tratamento, finalizado). |
+| [`od.aligner_case_event`](#odalignercaseevent) | Histórico do caso de alinhadores | Criação e cada mudança de situação ou de alinhador atual do caso, com anotação. |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
@@ -221,6 +223,8 @@ erDiagram
   professional |o--o{ appointment : "atende"
   procedure |o--o{ appointment : "previsto em"
   patient ||--o{ patient_note : "notas"
+  patient ||--o{ aligner_case : "alinhadores"
+  aligner_case ||--o{ aligner_case_event : "histórico"
   app_user ||--o{ access_authorization : "pedido"
   price_table ||--o{ price_table_item : "preços"
   procedure ||--o{ price_table_item : "preço na tabela"
@@ -1231,6 +1235,36 @@ erDiagram
     bigint nr_price_table PK, FK
     bigint nr_procedure PK, FK
     numeric vl_price
+  }
+  aligner_case {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_case PK
+    bigint nr_patient FK
+    bigint nr_professional FK
+    varchar vc_system
+    varchar vc_case_number
+    bigint nr_budget FK
+    smallint qt_aligners
+    smallint qt_current
+    smallint qt_days_change
+    date dt_start
+    date dt_finished
+    varchar vc_pending
+    varchar vc_notes
+    smallint it_status
+    bigint nr_user FK
+  }
+  aligner_case_event {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_case PK, FK
+    smallint nr_event PK
+    timestamptz dh_event
+    smallint it_status
+    smallint qt_current
+    varchar vc_text
+    bigint nr_user FK
   }
   referral_reward {
     bigint nr_company PK, FK
@@ -3193,6 +3227,60 @@ Preço de um procedimento numa tabela de preço particular (sem linha = valor co
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.aligner_case
+
+**Caso de alinhadores**
+
+Caso de alinhadores ortodônticos do paciente: sistema/fabricante, número do caso no fabricante, quantidade de alinhadores, alinhador atual, troca a cada N dias e a situação (iniciado, pendências, em tratamento, finalizado).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via aligner_save (permissão na tela ALIGNERS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_case` | `bigint` | PK3 | NOT NULL |  | Número do caso (sequencial por filial). |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional responsável. |
+| `vc_system` | `varchar(60)` |  | NOT NULL |  | Sistema/fabricante dos alinhadores (ex.: ClearTek, Invisalign). |
+| `vc_case_number` | `varchar(60)` |  | NULL |  | Número do caso no fabricante. |
+| `nr_budget` | `bigint` | FK → `budget.nr_budget` | NULL |  | Orçamento do paciente ligado ao caso. |
+| `qt_aligners` | `smallint` |  | NOT NULL | `1` | Quantidade de alinhadores do caso (1 a 200). |
+| `qt_current` | `smallint` |  | NOT NULL | `0` | Alinhador em uso (0 = ainda não começou). |
+| `qt_days_change` | `smallint` |  | NOT NULL | `14` | Troca de alinhador a cada N dias (1 a 60); usado na previsão de término. |
+| `dt_start` | `date` |  | NOT NULL |  | Início do caso. |
+| `dt_finished` | `date` |  | NULL |  | Data de término (só finalizado). |
+| `vc_pending` | `varchar(500)` |  | NULL |  | Pendência atual (obrigatória nas situações de pendência). |
+| `vc_notes` | `varchar(1000)` |  | NULL |  | Observações. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do caso. Valores: 1 = Iniciado; 2 = Pendência da clínica; 3 = Pendência da empresa; 4 = Em tratamento; 5 = Finalizado; 90 = Cancelado. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem criou o caso. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.aligner_case_event
+
+**Histórico do caso de alinhadores**
+
+Criação e cada mudança de situação ou de alinhador atual do caso, com anotação.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via aligner_save (permissão na tela ALIGNERS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `aligner_case.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `aligner_case.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_case` | `bigint` | PK3, FK → `aligner_case.nr_case` | NOT NULL |  | Caso. |
+| `nr_event` | `smallint` | PK4 | NOT NULL |  | Número do evento no caso. |
+| `dh_event` | `timestamptz` |  | NOT NULL | `now()` | Quando aconteceu. |
+| `it_status` | `smallint` |  | NOT NULL |  | Situação do caso neste evento. Valores: 1 = Iniciado; 2 = Pendência da clínica; 3 = Pendência da empresa; 4 = Em tratamento; 5 = Finalizado; 90 = Cancelado. |
+| `qt_current` | `smallint` |  | NOT NULL |  | Alinhador atual neste evento. |
+| `vc_text` | `varchar(500)` |  | NULL |  | Anotação (ou a pendência). |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem registrou. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.referral_reward
 
 **Recompensa por indicação**
@@ -3499,6 +3587,8 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.tooth_mark_save(p_json jsonb)` | authenticated | Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log. |
 | `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. Evoluções com sessão e tempo; itens pendentes com sessões previstas e realizadas; record_settings com as opções do prontuário. |
 | `ad.dashboard_get(p_json jsonb)` | authenticated | Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null. |
+| `ad.aligner_list(p_json jsonb)` | authenticated | Casos de alinhadores da filial (ler em ALIGNERS) com histórico, previsão de término e totais por situação. Filtros: situação, período de início, profissional, paciente e busca. |
+| `ad.aligner_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) um caso de alinhadores; pendência pede o texto; finalizar grava a data e o último alinhador; criação e mudanças de situação ou de alinhador atual vão para o histórico. Grava event_log sem dados pessoais. |
 | `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
 | `ad.prosthetic_save(p_json jsonb)` | authenticated | Cadastra (criar em PROSTHETIC) ou altera (alterar) um trabalho protético com update parcial: paciente, profissional, laboratório, item de orçamento, descrição, dente, cor, observações, previsão e custo. Nasce na etapa A enviar; com a conta a pagar gerada, custo e laboratório não mudam. |
 | `ad.prosthetic_stage(p_json jsonb)` | authenticated | Muda a etapa do trabalho protético (alterar em PROSTHETIC) e grava o histórico; no primeiro recebimento, com custo e laboratório cadastrado, gera a conta a pagar do laboratório (categoria Laboratório) quando o usuário pode criar no Financeiro. |
@@ -3658,6 +3748,17 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `AGENDA_CATALOG_NOT_FOUND` | `agenda_catalog_save` |  |
 | `AGENDA_CATALOG_STATUS_INVALID` | `agenda_catalog_save` |  |
 | `AGENDA_FORBIDDEN` | `appointment_list`, `professional_list` |  |
+| `ALIGNER_ACTION_INVALID` | `aligner_save` |  |
+| `ALIGNER_BRANCH_REQUIRED` | `aligner_list`, `aligner_save` |  |
+| `ALIGNER_BUDGET_INVALID` | `aligner_save` |  |
+| `ALIGNER_FORBIDDEN` | `aligner_list`, `aligner_save` |  |
+| `ALIGNER_NOT_FOUND` | `aligner_save` |  |
+| `ALIGNER_PATIENT_INVALID` | `aligner_save` |  |
+| `ALIGNER_PENDING_REQUIRED` | `aligner_save` |  |
+| `ALIGNER_PROFESSIONAL_INVALID` | `aligner_save` |  |
+| `ALIGNER_STATUS_INVALID` | `aligner_save` |  |
+| `ALIGNER_SYSTEM_REQUIRED` | `aligner_save` |  |
+| `ALIGNER_VALUE_INVALID` | `aligner_list`, `aligner_save` |  |
 | `ANAMNESIS_MODEL_ACTION_INVALID` | `anamnesis_model_save` |  |
 | `ANAMNESIS_MODEL_FORBIDDEN` | `anamnesis_model_save` |  |
 | `ANAMNESIS_MODEL_NAME_REQUIRED` | `anamnesis_model_save` |  |
@@ -4219,7 +4320,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

@@ -88,6 +88,19 @@ end $$;
 
 \echo '== service_role: chave, fila, resultado e webhook'
 reset role;
+-- fuso que deixa "agora" ao meio-dia local (depois de qt_send_hour), e o
+-- aniversario do Beto no dia local, qualquer que seja a hora em que o teste roda
+do $$
+declare
+  _off integer := 12 - extract(hour from now() at time zone 'UTC')::int;
+  _tz  text;
+begin
+  _tz := 'Etc/GMT' || case when _off > 0 then '-' || _off when _off < 0 then '+' || (-_off) else '' end;
+  update ad.branch set vc_timezone = _tz
+   where nr_company = current_setting('test.nr_company')::bigint and nr_branch = 1;
+  update od.patient set dt_birth = ((now() at time zone _tz)::date - interval '30 years')::date
+   where nr_company = current_setting('test.nr_company')::bigint and vc_name like 'Beto%';
+end $$;
 set local role service_role;
 do $$
 declare
