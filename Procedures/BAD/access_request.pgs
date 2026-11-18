@@ -1,0 +1,75 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.access_request(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> rpc('access_request') (antes de imprimir/exportar) ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 18/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    O usuario vai imprimir ou exportar: se a empresa exige um administrador
+    para isso (ad.company.id_auth_print / id_auth_export), abre um pedido de
+    liberacao valido por 10 minutos e devolve o uu_request, que o
+    administrador libera com ad.access_authorize (o app confere o login dele
+    numa sessao separada). Sem a exigencia, devolve id_required = false.
+    Qualquer usuario com acesso a filial.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_kind      integer  1 imprimir | 2 exportar
+    vc_target    text     o que (ex.: "Orçamento 12", "Relatório Faturamento"; ate 120)
+
+  Output jsonb: {"id_required", "uu_request" | null}
+
+  Errors: VERSION_MISMATCH, ACCESS_REQUEST_INVALID, ACCESS_REQUEST_FORBIDDEN
+*/
+create or replace function ad.access_request(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _kind       smallint;
+  _target     text := left(nullif(trim(p_json ->> 'vc_target'), ''), 120);
+  _required   boolean;
+  _uu         uuid;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'access_request');
+  begin
+    _nr_company := (p_json ->> 'nr_company')::bigint;
+    _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+    _kind       := (p_json ->> 'it_kind')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('ACCESS_REQUEST_INVALID');
+  end;
+  if _nr_company is null or _nr_branch is null or _kind is null or _kind not in (1, 2) or _target is null then
+    raise exception '%', ad.fn_message('ACCESS_REQUEST_INVALID');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or (_nr_company, _nr_branch) not in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb) then
+    raise exception '%', ad.fn_message('ACCESS_REQUEST_FORBIDDEN');
+  end if;
+
+  select case when _kind = 1 then c.id_auth_print else c.id_auth_export end into _required
+    from ad.company c where c.nr_company = _nr_company;
+  if not coalesce(_required, false) then
+    return jsonb_build_object('id_required', false, 'uu_request', null);
+  end if;
+
+  insert into ad.access_authorization (nr_company, nr_branch, it_kind, vc_target, nr_user, nr_operator)
+  values (_nr_company, _nr_branch, _kind, _target, _nr_user, _nr_user)
+  returning uu_request into _uu;
+  return jsonb_build_object('id_required', true, 'uu_request', _uu);
+end;
+$$;
+
+revoke all on function ad.access_request(jsonb) from public, anon;
+grant execute on function ad.access_request(jsonb) to authenticated;

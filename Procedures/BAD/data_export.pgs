@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 06/11/2026                                                    ::
-  ::  Change      : First version                                                 ::
+  ::  Change      : 18/11/2026 - liberacao do administrador para exportar         ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Exportacao de planilhas da filial: a RPC devolve as colunas (titulos em
@@ -27,11 +27,15 @@
     dt_from, dt_to       date     finance e agenda (periodo de ate 400 dias)
     it_kind              integer  finance opcional 1 receber | 2 pagar (padrao: as duas)
     id_include_inactive  boolean  patients e procedures (padrao false)
+    uu_authorization     uuid     obrigatorio quando a empresa exige administrador para exportar
+                                  (ad.company.id_auth_export): pedido de ad.access_request do
+                                  proprio usuario, liberado por ad.access_authorize, dentro da
+                                  validade e ainda nao usado (fica usado)
 
   Output jsonb: {"vc_kind", "columns": ["Titulo", ...], "rows": [[valor, ...]], "qt_rows"}
 
   Errors: VERSION_MISMATCH, EXPORT_BRANCH_REQUIRED, EXPORT_FORBIDDEN, EXPORT_KIND_INVALID,
-    EXPORT_PERIOD_INVALID
+    EXPORT_PERIOD_INVALID, EXPORT_AUTH_REQUIRED
 */
 create or replace function ad.data_export(p_json jsonb)
 returns jsonb
@@ -53,6 +57,7 @@ declare
   _columns    jsonb;
   _rows       jsonb;
   _limit      constant integer := 20000;
+  _auth       uuid;
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'data_export');
 
@@ -71,6 +76,20 @@ begin
      or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false)
      or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, _screen) ->> 'id_read')::boolean, false) then
     raise exception '%', ad.fn_message('EXPORT_FORBIDDEN');
+  end if;
+  -- liberacao do administrador
+  if coalesce((select c.id_auth_export from ad.company c where c.nr_company = _nr_company), false) then
+    begin
+      _auth := (p_json ->> 'uu_authorization')::uuid;
+    exception when others then
+      _auth := null;
+    end;
+    update ad.access_authorization a set dh_used = now()
+     where a.uu_request = _auth and a.nr_company = _nr_company and a.nr_user = _nr_user and a.it_kind = 2
+       and a.dh_authorized is not null and a.dh_used is null and a.dh_expires >= now();
+    if not found then
+      raise exception '%', ad.fn_message('EXPORT_AUTH_REQUIRED');
+    end if;
   end if;
 
   begin

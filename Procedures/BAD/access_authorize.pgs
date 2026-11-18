@@ -1,0 +1,74 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative                                           ::
+  ::  Object      : ad.access_authorize(jsonb)                                    ::
+  ::  UsedBy      : Flutter -> rpc('access_authorize') (sessao do administrador)  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 18/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Libera um pedido de impressao/exportacao (ad.access_request). Chamada com
+    a sessao do administrador: o app faz o login dele com e-mail e senha numa
+    sessao separada, chama esta RPC e descarta a sessao. Exige administrador
+    da empresa do pedido; o pedido nao pode estar vencido nem ja liberado.
+    Grava ad.event_log com quem pediu, quem liberou e o que foi.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    uu_request   uuid     obrigatorio
+
+  Output jsonb: {"id_authorized": true, "vc_admin"}
+
+  Errors: VERSION_MISMATCH, ACCESS_AUTHORIZE_NOT_FOUND, ACCESS_AUTHORIZE_FORBIDDEN, ACCESS_AUTHORIZE_EXPIRED
+*/
+create or replace function ad.access_authorize(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_admin bigint;
+  _req      ad.access_authorization%rowtype;
+  _uu       uuid;
+  _requester text;
+  _admin    text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'access_authorize');
+  begin
+    _uu := (p_json ->> 'uu_request')::uuid;
+  exception when others then
+    raise exception '%', ad.fn_message('ACCESS_AUTHORIZE_NOT_FOUND');
+  end;
+  select * into _req from ad.access_authorization a where a.uu_request = _uu for update;
+  if not found then
+    raise exception '%', ad.fn_message('ACCESS_AUTHORIZE_NOT_FOUND');
+  end if;
+  _nr_admin := private.fn_current_user_nr();
+  if _nr_admin is null or not private.fn_is_company_admin(_req.nr_company) then
+    raise exception '%', ad.fn_message('ACCESS_AUTHORIZE_FORBIDDEN');
+  end if;
+  if _req.dh_authorized is not null or _req.dh_expires < now() then
+    raise exception '%', ad.fn_message('ACCESS_AUTHORIZE_EXPIRED');
+  end if;
+
+  update ad.access_authorization a set nr_user_admin = _nr_admin, dh_authorized = now(), nr_operator = _nr_admin
+   where a.nr_authorization = _req.nr_authorization;
+
+  select u.vc_name into _requester from ad.app_user u where u.nr_user = _req.nr_user;
+  select u.vc_name into _admin from ad.app_user u where u.nr_user = _nr_admin;
+  perform ad.fn_event_log(
+    _nr_admin, _req.nr_company, _req.nr_branch, null, 'OTHER',
+    'access_authorization', _req.nr_authorization::text,
+    left(format('%s liberada por %s para %s: %s', case when _req.it_kind = 1 then 'Impressão' else 'Exportação' end,
+                _admin, _requester, _req.vc_target), 200),
+    jsonb_build_object('it_kind', _req.it_kind, 'vc_target', _req.vc_target, 'nr_user_requester', _req.nr_user));
+
+  return jsonb_build_object('id_authorized', true, 'vc_admin', _admin);
+end;
+$$;
+
+revoke all on function ad.access_authorize(jsonb) from public, anon;
+grant execute on function ad.access_authorize(jsonb) to authenticated;
