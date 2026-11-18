@@ -86,3 +86,9 @@ drop policy if exists event_log_select on ad.event_log;
 create policy event_log_select on ad.event_log
   for select to authenticated
   using (nr_user = private.fn_current_user_nr());
+
+-- ad.access_authorization (administradores da empresa e o proprio pedido)
+drop policy if exists access_authorization_select on ad.access_authorization;
+create policy access_authorization_select on ad.access_authorization
+  for select to authenticated
+  using (nr_user = private.fn_current_user_nr() or private.fn_is_company_admin(nr_company));

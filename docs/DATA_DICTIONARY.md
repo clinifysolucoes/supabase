@@ -44,6 +44,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`ad.access_log`](#adaccesslog) | Log de acesso | Uma linha por session_context (login/restauração de sessão no app). IP e user-agent são lidos dos headers HTTP do request pelo PostgREST (request.headers). |
 | [`ad.screen`](#adscreen) | Tela do app | Catálogo GLOBAL das telas do app (não depende de empresa). O uuid é a chave da permissão e é o mesmo em todos os ambientes (seed com uuids fixos); o código é usado pelo app para rotear e o nome é o que aparece para o usuário. DASHBOARD é implícita para todo usuário logado. |
 | [`ad.access_profile_screen`](#adaccessprofilescreen) | Permissão do perfil por tela | Linha existe = o perfil pode LER a tela; id_create e id_update liberam criar e alterar. Perfil de nível 100 (administrador) ignora esta tabela: tem tudo. Substituída inteira por access_profile_save (screens). |
+| [`ad.access_authorization`](#adaccessauthorization) | Liberação para imprimir ou exportar | Pedido de liberação de um administrador antes de imprimir ou exportar (ad.company.id_auth_print / id_auth_export): quem pediu, quem liberou e o que foi. Vale 10 minutos; a exportação do banco consome a liberação. |
 | [`ad.event_log`](#adeventlog) | Log de atividades | O que aconteceu no sistema: quem, quando, em qual tela, qual ação, qual registro, resumo legível e detalhe em JSON (nunca senhas). Gravado pelas RPCs via ad.fn_event_log; o app nunca escreve. Login/acesso fica em access_log. |
 | [`od.pricing_param`](#odpricingparam) | Parâmetros de precificação | Parâmetros de precificação da filial: estrutura (salas, horas, ocupação), hora clínica do profissional, taxa de cartão, comissão padrão, regime do imposto de renda (PF/PJ) e lucro desejado. Uma linha por filial, criada no primeiro salvamento (pricing_param_save); antes disso pricing_param_get devolve os padrões sugeridos. Percentuais em pontos percentuais (4 = 4%). |
 | [`od.clinic_expense`](#odclinicexpense) | Despesa da clínica | Despesas que formam o custo mensal da clínica (custo da estrutura): fixas mensais, variáveis mensais, eventuais anuais (divididas por 12) e publicidade mensal. Custo da estrutura por hora = custo mensal ÷ horas produtivas. A lista inteira é substituída a cada pricing_param_save. |
@@ -220,6 +221,7 @@ erDiagram
   professional |o--o{ appointment : "atende"
   procedure |o--o{ appointment : "previsto em"
   patient ||--o{ patient_note : "notas"
+  app_user ||--o{ access_authorization : "pedido"
   price_table ||--o{ price_table_item : "preços"
   procedure ||--o{ price_table_item : "preço na tabela"
   price_table ||--o{ budget : "tabela"
@@ -252,6 +254,8 @@ erDiagram
     timestamptz dh_blocked
     varchar vc_block_reason
     smallint it_mfa_policy
+    boolean id_auth_print
+    boolean id_auth_export
   }
   branch {
     bigint nr_company PK, FK
@@ -346,6 +350,19 @@ erDiagram
     boolean id_read
     boolean id_create
     boolean id_update
+  }
+  access_authorization {
+    bigint nr_authorization PK
+    uuid uu_request
+    bigint nr_company FK
+    bigint nr_branch FK
+    smallint it_kind
+    varchar vc_target
+    bigint nr_user FK
+    bigint nr_user_admin FK
+    timestamptz dh_authorized
+    timestamptz dh_used
+    timestamptz dh_expires
   }
   event_log {
     bigint nr_event PK
@@ -1367,6 +1384,8 @@ Empresa (tenant principal). Toda informação de negócio pertence a uma empresa
 | `dh_blocked` | `timestamptz` |  | NULL |  | Data/hora do bloqueio. |
 | `vc_block_reason` | `varchar(200)` |  | NULL |  | Motivo do bloqueio, exibido ao usuário. |
 | `it_mfa_policy` | `smallint` |  | NOT NULL | `0` | Autenticação em dois fatores (app autenticador) obrigatória: sem o segundo fator confirmado na sessão, quem precisa dele fica sem acesso à empresa. Só o administrador altera, e para ligar precisa estar com 2FA. Valores: 0 = Não exige; 1 = Exige dos administradores; 2 = Exige de todos os usuários. |
+| `id_auth_print` | `boolean` |  | NOT NULL | `false` | Imprimir exige usuário e senha de um administrador da empresa. |
+| `id_auth_export` | `boolean` |  | NOT NULL | `false` | Exportar exige usuário e senha de um administrador da empresa. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -1557,6 +1576,31 @@ Linha existe = o perfil pode LER a tela; id_create e id_update liberam criar e a
 | `id_read` | `boolean` |  | NOT NULL | `true` | Pode ler (sempre verdadeiro quando a linha existe; check impede criar/alterar sem ler). |
 | `id_create` | `boolean` |  | NOT NULL | `false` | Pode criar registros na tela. |
 | `id_update` | `boolean` |  | NOT NULL | `false` | Pode alterar registros na tela. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### ad.access_authorization
+
+**Liberação para imprimir ou exportar**
+
+Pedido de liberação de um administrador antes de imprimir ou exportar (ad.company.id_auth_print / id_auth_export): quem pediu, quem liberou e o que foi. Vale 10 minutos; a exportação do banco consome a liberação.
+
+**RLS:** SELECT: o próprio pedido ou administradores da empresa. Escrita só via access_request / access_authorize / data_export.
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_authorization` | `bigint` | PK1 | NOT NULL | `identity` | Número do pedido. |
+| `uu_request` | `uuid` |  | NOT NULL | `gen_random_uuid()` | Código do pedido (único), usado pelo app e pela exportação. |
+| `nr_company` | `bigint` | FK → `branch.nr_company` | NOT NULL |  | Empresa. |
+| `nr_branch` | `bigint` | FK → `branch.nr_branch` | NOT NULL |  | Filial. |
+| `it_kind` | `smallint` |  | NOT NULL |  | O que vai ser feito. Valores: 1 = Imprimir; 2 = Exportar. |
+| `vc_target` | `varchar(120)` |  | NOT NULL |  | O que vai ser impresso ou exportado (ex.: Orçamento 12). |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem pediu. |
+| `nr_user_admin` | `bigint` | FK → `app_user.nr_user` | NULL |  | Administrador que liberou. |
+| `dh_authorized` | `timestamptz` |  | NULL |  | Quando foi liberado. |
+| `dh_used` | `timestamptz` |  | NULL |  | Quando a exportação do banco usou a liberação. |
+| `dh_expires` | `timestamptz` |  | NOT NULL | `now() + 10 minutos` | Validade do pedido. |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3386,7 +3430,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 |---|---|---|
 | `ad.session_context(p_json jsonb)` | authenticated | Login do app após o Supabase Auth: devolve usuário, empresas → filiais → perfis acessíveis (com it_level e id_admin) e vínculos bloqueados com motivo; grava access_log e dh_last_login. Cada filial traz permissions: telas que o usuário pode ler/criar/alterar (nível 100 tem todas; DASHBOARD sempre). Empresa que exige 2FA de quem está sem o segundo fator confirmado vem em blocked com SESSION_MFA_REQUIRED; mfa.vc_aal informa o nível da sessão. |
 | `ad.company_create(p_json jsonb)` | authenticated | Onboarding: cria empresa, matriz (filial 1), perfis Administrador/Usuário e vincula o criador como administrador. Qualquer usuário ativo pode criar. |
-| `ad.company_update(p_json jsonb)` | authenticated | Atualização parcial dos dados cadastrais da empresa. Somente administrador. Situação/bloqueio só por service_role. Aceita it_mfa_policy (2FA obrigatória: 0 não, 1 administradores, 2 todos); para ligar, quem altera precisa estar com 2FA na sessão (JWT aal2). |
+| `ad.company_update(p_json jsonb)` | authenticated | Atualização parcial dos dados cadastrais da empresa. Somente administrador. Situação/bloqueio só por service_role. Aceita it_mfa_policy (2FA obrigatória: 0 não, 1 administradores, 2 todos); para ligar, quem altera precisa estar com 2FA na sessão (JWT aal2). Também id_auth_print e id_auth_export (administrador para imprimir e exportar). |
 | `ad.branch_create(p_json jsonb)` | authenticated | Cria filial (numeração sequencial por empresa, serializada com FOR UPDATE na empresa) e vincula o criador com o seu perfil de maior nível. Somente administrador. |
 | `ad.branch_update(p_json jsonb)` | authenticated | Atualização parcial da filial, inclusive transferência de matriz (id_main). Somente administrador. Também telefone adicional, responsável técnico (nome, CRO e UF) e cidade do foro. |
 | `ad.access_profile_save(p_json jsonb)` | authenticated | Cria (I) ou atualiza (U) perfis de acesso da empresa; screens (opcional) substitui as permissões por tela (ler/criar/alterar). Guarda contra deixar a empresa sem administrador ativo. Grava event_log. Somente administrador. |
@@ -3504,9 +3548,11 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.fin_attachment_list(p_json jsonb)` | authenticated | Anexos ativos de uma conta (ou um só) com o caminho no Storage; usada pelo app e pela Edge Function fin-attachment para o download. Exige leitura na tela FINANCE. |
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
-| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. Inclui id_color_by_category, it_agenda_mode e agenda_catalog (categorias, marcadores e cadeiras, inclusive inativos). Inclui as regras de bloqueio do contrato, do check-in e do tratamento. Inclui id_record_sessions, id_record_return e id_record_time. |
+| `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. Inclui id_color_by_category, it_agenda_mode e agenda_catalog (categorias, marcadores e cadeiras, inclusive inativos). Inclui as regras de bloqueio do contrato, do check-in e do tratamento. Inclui id_record_sessions, id_record_return e id_record_time. Em security, também id_auth_print e id_auth_export. |
 | `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). Também id_color_by_category e it_agenda_mode (1 por profissional, 2 por cadeira). Também as regras de bloqueio it_contract_rule, it_checkin_* e it_treat_* (1 a 4). Também id_record_sessions, id_record_return e id_record_time. |
-| `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. |
+| `ad.access_request(p_json jsonb)` | authenticated | Antes de imprimir (it_kind 1) ou exportar (2): se a empresa exige administrador, abre um pedido de liberação válido por 10 minutos e devolve uu_request; senão id_required = false. Qualquer usuário com acesso à filial. |
+| `ad.access_authorize(p_json jsonb)` | authenticated | Libera um pedido de impressão/exportação. Chamada com a sessão do administrador (o app faz o login dele numa sessão separada); exige administrador da empresa do pedido, dentro da validade. Grava event_log com quem pediu, quem liberou e o que foi. |
+| `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. Com id_auth_export na empresa, exige uu_authorization liberado por um administrador (access_authorize), do próprio usuário, válido e não usado. |
 | `ad.trash_list(p_json jsonb)` | authenticated | Lixeira da filial (Configurações > Lixeira): pacientes inativados, notas excluídas, consultas/compromissos cancelados, contas canceladas, procedimentos e materiais inativados, mais recentes primeiro, com quem excluiu. Exige ler na tela SETTINGS; cada tipo só aparece para quem lê a tela dele; id_restore diz se pode restaurar. Filtro por tipo e busca. Inclui profissionais inativados (AGENDA). |
 | `ad.trash_restore(p_json jsonb)` | authenticated | Restaura um item da lixeira pela RPC da própria tela (patient_save, patient_note_save R, appointment_save, fin_entry_settle REOPEN, procedure_save, material_save), que confere a permissão de alterar, as regras e grava o log. Exige ler na tela SETTINGS. Profissional pela professional_save. |
 | `ad.patient_list(p_json jsonb)` | authenticated | Lista paginada de pacientes da filial, por nome, com idade: busca por nome/apelido/e-mail (ILIKE, aceita % como curinga) e, com dígitos, por CPF (início), celular/telefone (trecho) e número do prontuário. Filtros: vc_search, id_include_inactive, nr_page, qt_page_size (máx. 200). Devolve a permissão do usuário na tela PATIENTS. Exige leitura na tela PATIENTS. |
@@ -3580,6 +3626,9 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 
 | Chave | Function | Parâmetros |
 |---|---|---|
+| `ACCESS_AUTHORIZE_EXPIRED` | `access_authorize` |  |
+| `ACCESS_AUTHORIZE_FORBIDDEN` | `access_authorize` |  |
+| `ACCESS_AUTHORIZE_NOT_FOUND` | `access_authorize` |  |
 | `ACCESS_LOG_LIST_APP_INVALID` | `access_log_list` |  |
 | `ACCESS_LOG_LIST_COMPANY_REQUIRED` | `access_log_list` |  |
 | `ACCESS_LOG_LIST_FORBIDDEN` | `access_log_list` |  |
@@ -3598,6 +3647,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `ACCESS_PROFILE_SCREEN_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_SCREENS_INVALID` | `access_profile_save` |  |
 | `ACCESS_PROFILE_STATUS_INVALID` | `access_profile_save` |  |
+| `ACCESS_REQUEST_FORBIDDEN` | `access_request` |  |
+| `ACCESS_REQUEST_INVALID` | `access_request` |  |
 | `AGENDA_BRANCH_REQUIRED` | `appointment_list`, `appointment_save`, `professional_list`, `professional_save` |  |
 | `AGENDA_CATALOG_COLOR_INVALID` | `agenda_catalog_save` |  |
 | `AGENDA_CATALOG_FORBIDDEN` | `agenda_catalog_save` |  |
@@ -3765,6 +3816,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `EVENT_LOG_LIST_COMPANY_REQUIRED` | `event_log_list` |  |
 | `EVENT_LOG_LIST_FORBIDDEN` | `event_log_list` |  |
 | `EVENT_LOG_LIST_PERIOD_INVALID` | `event_log_list` |  |
+| `EXPORT_AUTH_REQUIRED` | `data_export` |  |
 | `EXPORT_BRANCH_REQUIRED` | `data_export` |  |
 | `EXPORT_FORBIDDEN` | `data_export` |  |
 | `EXPORT_KIND_INVALID` | `data_export` |  |
@@ -4167,7 +4219,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

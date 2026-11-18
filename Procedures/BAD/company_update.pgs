@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : Jose Carlos de Oliveira Junior                                ::
   ::  Date        : 13/10/2026                                                    ::
-  ::  Change      : 06/11/2026 - 2FA obrigatoria (it_mfa_policy)                  ::
+  ::  Change      : 18/11/2026 - administrador para imprimir e exportar           ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Atualizacao parcial dos dados cadastrais da empresa. Somente administrador
@@ -23,6 +23,8 @@
     vc_address, vc_address_number, vc_address_extra, vc_district, vc_city,
     vc_state, vc_zip_code                              opcionais (parciais)
     it_mfa_policy  integer  opcional 0 nao exige | 1 administradores | 2 todos
+    id_auth_print, id_auth_export  boolean  opcionais (pedir usuario e senha de um administrador
+                   antes de imprimir / exportar)
                    (2FA; para ligar, o administrador precisa estar com 2FA na sessao)
 
   Output jsonb: linha completa de ad.company.
@@ -110,6 +112,8 @@ begin
     vc_city           = case when p_json ? 'vc_city'           then left(nullif(trim(p_json ->> 'vc_city'), ''), 30)           else c.vc_city end,
     vc_state          = case when p_json ? 'vc_state'          then upper(left(nullif(trim(p_json ->> 'vc_state'), ''), 2))    else c.vc_state end,
     it_mfa_policy     = case when p_json ? 'it_mfa_policy'     then _mfa else c.it_mfa_policy end,
+    id_auth_print     = case when p_json ? 'id_auth_print'     then coalesce((p_json ->> 'id_auth_print')::boolean, false) else c.id_auth_print end,
+    id_auth_export    = case when p_json ? 'id_auth_export'    then coalesce((p_json ->> 'id_auth_export')::boolean, false) else c.id_auth_export end,
     vc_zip_code       = case when p_json ? 'vc_zip_code'       then nullif(regexp_replace(coalesce(p_json ->> 'vc_zip_code', ''), '[^0-9]', '', 'g'), '') else c.vc_zip_code end
   where c.nr_company = _nr_company
   returning c.* into _row;
