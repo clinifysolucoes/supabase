@@ -1,0 +1,88 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_patient_block(bigint, bigint, bigint, text)             ::
+  ::  UsedBy      : ad.appointment_save, ad.clinical_evolution_save               ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 17/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Pendencias do paciente que a filial configurou para barrar num momento
+    (od.branch_setting), devolvendo a regra mais forte que se aplica.
+      p_stage 'AGENDA'    it_debt_rule, it_open_rule, it_contract_rule
+              'CHECKIN'   it_checkin_debt_rule, it_checkin_open_rule, it_checkin_contract_rule
+              'TREAT'     it_treat_debt_rule, it_treat_open_rule, it_treat_contract_rule
+    Pendencias:
+      DEBT      conta a receber vencida ha mais que qt_debt_days (od.fn_patient_overdue)
+      OPEN      conta a receber em aberto (vencida ou nao)
+      CONTRACT  documento do tipo Contrato (it_kind 3) ativo sem assinatura do
+                paciente ou do responsavel legal
+    Regra: 1 nao bloquear, 2 avisar, 3 so o administrador libera, 4 bloquear.
+    Com regras iguais vale a ordem DEBT, OPEN, CONTRACT. Helper interno.
+  Input:
+    p_nr_company, p_nr_branch, p_nr_patient, p_stage
+  Output: jsonb {"it_rule" (1 = nada a fazer), "vc_kind" (DEBT | OPEN | CONTRACT | null),
+                 "qt_entries" (contas ou contratos), "vl_total" (0 no contrato)}
+*/
+create or replace function od.fn_patient_block(
+  p_nr_company bigint,
+  p_nr_branch  bigint,
+  p_nr_patient bigint,
+  p_stage      text)
+returns jsonb
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _s      od.branch_setting%rowtype;
+  _debt   smallint;
+  _open   smallint;
+  _ctr    smallint;
+  _best   jsonb := jsonb_build_object('it_rule', 1, 'vc_kind', null, 'qt_entries', 0, 'vl_total', 0);
+  _x      jsonb;
+  _qt     integer;
+  _vl     numeric;
+begin
+  select * into _s from od.branch_setting s where s.nr_company = p_nr_company and s.nr_branch = p_nr_branch;
+  _debt := coalesce(case p_stage when 'AGENDA' then _s.it_debt_rule when 'CHECKIN' then _s.it_checkin_debt_rule
+                                 else _s.it_treat_debt_rule end, 1);
+  _open := coalesce(case p_stage when 'AGENDA' then _s.it_open_rule when 'CHECKIN' then _s.it_checkin_open_rule
+                                 else _s.it_treat_open_rule end, 1);
+  _ctr  := coalesce(case p_stage when 'AGENDA' then _s.it_contract_rule when 'CHECKIN' then _s.it_checkin_contract_rule
+                                 else _s.it_treat_contract_rule end, 1);
+
+  if _debt > 1 then
+    _x := od.fn_patient_overdue(p_nr_company, p_nr_branch, p_nr_patient);
+    if (_x ->> 'qt_entries')::integer > 0 then
+      _best := _x || jsonb_build_object('it_rule', _debt, 'vc_kind', 'DEBT');
+    end if;
+  end if;
+  if _open > (_best ->> 'it_rule')::smallint then
+    select count(*), coalesce(sum(e.vl_amount), 0) into _qt, _vl
+      from od.fin_entry e
+     where e.nr_company = p_nr_company and e.nr_branch = p_nr_branch and e.nr_patient = p_nr_patient
+       and e.it_kind = 1 and e.it_status = 1;
+    if _qt > 0 then
+      _best := jsonb_build_object('it_rule', _open, 'vc_kind', 'OPEN', 'qt_entries', _qt, 'vl_total', _vl);
+    end if;
+  end if;
+  if _ctr > (_best ->> 'it_rule')::smallint then
+    select count(*) into _qt
+      from od.patient_document d
+     where d.nr_company = p_nr_company and d.nr_branch = p_nr_branch and d.nr_patient = p_nr_patient
+       and d.it_kind = 3 and d.it_status = 1
+       and not exists (select 1 from od.signature g
+                        where g.nr_company = d.nr_company and g.nr_branch = d.nr_branch
+                          and g.it_target = 1 and g.nr_document = d.nr_document and g.it_signer in (1, 2));
+    if _qt > 0 then
+      _best := jsonb_build_object('it_rule', _ctr, 'vc_kind', 'CONTRACT', 'qt_entries', _qt, 'vl_total', 0);
+    end if;
+  end if;
+  return _best;
+end;
+$$;
+
+revoke all on function od.fn_patient_block(bigint, bigint, bigint, text) from public, anon, authenticated;

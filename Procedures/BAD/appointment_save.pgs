@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 04/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - categoria, marcadores e cadeira                  ::
+  ::  Change      : 17/11/2026 - bloqueios no check-in e no tratamento            ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Agenda: cria ou altera uma consulta ou um compromisso.
@@ -48,7 +48,8 @@
     it_status        integer      1 agendado | 2 confirmado | 3 em espera | 4 em atendimento |
                                   5 atendido | 6 atrasado | 7 faltou | 90 cancelado
 
-  Output jsonb: {"nr_company", "nr_branch", "nr_appointment", "debt": {"qt_entries", "vl_total"} | null}
+  Output jsonb: {"nr_company", "nr_branch", "nr_appointment",
+                 "debt": {"qt_entries", "vl_total", "vc_kind" (debt | open | contract), "vc_stage"} | null}
     "debt" vem preenchido quando o paciente tem conta vencida e a regra deixou
     agendar (avisar, ou liberado pelo administrador).
 
@@ -60,7 +61,13 @@
     APPOINTMENT_OUTSIDE_HOURS, APPOINTMENT_DEBT_BLOCKED {Amount}, APPOINTMENT_DEBT_APPROVAL {Amount},
     APPOINTMENT_DEBT_CONFIRM {Amount}, APPOINTMENT_OPEN_BLOCKED {Amount},
     APPOINTMENT_OPEN_APPROVAL {Amount}, APPOINTMENT_OPEN_CONFIRM {Amount}, APPOINTMENT_CATEGORY_INVALID,
-    APPOINTMENT_CHAIR_INVALID, APPOINTMENT_MARKER_INVALID, APPOINTMENT_CHAIR_CONFLICT {Time}
+    APPOINTMENT_CHAIR_INVALID, APPOINTMENT_MARKER_INVALID, APPOINTMENT_CHAIR_CONFLICT {Time},
+    APPOINTMENT_CONTRACT_BLOCKED, APPOINTMENT_CONTRACT_APPROVAL, APPOINTMENT_CONTRACT_CONFIRM
+    Bloqueios (od.fn_patient_block): os erros *_BLOCKED / *_APPROVAL / *_CONFIRM levam
+    {Amount, Stage}; Stage = agenda (consulta nova ou troca de paciente), checkin
+    (situacao vai para Em espera) ou treat (vai para Em atendimento). Pendencias:
+    DEBT conta vencida (it_*debt_rule), OPEN conta em aberto (it_*open_rule),
+    CONTRACT contrato sem assinatura (it_*contract_rule).
     Contas em aberto (od.branch_setting.it_open_rule): o mesmo, para quem tem
     conta a receber em aberto ainda nao vencida; vale a regra mais forte.
     Inadimplentes (od.branch_setting.it_debt_rule): consulta nova, ou que
@@ -95,13 +102,11 @@ declare
   _outside_ok     boolean;
   _local_start    timestamp;
   _local_end      timestamp;
-  _debt_rule      smallint;
   _debt           jsonb;
   _debt_override  boolean := false;
-  _open_rule      smallint;
-  _open           jsonb;
   _rule           smallint := 1;
   _kind           text;
+  _stage          text;
   _markers        bigint[];
 begin
   perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'appointment_save');
@@ -320,47 +325,37 @@ begin
     end if;
   end if;
 
-  /* paciente com conta a receber vencida                                   */
-  if _new.it_type = 1 and _new.nr_patient is not null and _new.it_status not in (7, 90)
-     and (_vc_action = 'I' or _new.nr_patient is distinct from _cur.nr_patient) then
-    select coalesce(s.it_debt_rule, 1), coalesce(s.it_open_rule, 1) into _debt_rule, _open_rule
-      from (select 1) x
-      left join od.branch_setting s on s.nr_company = _nr_company and s.nr_branch = _nr_branch;
-    if _debt_rule > 1 then
-      _debt := od.fn_patient_overdue(_nr_company, _nr_branch, _new.nr_patient);
-      if (_debt ->> 'qt_entries')::integer > 0 then
-        _rule := _debt_rule; _kind := 'DEBT';
-      end if;
-    end if;
-    -- contas em aberto ainda nao vencidas (vale a regra mais forte)
-    if _open_rule > _rule then
-      select jsonb_build_object('qt_entries', count(*), 'vl_total', coalesce(sum(e.vl_amount), 0)) into _open
-        from od.fin_entry e
-       where e.nr_company = _nr_company and e.nr_branch = _nr_branch and e.nr_patient = _new.nr_patient
-         and e.it_kind = 1 and e.it_status = 1;
-      if (_open ->> 'qt_entries')::integer > 0 then
-        _rule := _open_rule; _kind := 'OPEN'; _debt := _open;
-      end if;
-    end if;
-    if _kind is null then
+  /* pendencias do paciente (od.fn_patient_block): ao agendar, no check-in   */
+  /* (situacao vai para Em espera) e ao iniciar o atendimento                */
+  if _new.it_type = 1 and _new.nr_patient is not null then
+    _stage := case
+      when _new.it_status = 4 and _cur.it_status is distinct from 4 then 'TREAT'
+      when _new.it_status = 3 and _cur.it_status is distinct from 3 then 'CHECKIN'
+      when _new.it_status not in (7, 90)
+           and (_vc_action = 'I' or _new.nr_patient is distinct from _cur.nr_patient) then 'AGENDA'
+    end;
+  end if;
+  if _stage is not null then
+    _debt := od.fn_patient_block(_nr_company, _nr_branch, _new.nr_patient, _stage);
+    _rule := (_debt ->> 'it_rule')::smallint;
+    _kind := _debt ->> 'vc_kind';
+    if _rule = 1 or _kind is null then
       _debt := null;
     else
-      _debt := _debt || jsonb_build_object('vc_kind', lower(_kind));
+      _debt := (_debt - 'it_rule') || jsonb_build_object('vc_kind', lower(_kind), 'vc_stage', lower(_stage));
       if _rule = 4 then
         raise exception '%', ad.fn_message('APPOINTMENT_' || _kind || '_BLOCKED',
-          jsonb_build_object('Amount', _debt -> 'vl_total'));
+          jsonb_build_object('Amount', _debt -> 'vl_total', 'Stage', lower(_stage)));
       elsif _rule = 3 then
         if not private.fn_is_company_admin(_nr_company) then
           raise exception '%', ad.fn_message('APPOINTMENT_' || _kind || '_APPROVAL',
-            jsonb_build_object('Amount', _debt -> 'vl_total'));
+            jsonb_build_object('Amount', _debt -> 'vl_total', 'Stage', lower(_stage)));
         end if;
         if not coalesce((p_json ->> 'id_debt_override')::boolean, false) then
           raise exception '%', ad.fn_message('APPOINTMENT_' || _kind || '_CONFIRM',
-            jsonb_build_object('Amount', _debt -> 'vl_total'));
+            jsonb_build_object('Amount', _debt -> 'vl_total', 'Stage', lower(_stage)));
         end if;
         _debt_override := true;
-      elsif _rule = 1 then
-        _debt := null;
       end if;
     end if;
   end if;

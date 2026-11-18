@@ -45,7 +45,7 @@ begin
   _pa := (ad.patient_save(_base || '{"vc_action": "I", "vc_name": "Lia Souza", "dt_birth": "1990-01-01",
            "vc_cpf": "529.982.247-25", "vc_mobile": "(41) 99999-1234"}'::jsonb) ->> 'nr_patient')::bigint;
   _pb := (ad.patient_save(_base || jsonb_build_object('vc_action', 'I', 'vc_name', 'Beto Lima', 'dt_birth',
-           (current_date - interval '30 years')::date, 'vc_cpf', '11144477735', 'vc_mobile', '41988887777')) ->> 'nr_patient')::bigint;
+           ((now() at time zone 'America/Sao_Paulo')::date - interval '30 years')::date, 'vc_cpf', '11144477735', 'vc_mobile', '41988887777')) ->> 'nr_patient')::bigint;
   perform set_config('test.nr_patient', _pa::text, false);
   _prof := (ad.professional_save(_base || '{"vc_action": "I", "vc_name": "Dra. Rosa"}'::jsonb) ->> 'nr_professional')::bigint;
   _ap := (ad.appointment_save(_base || jsonb_build_object('vc_action', 'I', 'it_type', 1, 'nr_patient', _pa,
