@@ -1294,6 +1294,10 @@ erDiagram
     varchar vc_tpl_return
     smallint qt_resend
     smallint qt_resend_hours
+    boolean id_review
+    varchar vc_review_url
+    smallint qt_review_hours
+    varchar vc_tpl_review
   }
   notify_message {
     bigint nr_company PK, FK
@@ -3330,6 +3334,10 @@ Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais 
 | `vc_tpl_return` | `varchar(500)` |  | NOT NULL |  | Texto do retorno ({{retorno}} = texto do alerta da ficha). |
 | `qt_resend` | `smallint` |  | NOT NULL | `0` | Reenvios do lembrete quando o paciente não confirma (0 a 3; 0 desliga). |
 | `qt_resend_hours` | `smallint` |  | NOT NULL | `4` | Horas entre um envio do lembrete e o reenvio (1 a 24); reenvia só entre 07:00 e 21:59 no fuso da filial. |
+| `id_review` | `boolean` |  | NOT NULL | `false` | Envia o link de avaliação no Google depois do atendimento (exige vc_review_url). |
+| `vc_review_url` | `varchar(500)` |  | NULL |  | Link de avaliação da clínica no Google (https://), usado em {{avaliacao}}. |
+| `qt_review_hours` | `smallint` |  | NOT NULL | `2` | Horas depois do fim da consulta Atendido para pedir a avaliação (1 a 72); envia entre 08:00 e 20:59 no fuso da filial, uma por paciente a cada 180 dias. |
+| `vc_tpl_review` | `varchar(500)` |  | NOT NULL |  | Texto do pedido de avaliação ({{nome}}, {{clinica}}, {{avaliacao}}). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3348,7 +3356,7 @@ Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o 
 | `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
 | `nr_message` | `bigint` | PK3 | NOT NULL |  | Número sequencial da mensagem na filial. |
 | `it_channel` | `smallint` |  | NOT NULL |  | Canal. Valores: 1 = E-mail (Resend); 2 = SMS (Zenvia). |
-| `it_kind` | `smallint` |  | NOT NULL |  | Alerta. Valores: 1 = Lembrete da consulta (com link de confirmação); 2 = Consulta agendada; 4 = Retorno. |
+| `it_kind` | `smallint` |  | NOT NULL |  | Alerta. Valores: 1 = Lembrete da consulta (com link de confirmação); 2 = Consulta agendada; 4 = Retorno; 5 = Avaliação no Google (depois do atendimento). |
 | `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
 | `nr_appointment` | `bigint` | FK → `appointment.nr_appointment` | NULL |  | Consulta (lembrete e agendamento). |
 | `dt_ref` | `date` |  | NOT NULL |  | Data de referência (dia da consulta ou do retorno), parte da chave contra repetição. |
@@ -3599,7 +3607,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.referral_list(p_json jsonb)` | authenticated | Controle de Indicação (ler em REFERRALS) dos pacientes cadastrados no período (padrão 12 meses, até 2 anos): indicados com conversão (orçamento aprovado), valor aprovado (ler em BUDGETS) e recompensa; ranking de quem indicou com valor recebido dos indicados (ler em FINANCE) e recompensas pendentes; novos e convertidos por origem. |
 | `ad.referral_reward_save(p_json jsonb)` | authenticated | Registra (I) ou desfaz (D) a recompensa dada a quem indicou um paciente (alterar em REFERRALS): o que foi dado, data e valor; uma por paciente indicado. |
 | `ad.notify_settings_get(p_json jsonb)` | authenticated | Configuração dos alertas por e-mail e SMS da filial (ler em SETTINGS), com os padrões das colunas quando ainda não configurada, e o resumo dos últimos 30 dias por canal e situação. Inclui qt_resend e qt_resend_hours. |
-| `ad.notify_settings_save(p_json jsonb)` | authenticated | Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila. Também qt_resend (0 a 3) e qt_resend_hours (1 a 24). |
+| `ad.notify_settings_save(p_json jsonb)` | authenticated | Grava a configuração dos alertas por e-mail e SMS (alterar em SETTINGS), com update parcial; desligar um canal cancela o que dele estava na fila. Também qt_resend (0 a 3) e qt_resend_hours (1 a 24) e a avaliação no Google (id_review, vc_review_url, qt_review_hours, vc_tpl_review). |
 | `ad.notify_message_list(p_json jsonb)` | authenticated | Histórico dos alertas por e-mail e SMS (ler em SETTINGS) por canal, tipo e situação, paginado, com a confirmação pelo link. |
 | `ad.notify_dispatch(p_json jsonb)` | service_role | Lado servidor dos alertas por e-mail e SMS (só service_role, Edge Functions notify-send e notify-confirm): CLAIM enfileira o devido e entrega o lote, RESULT grava enviada/erro, CONFIRM confirma a consulta pelo token do link do lembrete. |
 | `ad.chart_model_list(p_json jsonb)` | authenticated | Modelos de ficha por especialidade com os campos (ler em PATIENTS ou SETTINGS); na primeira chamada cria os prontos (Ortodontia, Endodontia, Implantodontia, Periodontia). |
@@ -3687,7 +3695,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_patient_block(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_stage text)` | interna | Pendências do paciente que a filial barra num momento (AGENDA, CHECKIN ou TREAT): conta vencida, conta em aberto e contrato sem assinatura do paciente ou responsável. Devolve a regra mais forte {it_rule, vc_kind, qt_entries, vl_total}. |
 | `od.fn_stock_move(p_nr_company bigint, p_nr_branch bigint, p_nr_material bigint, p_it_type smallint, p_qt numeric, p_dt date, p_vl_unit_cost numeric, p_vl_total numeric, p_nr_user bigint, p_nr_supplier bigint, p_vc_document text, p_nr_entry bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_movement_ref bigint, p_vc_notes text)` | interna | Grava um movimento de estoque e atualiza o saldo do material (única forma de mexer no saldo). |
 | `od.fn_stock_evolution(p_nr_company bigint, p_nr_branch bigint, p_nr_patient bigint, p_nr_evolution bigint, p_nr_user bigint, p_reverse boolean)` | interna | Baixa do estoque os materiais da ficha técnica do procedimento registrado na evolução (quantidade × quantidade do item do orçamento), ou estorna as baixas quando a evolução é excluída. |
-| `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento e retorno), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. Reenvio do lembrete sem confirmação: até qt_resend vezes, a cada qt_resend_hours horas, só entre 07:00 e 21:59 no fuso da filial, enquanto a consulta futura continuar Agendado. |
+| `od.fn_notify_enqueue()` | interna | Põe na fila os alertas por e-mail e SMS devidos (lembrete, agendamento, retorno e avaliação no Google depois do atendimento), um por canal, com o texto do modelo da filial e o token do link de confirmação no lembrete. Reenvio do lembrete sem confirmação: até qt_resend vezes, a cada qt_resend_hours horas, só entre 07:00 e 21:59 no fuso da filial, enquanto a consulta futura continuar Agendado. |
 | `od.fn_notify_render(p_tpl text, p_vars jsonb)` | interna | Troca os campos {{chave}} do texto do alerta pelos valores; {{link}} fica para a Edge Function. |
 | `od.fn_report_agenda(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Agenda para ad.report_get: consultas do período por situação (appointments), primeira consulta do paciente (first_visit), alertas de retorno com a próxima consulta (return_alerts) e consultas por categoria (categories) e por marcador (markers). Devolve {rows, summary, by_professional, qt}. |
 | `od.fn_report_patients(p_nr_company bigint, p_nr_branch bigint, p_report text, p_d0 date, p_d1 date, p_from timestamptz, p_to timestamptz, p_prof bigint, p_limit integer)` | interna | Relatórios do grupo Pacientes para ad.report_get: faixa etária e sexo (age_groups), cidade e bairro (location), última consulta atendida sem retorno marcado (last_visit), orçamentos e conversão (budgets), contas a receber vencidas (overdue) e guias por convênio com glosa (health_plans). Devolve {rows, summary, by_professional, qt}. |
@@ -4106,6 +4114,8 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `NOTIFY_BRANCH_REQUIRED` | `notify_settings_get`, `notify_settings_save`, `notify_message_list` |  |
 | `NOTIFY_EMAIL_INVALID` | `notify_settings_save` |  |
 | `NOTIFY_FORBIDDEN` | `notify_settings_get`, `notify_settings_save`, `notify_message_list` |  |
+| `NOTIFY_REVIEW_URL_INVALID` | `notify_settings_save` |  |
+| `NOTIFY_REVIEW_URL_REQUIRED` | `notify_settings_save` |  |
 | `NOTIFY_TEMPLATE_INVALID` | `notify_settings_save` |  |
 | `NOTIFY_VALUE_INVALID` | `notify_settings_save`, `notify_message_list`, `notify_dispatch` |  |
 | `ONLINE_BOOKING_ACTION_INVALID` | `online_booking_public` |  |

@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 12/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - reenvio do lembrete                              ::
+  ::  Change      : 18/11/2026 - avaliacao no Google                              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Configuracao dos alertas por e-mail e SMS da filial (LER na tela
@@ -20,7 +20,8 @@
   Output jsonb:
     {"settings": {"id_email", "id_sms", "vc_email_from_name", "vc_email_reply_to", "id_reminder",
                   "qt_reminder_hours", "id_booked", "id_return", "qt_send_hour", "qt_resend", "qt_resend_hours", "vc_tpl_reminder",
-                  "vc_tpl_booked", "vc_tpl_return", "vc_clinic", "id_saved"},
+                  "vc_tpl_booked", "vc_tpl_return", "id_review", "vc_review_url", "qt_review_hours",
+                  "vc_tpl_review", "vc_clinic", "id_saved"},
      "totals": [{"it_channel", "it_status", "qt"}], "permission": {"id_update"}}
 
   Errors: VERSION_MISMATCH, NOTIFY_BRANCH_REQUIRED, NOTIFY_FORBIDDEN
@@ -76,6 +77,8 @@ begin
       'id_booked', _w.id_booked, 'id_return', _w.id_return, 'qt_send_hour', _w.qt_send_hour,
       'qt_resend', _w.qt_resend, 'qt_resend_hours', _w.qt_resend_hours,
       'vc_tpl_reminder', _w.vc_tpl_reminder, 'vc_tpl_booked', _w.vc_tpl_booked, 'vc_tpl_return', _w.vc_tpl_return,
+      'id_review', _w.id_review, 'vc_review_url', _w.vc_review_url, 'qt_review_hours', _w.qt_review_hours,
+      'vc_tpl_review', _w.vc_tpl_review,
       'vc_clinic', _clinic, 'id_saved', _w.nr_company is not null),
     'totals', coalesce((
       select jsonb_agg(jsonb_build_object('it_channel', t.it_channel, 'it_status', t.it_status, 'qt', t.qt)
