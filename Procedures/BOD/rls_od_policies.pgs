@@ -425,3 +425,15 @@ drop policy if exists aligner_case_event_select on od.aligner_case_event;
 create policy aligner_case_event_select on od.aligner_case_event
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.radiology_center
+drop policy if exists radiology_center_select on od.radiology_center;
+create policy radiology_center_select on od.radiology_center
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.radiology_request
+drop policy if exists radiology_request_select on od.radiology_request;
+create policy radiology_request_select on od.radiology_request
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

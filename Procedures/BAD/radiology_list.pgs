@@ -1,0 +1,135 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.radiology_list(jsonb)                                      ::
+  ::  UsedBy      : Flutter -> rpc('radiology_list') (Exames de Imagem)           ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Pedidos de exame de imagem da filial (LER na tela RADIOLOGY), os centros
+    radiologicos (todos, ativos primeiro) e os totais por situacao.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_status    integer  opcional (uma situacao; sem = todas menos canceladas)
+    dt_start, dt_end  date  opcionais (pedidos do periodo)
+    nr_center    bigint   opcional
+    nr_patient   bigint   opcional
+    vc_search    text     opcional (paciente, exame ou regiao)
+
+  Output jsonb: {"requests": [{nr_request, nr_patient, vc_patient, nr_center, vc_center, nr_professional,
+                               vc_professional, dt_request, ar_exams, vc_region, vc_notes, it_status,
+                               dt_scheduled, dt_done, dt_report, vc_report_url, vc_user, dh_created}],
+                 "centers": [{nr_center, vc_name, vc_phone, vc_email, vc_address, vc_notes, it_integration,
+                              vc_external_code, it_status}],
+                 "totals": {qt_requested, qt_scheduled, qt_done, qt_report},
+                 "id_truncated"}
+
+  Errors: VERSION_MISMATCH, RADIOLOGY_BRANCH_REQUIRED, RADIOLOGY_FORBIDDEN, RADIOLOGY_VALUE_INVALID
+*/
+create or replace function ad.radiology_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _status     smallint;
+  _d0         date;
+  _d1         date;
+  _center     bigint;
+  _patient    bigint;
+  _search     text := nullif(trim(coalesce(p_json ->> 'vc_search', '')), '');
+  _limit      constant integer := 500;
+  _rows       jsonb;
+  _qt         integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'radiology_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RADIOLOGY_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'RADIOLOGY') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('RADIOLOGY_FORBIDDEN');
+  end if;
+  begin
+    _status  := (p_json ->> 'it_status')::smallint;
+    _d0      := (p_json ->> 'dt_start')::date;
+    _d1      := (p_json ->> 'dt_end')::date;
+    _center  := (p_json ->> 'nr_center')::bigint;
+    _patient := (p_json ->> 'nr_patient')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('RADIOLOGY_VALUE_INVALID');
+  end;
+
+  with base as (
+    select r.*, pa.vc_name as vc_patient, c.vc_name as vc_center, pr.vc_name as vc_professional,
+           u.vc_name as vc_user
+      from od.radiology_request r
+      join od.patient pa on pa.nr_company = r.nr_company and pa.nr_branch = r.nr_branch and pa.nr_patient = r.nr_patient
+      left join od.radiology_center c on c.nr_company = r.nr_company and c.nr_branch = r.nr_branch
+                                     and c.nr_center = r.nr_center
+      left join od.professional pr on pr.nr_company = r.nr_company and pr.nr_branch = r.nr_branch
+                                  and pr.nr_professional = r.nr_professional
+      left join ad.app_user u on u.nr_user = r.nr_user_created
+     where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+       and (case when _status is null then r.it_status <> 90 else r.it_status = _status end)
+       and (_d0 is null or r.dt_request >= _d0)
+       and (_d1 is null or r.dt_request <= _d1)
+       and (_center is null or r.nr_center = _center)
+       and (_patient is null or r.nr_patient = _patient)
+       and (_search is null or pa.vc_name ilike '%' || _search || '%'
+            or coalesce(r.vc_region, '') ilike '%' || _search || '%'
+            or exists (select 1 from unnest(r.ar_exams) e where e ilike '%' || _search || '%'))
+  ), lim as (
+    select * from base order by it_status, dt_request desc, nr_request desc limit _limit
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'nr_request', l.nr_request, 'nr_patient', l.nr_patient, 'vc_patient', l.vc_patient,
+           'nr_center', l.nr_center, 'vc_center', l.vc_center,
+           'nr_professional', l.nr_professional, 'vc_professional', l.vc_professional,
+           'dt_request', l.dt_request, 'ar_exams', to_jsonb(l.ar_exams), 'vc_region', l.vc_region,
+           'vc_notes', l.vc_notes, 'it_status', l.it_status, 'dt_scheduled', l.dt_scheduled,
+           'dt_done', l.dt_done, 'dt_report', l.dt_report, 'vc_report_url', l.vc_report_url,
+           'vc_user', l.vc_user, 'dh_created', l.dh_created)
+           order by l.it_status, l.dt_request desc, l.nr_request desc), '[]'::jsonb),
+         (select count(*) from base)
+    into _rows, _qt
+    from lim l;
+
+  return jsonb_build_object(
+    'requests', _rows,
+    'centers', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_center', c.nr_center, 'vc_name', c.vc_name, 'vc_phone', c.vc_phone, 'vc_email', c.vc_email,
+               'vc_address', c.vc_address, 'vc_notes', c.vc_notes, 'it_integration', c.it_integration,
+               'vc_external_code', c.vc_external_code, 'it_status', c.it_status)
+               order by c.it_status, c.vc_name)
+        from od.radiology_center c
+       where c.nr_company = _nr_company and c.nr_branch = _nr_branch), '[]'::jsonb),
+    'totals', (select jsonb_build_object(
+                 'qt_requested', count(*) filter (where r.it_status = 1),
+                 'qt_scheduled', count(*) filter (where r.it_status = 2),
+                 'qt_done',      count(*) filter (where r.it_status = 3),
+                 'qt_report',    count(*) filter (where r.it_status = 4))
+                 from od.radiology_request r
+                where r.nr_company = _nr_company and r.nr_branch = _nr_branch
+                  and (_d0 is null or r.dt_request >= _d0)
+                  and (_d1 is null or r.dt_request <= _d1)
+                  and (_center is null or r.nr_center = _center)
+                  and (_patient is null or r.nr_patient = _patient)),
+    'id_truncated', _qt > _limit);
+end;
+$$;
+
+revoke all on function ad.radiology_list(jsonb) from public, anon;
+grant execute on function ad.radiology_list(jsonb) to authenticated;
