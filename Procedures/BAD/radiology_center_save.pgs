@@ -1,0 +1,141 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.radiology_center_save(jsonb)                               ::
+  ::  UsedBy      : Flutter -> rpc('radiology_center_save') (Exames de Imagem)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Cadastra (vc_action I, CRIAR na tela RADIOLOGY) ou altera (U, ALTERAR) um
+    centro radiologico da filial. Update parcial: chave presente altera,
+    ausente mantem. Telefone so com digitos (10 ou 11), e-mail minusculo.
+    it_integration 1 (integracao automatica) fica gravado para quando o
+    centro tiver contrato e chave; hoje nao muda o funcionamento.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_action   text     I | U
+    nr_center   bigint   obrigatorio no U
+    vc_name     text     obrigatorio no I (ate 120, unico na filial)
+    vc_phone, vc_email, vc_address (ate 200), vc_notes (ate 500)  text
+    it_integration  integer  0 manual | 1 integracao automatica
+    vc_external_code  text  codigo da clinica no centro (ate 60)
+    it_status   integer  1 ativo | 90 inativo
+
+  Output jsonb: {"nr_center"}
+
+  Errors: VERSION_MISMATCH, RADIOLOGY_ACTION_INVALID, RADIOLOGY_BRANCH_REQUIRED, RADIOLOGY_FORBIDDEN,
+    RADIOLOGY_CENTER_NOT_FOUND, RADIOLOGY_VALUE_INVALID, RADIOLOGY_CENTER_NAME_REQUIRED,
+    RADIOLOGY_CENTER_NAME_EXISTS, RADIOLOGY_CENTER_PHONE_INVALID, RADIOLOGY_CENTER_EMAIL_INVALID
+*/
+create or replace function ad.radiology_center_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr_center  bigint;
+  _new        od.radiology_center;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'radiology_center_save');
+  if _action not in ('I', 'U') then
+    raise exception '%', ad.fn_message('RADIOLOGY_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('RADIOLOGY_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'RADIOLOGY');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'U' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('RADIOLOGY_FORBIDDEN');
+  end if;
+
+  if _action = 'U' then
+    _nr_center := (p_json ->> 'nr_center')::bigint;
+    select * into _new from od.radiology_center c
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_center = _nr_center
+     for update;
+    if not found then
+      raise exception '%', ad.fn_message('RADIOLOGY_CENTER_NOT_FOUND');
+    end if;
+  else
+    _new.it_integration := 0;
+    _new.it_status := 1;
+  end if;
+
+  begin
+    if p_json ? 'vc_name'    then _new.vc_name := nullif(trim(p_json ->> 'vc_name'), ''); end if;
+    if p_json ? 'vc_phone'   then _new.vc_phone := nullif(regexp_replace(coalesce(p_json ->> 'vc_phone', ''), '\D', '', 'g'), ''); end if;
+    if p_json ? 'vc_email'   then _new.vc_email := nullif(lower(trim(p_json ->> 'vc_email')), ''); end if;
+    if p_json ? 'vc_address' then _new.vc_address := nullif(trim(p_json ->> 'vc_address'), ''); end if;
+    if p_json ? 'vc_notes'   then _new.vc_notes := nullif(trim(p_json ->> 'vc_notes'), ''); end if;
+    if p_json ? 'vc_external_code' then _new.vc_external_code := nullif(trim(p_json ->> 'vc_external_code'), ''); end if;
+    if p_json ? 'it_integration' then _new.it_integration := (p_json ->> 'it_integration')::smallint; end if;
+    if p_json ? 'it_status'  then _new.it_status := (p_json ->> 'it_status')::smallint; end if;
+  exception when others then
+    raise exception '%', ad.fn_message('RADIOLOGY_VALUE_INVALID');
+  end;
+
+  if _new.vc_name is null then
+    raise exception '%', ad.fn_message('RADIOLOGY_CENTER_NAME_REQUIRED');
+  end if;
+  if length(_new.vc_name) > 120 or length(coalesce(_new.vc_address, '')) > 200
+     or length(coalesce(_new.vc_notes, '')) > 500 or length(coalesce(_new.vc_external_code, '')) > 60
+     or _new.it_integration is null or _new.it_integration not in (0, 1)
+     or _new.it_status is null or _new.it_status not in (1, 90) then
+    raise exception '%', ad.fn_message('RADIOLOGY_VALUE_INVALID');
+  end if;
+  if _new.vc_phone is not null and _new.vc_phone !~ '^[0-9]{10,11}$' then
+    raise exception '%', ad.fn_message('RADIOLOGY_CENTER_PHONE_INVALID');
+  end if;
+  if _new.vc_email is not null and (length(_new.vc_email) > 120 or not ad.fn_email_is_valid(_new.vc_email)) then
+    raise exception '%', ad.fn_message('RADIOLOGY_CENTER_EMAIL_INVALID');
+  end if;
+  if exists (select 1 from od.radiology_center c
+              where c.nr_company = _nr_company and c.nr_branch = _nr_branch
+                and lower(c.vc_name) = lower(_new.vc_name) and c.nr_center is distinct from _nr_center) then
+    raise exception '%', ad.fn_message('RADIOLOGY_CENTER_NAME_EXISTS');
+  end if;
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(c.nr_center), 0) + 1 into _nr_center
+      from od.radiology_center c where c.nr_company = _nr_company and c.nr_branch = _nr_branch;
+    insert into od.radiology_center (nr_company, nr_branch, nr_center, vc_name, vc_phone, vc_email, vc_address,
+                                     vc_notes, it_integration, vc_external_code, it_status)
+    values (_nr_company, _nr_branch, _nr_center, _new.vc_name, _new.vc_phone, _new.vc_email, _new.vc_address,
+            _new.vc_notes, _new.it_integration, _new.vc_external_code, _new.it_status);
+  else
+    update od.radiology_center c set
+      vc_name = _new.vc_name, vc_phone = _new.vc_phone, vc_email = _new.vc_email, vc_address = _new.vc_address,
+      vc_notes = _new.vc_notes, it_integration = _new.it_integration, vc_external_code = _new.vc_external_code,
+      it_status = _new.it_status
+     where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_center = _nr_center;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'RADIOLOGY', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'radiology_center', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_center::text,
+    format('Centro radiológico %s %s', _new.vc_name, case when _action = 'I' then 'cadastrado' else 'alterado' end),
+    jsonb_build_object('it_status', _new.it_status, 'it_integration', _new.it_integration));
+
+  return jsonb_build_object('nr_center', _nr_center);
+end;
+$$;
+
+revoke all on function ad.radiology_center_save(jsonb) from public, anon;
+grant execute on function ad.radiology_center_save(jsonb) to authenticated;

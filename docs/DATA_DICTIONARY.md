@@ -107,6 +107,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.price_table_item`](#odpricetableitem) | Preço na tabela | Preço de um procedimento numa tabela de preço particular (sem linha = valor cobrado hoje do procedimento). |
 | [`od.aligner_case`](#odalignercase) | Caso de alinhadores | Caso de alinhadores ortodônticos do paciente: sistema/fabricante, número do caso no fabricante, quantidade de alinhadores, alinhador atual, troca a cada N dias e a situação (iniciado, pendências, em tratamento, finalizado). |
 | [`od.aligner_case_event`](#odalignercaseevent) | Histórico do caso de alinhadores | Criação e cada mudança de situação ou de alinhador atual do caso, com anotação. |
+| [`od.radiology_center`](#odradiologycenter) | Centro radiológico | Centro radiológico parceiro da filial, para onde vão os pedidos de exame de imagem. A integração automática (it_integration 1) fica preparada para quando o centro tiver contrato e chave. |
+| [`od.radiology_request`](#odradiologyrequest) | Pedido de exame de imagem | Pedido de exame de imagem do paciente (panorâmica, tomografia, documentação ortodôntica...) a um centro radiológico, com situação, datas e o link do laudo/imagens no portal do centro. |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
@@ -225,6 +227,9 @@ erDiagram
   patient ||--o{ patient_note : "notas"
   patient ||--o{ aligner_case : "alinhadores"
   aligner_case ||--o{ aligner_case_event : "histórico"
+  branch ||--o{ radiology_center : "centros radiológicos"
+  patient ||--o{ radiology_request : "exames de imagem"
+  radiology_center |o--o{ radiology_request : "pedidos"
   app_user ||--o{ access_authorization : "pedido"
   price_table ||--o{ price_table_item : "preços"
   procedure ||--o{ price_table_item : "preço na tabela"
@@ -1265,6 +1270,37 @@ erDiagram
     smallint qt_current
     varchar vc_text
     bigint nr_user FK
+  }
+  radiology_center {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_center PK
+    varchar vc_name
+    varchar vc_phone
+    varchar vc_email
+    varchar vc_address
+    varchar vc_notes
+    smallint it_integration
+    varchar vc_external_code
+    smallint it_status
+  }
+  radiology_request {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_request PK
+    bigint nr_patient FK
+    bigint nr_center FK
+    bigint nr_professional FK
+    date dt_request
+    text[] ar_exams
+    varchar vc_region
+    varchar vc_notes
+    smallint it_status
+    date dt_scheduled
+    date dt_done
+    date dt_report
+    varchar vc_report_url
+    bigint nr_user_created FK
   }
   referral_reward {
     bigint nr_company PK, FK
@@ -3285,6 +3321,61 @@ Criação e cada mudança de situação ou de alinhador atual do caso, com anota
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.radiology_center
+
+**Centro radiológico**
+
+Centro radiológico parceiro da filial, para onde vão os pedidos de exame de imagem. A integração automática (it_integration 1) fica preparada para quando o centro tiver contrato e chave.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via radiology_center_save / radiology_save (permissão na tela RADIOLOGY).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_center` | `bigint` | PK3 | NOT NULL |  | Número do centro (sequencial por filial). |
+| `vc_name` | `varchar(120)` |  | NOT NULL |  | Nome do centro (único na filial, sem diferenciar maiúsculas). |
+| `vc_phone` | `varchar(15)` |  | NULL |  | Telefone, só dígitos (DDD + número). |
+| `vc_email` | `varchar(120)` |  | NULL |  | E-mail (minúsculo). |
+| `vc_address` | `varchar(200)` |  | NULL |  | Endereço. |
+| `vc_notes` | `varchar(500)` |  | NULL |  | Observações (horários, convênios aceitos...). |
+| `it_integration` | `smallint` |  | NOT NULL | `0` | Como os pedidos chegam ao centro. Valores: 0 = Manual (impresso, telefone, e-mail); 1 = Integração automática (precisa de contrato e chave). |
+| `vc_external_code` | `varchar(60)` |  | NULL |  | Código da clínica no sistema do centro (para a integração). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação. Valores: 1 = Ativo; 90 = Inativo. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.radiology_request
+
+**Pedido de exame de imagem**
+
+Pedido de exame de imagem do paciente (panorâmica, tomografia, documentação ortodôntica...) a um centro radiológico, com situação, datas e o link do laudo/imagens no portal do centro.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via radiology_center_save / radiology_save (permissão na tela RADIOLOGY).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_request` | `bigint` | PK3 | NOT NULL |  | Número do pedido (sequencial por filial). |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente. |
+| `nr_center` | `bigint` | FK → `radiology_center.nr_center` | NULL |  | Centro radiológico. |
+| `nr_professional` | `bigint` | FK → `professional.nr_professional` | NULL |  | Profissional que pediu. |
+| `dt_request` | `date` |  | NOT NULL |  | Data do pedido. |
+| `ar_exams` | `text[]` |  | NOT NULL |  | Exames pedidos (1 a 20, cada um até 80 caracteres). |
+| `vc_region` | `varchar(120)` |  | NULL |  | Dentes ou região. |
+| `vc_notes` | `varchar(1000)` |  | NULL |  | Indicação clínica e observações. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação do pedido. Valores: 1 = Solicitado; 2 = Agendado; 3 = Realizado; 4 = Laudo recebido; 90 = Cancelado. |
+| `dt_scheduled` | `date` |  | NULL |  | Data agendada no centro. |
+| `dt_done` | `date` |  | NULL |  | Data em que o exame foi feito (preenchida ao passar para Realizado). |
+| `dt_report` | `date` |  | NULL |  | Data em que o laudo chegou (preenchida ao passar para Laudo recebido). |
+| `vc_report_url` | `varchar(500)` |  | NULL |  | Link do laudo/imagens no portal do centro (https://). |
+| `nr_user_created` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem criou o pedido. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.referral_reward
 
 **Recompensa por indicação**
@@ -3595,6 +3686,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.tooth_mark_save(p_json jsonb)` | authenticated | Marca (I, criar ou alterar), altera parcialmente (U) ou remove (D) uma marcação do odontograma na tela PATIENTS: dente FDI, condição, faces, situação. Grava event_log. |
 | `ad.patient_record_get(p_json jsonb)` | authenticated | Prontuário do paciente (ler na tela PATIENTS): alertas da anamnese mais recente, anamneses com respostas, evoluções, odontograma, itens de orçamento aprovado a fazer e realizados, e permissões. Evoluções com sessão e tempo; itens pendentes com sessões previstas e realizadas; record_settings com as opções do prontuário. |
 | `ad.dashboard_get(p_json jsonb)` | authenticated | Dashboard Analítico da filial num período (padrão: mês corrente; até 366 dias), para todo usuário com acesso à filial: consultas por situação, taxa de faltas e consultas de hoje (ler em AGENDA); pacientes novos, origem, aniversariantes de hoje e procedimentos executados (ler em PATIENTS); orçamentos criados, aprovados e conversão (ler em BUDGETS); recebido, pago, resultado, a receber vencido e a pagar na semana (ler em FINANCE); comparação com o período anterior e série dos últimos 6 meses. A parte sem permissão vem null. |
+| `ad.radiology_center_save(p_json jsonb)` | authenticated | Cadastra (I, criar em RADIOLOGY) ou altera (U) um centro radiológico da filial, com update parcial; telefone só dígitos, nome único na filial, it_integration 0 manual ou 1 integração automática (preparada). |
+| `ad.radiology_save(p_json jsonb)` | authenticated | Cria (I, criar em RADIOLOGY) ou altera (U) um pedido de exame de imagem do paciente, com update parcial: exames, centro, profissional, região, situação (solicitado, agendado, realizado, laudo recebido, cancelado), datas e link do laudo. Realizado/laudo preenchem as datas se vierem vazias; cancelado não muda. |
+| `ad.radiology_list(p_json jsonb)` | authenticated | Pedidos de exame de imagem da filial (ler em RADIOLOGY), os centros radiológicos e os totais por situação. Filtros: situação, período, centro, paciente e busca (paciente, exame, região). |
 | `ad.aligner_list(p_json jsonb)` | authenticated | Casos de alinhadores da filial (ler em ALIGNERS) com histórico, previsão de término e totais por situação. Filtros: situação, período de início, profissional, paciente e busca. |
 | `ad.aligner_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) um caso de alinhadores; pendência pede o texto; finalizar grava a data e o último alinhador; criação e mudanças de situação ou de alinhador atual vão para o histórico. Grava event_log sem dados pessoais. |
 | `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
@@ -4244,6 +4338,23 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `PROSTHETIC_PROFESSIONAL_INVALID` | `prosthetic_save` |  |
 | `PROSTHETIC_STAGE_INVALID` | `prosthetic_stage` |  |
 | `PROSTHETIC_VALUE_INVALID` | `prosthetic_save`, `prosthetic_stage` |  |
+| `RADIOLOGY_ACTION_INVALID` | `radiology_center_save`, `radiology_save` |  |
+| `RADIOLOGY_BRANCH_REQUIRED` | `radiology_center_save`, `radiology_save`, `radiology_list` |  |
+| `RADIOLOGY_CENTER_EMAIL_INVALID` | `radiology_center_save` |  |
+| `RADIOLOGY_CENTER_INVALID` | `radiology_save` |  |
+| `RADIOLOGY_CENTER_NAME_EXISTS` | `radiology_center_save` |  |
+| `RADIOLOGY_CENTER_NAME_REQUIRED` | `radiology_center_save` |  |
+| `RADIOLOGY_CENTER_NOT_FOUND` | `radiology_center_save` |  |
+| `RADIOLOGY_CENTER_PHONE_INVALID` | `radiology_center_save` |  |
+| `RADIOLOGY_CLOSED` | `radiology_save` |  |
+| `RADIOLOGY_EXAMS_REQUIRED` | `radiology_save` |  |
+| `RADIOLOGY_FORBIDDEN` | `radiology_center_save`, `radiology_save`, `radiology_list` |  |
+| `RADIOLOGY_NOT_FOUND` | `radiology_save` |  |
+| `RADIOLOGY_PATIENT_INVALID` | `radiology_save` |  |
+| `RADIOLOGY_PROFESSIONAL_INVALID` | `radiology_save` |  |
+| `RADIOLOGY_STATUS_INVALID` | `radiology_save` |  |
+| `RADIOLOGY_URL_INVALID` | `radiology_save` |  |
+| `RADIOLOGY_VALUE_INVALID` | `radiology_center_save`, `radiology_save`, `radiology_list` |  |
 | `RECORD_BRANCH_REQUIRED` | `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `patient_file_save`, `patient_file_list` |  |
 | `RECORD_FORBIDDEN` | `anamnesis_model_list`, `patient_record_get`, `chart_model_list`, `patient_chart_list`, `perio_exam_list`, `patient_summary_get`, `document_template_list`, `medication_list`, `patient_document_render`, `patient_document_list`, `patient_file_list` |  |
 | `REFERRAL_ACTION_INVALID` | `referral_reward_save` |  |
@@ -4330,7 +4441,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `radiology_center_save`, `radiology_save`, `radiology_list`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
