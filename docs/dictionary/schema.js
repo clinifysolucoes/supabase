@@ -9242,6 +9242,302 @@ window.DICTIONARY = {
     },
     {
       "schema": "od",
+      "name": "invoice_setting",
+      "title": "Configuração da NFS-e",
+      "description": "Dados fiscais da filial para emitir NFS-e (o prestador — CNPJ, inscrição municipal, regime, endereço — vem de ad.branch). A conta no emissor é do sistema (Edge Function invoice-issue).",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via invoice_settings_save (ALTERAR em SETTINGS).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "branch.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "branch.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "id_enabled",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "description": "Emissão de NFS-e ligada na filial."
+        },
+        {
+          "name": "vc_city_ibge",
+          "type": "varchar(7)",
+          "nullable": true,
+          "description": "Código IBGE da cidade do prestador (7 dígitos)."
+        },
+        {
+          "name": "vc_service_code",
+          "type": "varchar(10)",
+          "nullable": false,
+          "default": "'4.12'",
+          "description": "Item da lista de serviços da LC 116 (4.12 = odontologia)."
+        },
+        {
+          "name": "vc_city_service_code",
+          "type": "varchar(20)",
+          "nullable": true,
+          "description": "Código de tributação do município, quando a prefeitura exige."
+        },
+        {
+          "name": "vc_cnae",
+          "type": "varchar(10)",
+          "nullable": false,
+          "default": "'8630504'",
+          "description": "CNAE do serviço (8630-5/04 = atividade odontológica), só dígitos."
+        },
+        {
+          "name": "pc_iss",
+          "type": "numeric(5,2)",
+          "nullable": false,
+          "default": "2",
+          "description": "Alíquota do ISS em pontos (0 a 5)."
+        },
+        {
+          "name": "id_iss_withheld",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "description": "ISS retido pelo tomador."
+        },
+        {
+          "name": "vc_rps_series",
+          "type": "varchar(5)",
+          "nullable": false,
+          "default": "'1'",
+          "description": "Série do RPS."
+        },
+        {
+          "name": "vc_tpl_description",
+          "type": "varchar(500)",
+          "nullable": false,
+          "description": "Modelo da descrição do serviço ({{paciente}}, {{data}}, {{clinica}})."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
+      "name": "invoice",
+      "title": "Nota fiscal de serviço (NFS-e)",
+      "description": "NFS-e de atendimento: rascunho a partir do paciente ou de uma conta a receber, emitida e cancelada pela Edge Function invoice-issue no emissor. Uma nota ativa por conta a receber.",
+      "rls": "SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via invoice_save / invoice_issue_check (FINANCE) e invoice_result (service_role).",
+      "columns": [
+        {
+          "name": "nr_company",
+          "type": "bigint",
+          "pk": 1,
+          "fk": "patient.nr_company",
+          "nullable": false,
+          "description": "Número da empresa."
+        },
+        {
+          "name": "nr_branch",
+          "type": "bigint",
+          "pk": 2,
+          "fk": "patient.nr_branch",
+          "nullable": false,
+          "description": "Número da filial."
+        },
+        {
+          "name": "nr_invoice",
+          "type": "bigint",
+          "pk": 3,
+          "nullable": false,
+          "description": "Número interno da nota (sequencial por filial)."
+        },
+        {
+          "name": "nr_patient",
+          "type": "bigint",
+          "fk": "patient.nr_patient",
+          "nullable": false,
+          "description": "Paciente atendido."
+        },
+        {
+          "name": "nr_entry",
+          "type": "bigint",
+          "fk": "fin_entry.nr_entry",
+          "nullable": true,
+          "description": "Conta a receber que originou a nota (uma nota ativa por conta)."
+        },
+        {
+          "name": "dt_competence",
+          "type": "date",
+          "nullable": false,
+          "description": "Competência (data do serviço/pagamento)."
+        },
+        {
+          "name": "vl_service",
+          "type": "numeric(12,2)",
+          "nullable": false,
+          "description": "Valor do serviço."
+        },
+        {
+          "name": "pc_iss",
+          "type": "numeric(5,2)",
+          "nullable": false,
+          "description": "Alíquota do ISS usada (da configuração da filial)."
+        },
+        {
+          "name": "vl_iss",
+          "type": "numeric(12,2)",
+          "nullable": false,
+          "description": "Valor do ISS (valor × alíquota)."
+        },
+        {
+          "name": "vc_description",
+          "type": "varchar(1000)",
+          "nullable": false,
+          "description": "Discriminação do serviço."
+        },
+        {
+          "name": "vc_taker_name",
+          "type": "varchar(150)",
+          "nullable": false,
+          "description": "Tomador (paciente ou responsável do menor)."
+        },
+        {
+          "name": "vc_taker_document",
+          "type": "varchar(14)",
+          "nullable": false,
+          "description": "CPF ou CNPJ do tomador, só dígitos."
+        },
+        {
+          "name": "vc_taker_email",
+          "type": "varchar(120)",
+          "nullable": true,
+          "description": "E-mail do tomador (o emissor envia a nota)."
+        },
+        {
+          "name": "it_status",
+          "type": "smallint",
+          "nullable": false,
+          "default": "1",
+          "description": "Situação da nota.",
+          "values": {
+            "1": "Rascunho",
+            "2": "Processando",
+            "3": "Emitida",
+            "8": "Erro (pode reenviar)",
+            "90": "Cancelada"
+          }
+        },
+        {
+          "name": "vc_number",
+          "type": "varchar(30)",
+          "nullable": true,
+          "description": "Número da NFS-e na prefeitura."
+        },
+        {
+          "name": "vc_verification",
+          "type": "varchar(60)",
+          "nullable": true,
+          "description": "Código de verificação."
+        },
+        {
+          "name": "vc_pdf_url",
+          "type": "varchar(500)",
+          "nullable": true,
+          "description": "Link do PDF (DANFSE) no emissor."
+        },
+        {
+          "name": "vc_xml_url",
+          "type": "varchar(500)",
+          "nullable": true,
+          "description": "Link do XML no emissor."
+        },
+        {
+          "name": "vc_provider_ref",
+          "type": "varchar(80)",
+          "nullable": true,
+          "description": "Referência da nota no emissor."
+        },
+        {
+          "name": "vc_error",
+          "type": "varchar(500)",
+          "nullable": true,
+          "description": "Último erro do emissor (ex.: INVOICE_NOT_CONFIGURED)."
+        },
+        {
+          "name": "dh_issued",
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Quando foi emitida."
+        },
+        {
+          "name": "dh_cancelled",
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Quando foi cancelada (ou o rascunho descartado)."
+        },
+        {
+          "name": "vc_cancel_reason",
+          "type": "varchar(255)",
+          "nullable": true,
+          "description": "Motivo do cancelamento."
+        },
+        {
+          "name": "nr_user",
+          "type": "bigint",
+          "fk": "app_user.nr_user",
+          "nullable": false,
+          "description": "Quem criou a nota."
+        },
+        {
+          "name": "nr_operator",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "description": "Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit."
+        },
+        {
+          "name": "dh_created",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda)."
+        },
+        {
+          "name": "dh_updated",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()",
+          "description": "Data/hora da última atualização (trigger ad.trg_audit)."
+        }
+      ]
+    },
+    {
+      "schema": "od",
       "name": "referral_reward",
       "title": "Recompensa por indicação",
       "description": "Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90.",
@@ -10950,6 +11246,24 @@ window.DICTIONARY = {
       "label": "consultas de crédito"
     },
     {
+      "from": "branch",
+      "to": "invoice_setting",
+      "card": "||--o|",
+      "label": "NFS-e"
+    },
+    {
+      "from": "patient",
+      "to": "invoice",
+      "card": "||--o{",
+      "label": "notas fiscais"
+    },
+    {
+      "from": "fin_entry",
+      "to": "invoice",
+      "card": "|o--o|",
+      "label": "nota fiscal"
+    },
+    {
       "from": "app_user",
       "to": "access_authorization",
       "card": "||--o{",
@@ -12649,6 +12963,105 @@ window.DICTIONARY = {
       ]
     },
     {
+      "name": "fn_invoice_missing",
+      "signature": "od.fn_invoice_missing(p_company bigint, p_branch bigint)",
+      "kind": "helper",
+      "grant": "interna",
+      "description": "O que falta para a filial emitir NFS-e (lista vazia = pronta): cnpj, city_registration, tax_regime, address, city_ibge, settings."
+    },
+    {
+      "name": "invoice_settings_get",
+      "signature": "ad.invoice_settings_get(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Dados fiscais da NFS-e da filial (ler em SETTINGS), com os padrões e o que falta para emitir.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "INVOICE_BRANCH_REQUIRED",
+        "INVOICE_FORBIDDEN"
+      ]
+    },
+    {
+      "name": "invoice_settings_save",
+      "signature": "ad.invoice_settings_save(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Grava os dados fiscais da NFS-e (alterar em SETTINGS), com update parcial: ligada, IBGE, item LC 116, código municipal, CNAE, ISS, retenção, série do RPS e modelo da descrição.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "INVOICE_BRANCH_REQUIRED",
+        "INVOICE_FORBIDDEN",
+        "INVOICE_VALUE_INVALID",
+        "INVOICE_IBGE_INVALID",
+        "INVOICE_TEMPLATE_INVALID"
+      ]
+    },
+    {
+      "name": "invoice_save",
+      "signature": "ad.invoice_save(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Rascunho de NFS-e (I criar em FINANCE, U alterar) a partir do paciente e de uma conta a receber opcional, ou descarte (D) de nota não emitida. Tomador = paciente ou responsável do menor; ISS pela alíquota da filial.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "INVOICE_ACTION_INVALID",
+        "INVOICE_BRANCH_REQUIRED",
+        "INVOICE_FORBIDDEN",
+        "INVOICE_NOT_FOUND",
+        "INVOICE_LOCKED",
+        "INVOICE_VALUE_INVALID",
+        "INVOICE_PATIENT_INVALID",
+        "INVOICE_ENTRY_INVALID",
+        "INVOICE_ENTRY_EXISTS",
+        "INVOICE_TAKER_INVALID",
+        "INVOICE_EMAIL_INVALID"
+      ]
+    },
+    {
+      "name": "invoice_issue_check",
+      "signature": "ad.invoice_issue_check(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Valida e prepara a emissão (ISSUE, criar em FINANCE: passa a nota para processando) ou o cancelamento (CANCEL, alterar em FINANCE, com motivo) de uma NFS-e, como o usuário da Edge Function invoice-issue; devolve prestador, tomador e serviço.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "INVOICE_ACTION_INVALID",
+        "INVOICE_BRANCH_REQUIRED",
+        "INVOICE_FORBIDDEN",
+        "INVOICE_NOT_FOUND",
+        "INVOICE_DISABLED",
+        "INVOICE_SETUP_INCOMPLETE",
+        "INVOICE_STATUS_INVALID",
+        "INVOICE_CANCEL_REASON_REQUIRED"
+      ]
+    },
+    {
+      "name": "invoice_result",
+      "signature": "ad.invoice_result(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "service_role",
+      "description": "Grava a resposta do emissor (só service_role): emitida com número/PDF/XML, erro (pode reenviar) ou cancelada.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "INVOICE_ACTION_INVALID",
+        "INVOICE_NOT_FOUND",
+        "INVOICE_VALUE_INVALID"
+      ]
+    },
+    {
+      "name": "invoice_list",
+      "signature": "ad.invoice_list(p_json jsonb)",
+      "kind": "rpc",
+      "grant": "authenticated",
+      "description": "Notas fiscais da filial (ler em FINANCE) com totais por situação, valor emitido e se a NFS-e está ligada e pronta. Filtros: situação, competência, paciente e busca.",
+      "errors": [
+        "VERSION_MISMATCH",
+        "INVOICE_BRANCH_REQUIRED",
+        "INVOICE_FORBIDDEN",
+        "INVOICE_VALUE_INVALID"
+      ]
+    },
+    {
       "name": "aligner_list",
       "signature": "ad.aligner_list(p_json jsonb)",
       "kind": "rpc",
@@ -13666,5 +14079,5 @@ window.DICTIONARY = {
       ]
     }
   ],
-  "mermaid": "erDiagram\n  chart_model ||--o{ chart_field : \"campos\"\n  chart_model ||--o{ patient_chart : \"fichas preenchidas\"\n  patient ||--o{ patient_chart : \"fichas por especialidade\"\n  patient_chart ||--o{ patient_chart_value : \"valores\"\n  patient ||--o{ perio_exam : \"periogramas\"\n  perio_exam ||--o{ perio_tooth : \"dentes\"\n  branch ||--o{ notify_setting : \"alertas por e-mail/SMS\"\n  patient ||--o{ notify_message : \"alertas por e-mail/SMS\"\n  appointment ||--o{ notify_message : \"lembretes por e-mail/SMS\"\n  patient ||--o{ patient : \"indicou\"\n  patient ||--o{ referral_reward : \"recompensa da indicação\"\n  material ||--o{ stock_item : \"controle de estoque\"\n  stock_item ||--o{ stock_movement : \"movimentos\"\n  clinical_evolution ||--o{ stock_movement : \"baixas de material\"\n  patient ||--o{ prosthetic_work : \"trabalhos protéticos\"\n  fin_supplier ||--o{ prosthetic_work : \"trabalhos do laboratório\"\n  prosthetic_work ||--o{ prosthetic_work_step : \"etapas\"\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  branch ||--o| pricing_param : \"parâmetros de preço\"\n  branch ||--o{ clinic_expense : \"despesas\"\n  branch ||--o{ pricing_fee : \"taxas adicionais\"\n  branch ||--o{ material : \"materiais\"\n  branch ||--o{ specialty : \"especialidades\"\n  specialty |o--o{ procedure : \"agrupa procedimentos\"\n  branch ||--o{ procedure : \"procedimentos\"\n  procedure ||--o{ procedure_material : \"usa materiais\"\n  material ||--o{ procedure_material : \"usado em\"\n  branch ||--o{ patient : \"pacientes\"\n  branch ||--o{ professional : \"profissionais\"\n  professional ||--o{ professional_schedule : \"horário de atendimento\"\n  app_user |o--o{ professional : \"é o profissional\"\n  branch ||--o{ fin_account : \"contas\"\n  branch ||--o{ fin_category : \"plano de contas\"\n  branch ||--o{ fin_supplier : \"fornecedores\"\n  fin_category ||--o{ fin_entry : \"classifica\"\n  fin_account |o--o{ fin_entry : \"movimenta\"\n  fin_supplier |o--o{ fin_entry : \"cobra\"\n  fin_account ||--o{ fin_cash_session : \"caixa do dia\"\n  fin_cash_session |o--o{ fin_entry : \"recebe no caixa\"\n  fin_account ||--o{ fin_card_rate : \"recebe da taxa\"\n  fin_entry ||--o{ fin_receivable : \"gera recebíveis\"\n  fin_card_rate |o--o{ fin_receivable : \"aplica\"\n  fin_transfer |o--o| fin_receivable : \"confirma\"\n  branch ||--o{ health_plan : \"convênios\"\n  health_plan ||--o{ health_plan_price : \"tabela de preço\"\n  procedure ||--o{ health_plan_price : \"preço no convênio\"\n  health_plan ||--o{ health_guide : \"guias\"\n  patient ||--o{ health_guide : \"atendido por convênio\"\n  health_guide ||--|{ health_guide_item : \"procedimentos\"\n  fin_entry |o--o{ health_guide : \"faturamento\"\n  fin_account ||--o{ fin_bank_line : \"extrato do banco\"\n  fin_entry |o--o| fin_bank_line : \"concilia\"\n  fin_category ||--o{ fin_recurrence : \"classifica\"\n  fin_recurrence |o--o{ fin_entry : \"gera\"\n  fin_entry ||--o{ fin_attachment : \"anexa\"\n  patient ||--o{ budget : \"orçamentos\"\n  budget ||--|{ budget_item : \"itens\"\n  anamnesis_model ||--|{ anamnesis_question : \"perguntas\"\n  patient ||--o{ patient_anamnesis : \"anamneses\"\n  anamnesis_model ||--o{ patient_anamnesis : \"preenchida\"\n  patient_anamnesis ||--|{ patient_anamnesis_answer : \"respostas\"\n  patient ||--o{ clinical_evolution : \"evoluções\"\n  budget_item ||--o| clinical_evolution : \"realizado\"\n  professional ||--o{ clinical_evolution : \"atendeu\"\n  patient ||--o{ tooth_mark : \"odontograma\"\n  patient ||--o{ patient_document : \"documentos\"\n  document_template ||--o{ patient_document : \"emitido\"\n  patient_document ||--o{ patient_document_item : \"medicamentos\"\n  medication ||--o{ patient_document_item : \"receitado\"\n  patient ||--o{ patient_file : \"fotos e exames\"\n  branch ||--o| online_booking : \"agendamento online\"\n  patient_document ||--o{ signature : \"assinaturas\"\n  budget ||--o{ signature : \"assinaturas\"\n  branch ||--o| whatsapp_setting : \"WhatsApp\"\n  whatsapp_setting ||--o| whatsapp_secret : \"chave cifrada\"\n  patient ||--o{ whatsapp_message : \"mensagens\"\n  appointment ||--o{ whatsapp_message : \"lembretes\"\n  procedure ||--o{ budget_item : \"orçado\"\n  budget ||--o{ fin_entry : \"gera contas\"\n  fin_entry ||--o{ fin_receipt : \"recibos\"\n  fin_account ||--o{ fin_transfer : \"transfere\"\n  fin_cash_session |o--o{ fin_transfer : \"sangria / suprimento\"\n  appointment |o--o{ fin_entry : \"fecha o atendimento\"\n  professional |o--o{ fin_entry : \"comissão\"\n  patient |o--o{ fin_entry : \"paga\"\n  branch ||--o{ appointment : \"agenda\"\n  patient |o--o{ appointment : \"consultas\"\n  professional |o--o{ appointment : \"atende\"\n  procedure |o--o{ appointment : \"previsto em\"\n  patient ||--o{ patient_note : \"notas\"\n  patient ||--o{ aligner_case : \"alinhadores\"\n  aligner_case ||--o{ aligner_case_event : \"histórico\"\n  branch ||--o{ radiology_center : \"centros radiológicos\"\n  patient ||--o{ radiology_request : \"exames de imagem\"\n  radiology_center |o--o{ radiology_request : \"pedidos\"\n  patient ||--o{ credit_check : \"consultas de crédito\"\n  app_user ||--o{ access_authorization : \"pedido\"\n  price_table ||--o{ price_table_item : \"preços\"\n  procedure ||--o{ price_table_item : \"preço na tabela\"\n  price_table ||--o{ budget : \"tabela\"\n  appointment_category ||--o{ appointment : \"categoria\"\n  chair ||--o{ appointment : \"cadeira\"\n  appointment ||--o{ appointment_tag : \"marcadores\"\n  appointment_marker ||--o{ appointment_tag : \"uso\"\n  app_user ||--o{ patient_note : \"autor\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n    smallint it_mfa_policy\n    boolean id_auth_print\n    boolean id_auth_export\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    varchar vc_phone_extra\n    varchar vc_technical_name\n    varchar vc_technical_cro\n    varchar vc_technical_cro_state\n    varchar vc_forum_city\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  access_authorization {\n    bigint nr_authorization PK\n    uuid uu_request\n    bigint nr_company FK\n    bigint nr_branch FK\n    smallint it_kind\n    varchar vc_target\n    bigint nr_user FK\n    bigint nr_user_admin FK\n    timestamptz dh_authorized\n    timestamptz dh_used\n    timestamptz dh_expires\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }\n  pricing_param {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_rooms\n    numeric qt_hours_week\n    numeric qt_weeks_month\n    numeric pc_occupancy\n    numeric vl_professional_hour\n    numeric pc_card\n    numeric pc_commission\n    smallint it_tax_regime\n    numeric pc_tax_pf\n    numeric pc_tax_pj\n    numeric pc_profit\n    numeric vl_structure_hour_manual\n  }\n  clinic_expense {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_expense PK\n    varchar vc_name\n    smallint it_type\n    numeric vl_amount\n    smallint it_status\n  }\n  pricing_fee {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_fee PK\n    varchar vc_name\n    varchar vc_hint\n    numeric pc_rate\n    boolean id_active\n  }\n  material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK\n    varchar vc_name UK\n    varchar vc_package\n    numeric vl_package_price\n    numeric qt_yield\n    varchar vc_unit\n    numeric pc_waste\n    smallint it_price_source\n    varchar vc_price_source\n    timestamptz dh_price_updated\n    smallint it_status\n  }\n  specialty {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_specialty PK\n    varchar vc_name UK\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_template {\n    bigint nr_template PK\n    varchar vc_specialty UK\n    varchar vc_code\n    varchar vc_name UK\n    numeric qt_minutes\n    numeric vl_material_other\n    numeric vl_lab_cost\n    numeric vl_reference_price\n    integer nr_order\n    smallint it_status\n  }\n  procedure {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK\n    varchar vc_code UK\n    varchar vc_name UK\n    bigint nr_specialty FK\n    numeric qt_minutes\n    numeric vl_lab_cost\n    numeric vl_material_other\n    numeric vl_current_price\n    numeric pc_commission\n    numeric pc_profit\n    smallint it_status\n    smallint qt_sessions\n    smallint qt_return_days\n  }\n  procedure_material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK, FK\n    bigint nr_material PK, FK\n    numeric qt_used\n  }\n  professional {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK\n    varchar vc_name UK\n    varchar vc_council\n    varchar vc_color\n    smallint qt_slot_minutes\n    boolean id_online\n    bigint nr_user FK, UK\n    smallint it_status\n  }\n  professional_schedule {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK, FK\n    bigint nr_schedule PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  appointment {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_appointment PK\n    smallint it_type\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_procedure FK\n    varchar vc_title\n    text vc_notes\n    timestamptz dh_start\n    timestamptz dh_end\n    boolean id_all_day\n    boolean id_fit_in\n    smallint it_origin\n    smallint it_status\n    bigint nr_user_created FK\n    bigint nr_category FK\n    bigint nr_chair FK\n  }\n  fin_account {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_account PK\n    varchar vc_name UK\n    smallint it_type\n    numeric vl_opening\n    varchar vc_bank_code\n    varchar vc_bank_name\n    varchar vc_agency\n    varchar vc_account_number\n    smallint it_status\n  }\n  fin_category {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_category PK\n    varchar vc_name UK\n    smallint it_kind\n    smallint it_cost_type\n    smallint it_dre_group\n    smallint it_status\n  }\n  fin_supplier {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_supplier PK\n    varchar vc_name UK\n    varchar vc_document\n    varchar vc_phone\n    varchar vc_email\n    varchar vc_notes\n    smallint it_status\n  }\n  fin_entry {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_entry PK\n    smallint it_kind\n    bigint nr_category FK\n    bigint nr_account FK\n    bigint nr_supplier FK\n    bigint nr_patient FK\n    varchar vc_description\n    numeric vl_amount\n    date dt_due\n    date dt_competence\n    smallint it_payment_method\n    date dt_paid\n    numeric vl_paid\n    smallint it_status\n    uuid uu_group\n    smallint nr_installment\n    smallint qt_installments\n    boolean id_recurring\n    bigint nr_recurrence FK\n    timestamptz dh_health_exported\n    varchar vc_notes\n    bigint nr_user_created FK\n    bigint nr_appointment FK\n    bigint nr_budget FK\n    bigint nr_professional FK\n    bigint nr_cash_session FK\n  }\n  budget {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_budget PK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    varchar vc_title\n    date dt_budget\n    date dt_valid\n    numeric vl_gross\n    numeric vl_discount\n    numeric vl_total\n    smallint qt_installments\n    smallint it_payment_method\n    varchar vc_notes\n    smallint it_status\n    boolean id_discount_approved\n    boolean id_below_min\n    bigint nr_user_discount FK\n    timestamptz dh_discount\n    timestamptz dh_accepted\n    bigint nr_user_created FK\n    bigint nr_price_table FK\n  }\n  budget_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_budget PK, FK\n    smallint nr_item PK\n    bigint nr_procedure FK\n    varchar vc_description\n    varchar vc_tooth\n    numeric qt_quantity\n    numeric vl_unit\n    numeric vl_total\n    date dt_done\n    bigint nr_evolution\n    smallint qt_sessions\n    smallint qt_sessions_done\n  }\n  anamnesis_model {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK\n    varchar vc_name\n    bigint nr_specialty FK\n    smallint it_status\n  }\n  anamnesis_question {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK, FK\n    smallint nr_question PK\n    varchar vc_question\n    smallint it_type\n    boolean id_alert\n  }\n  patient_anamnesis {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_anamnesis PK\n    bigint nr_model FK\n    varchar vc_model\n    date dt_filled\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  patient_anamnesis_answer {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_anamnesis PK, FK\n    smallint nr_question PK\n    varchar vc_question\n    smallint it_type\n    boolean id_yes\n    varchar vc_text\n    boolean id_alert\n  }\n  clinical_evolution {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_evolution PK\n    timestamptz dh_evolution\n    bigint nr_professional FK\n    varchar vc_text\n    varchar vc_tooth\n    bigint nr_procedure FK\n    bigint nr_budget FK\n    smallint nr_item FK\n    smallint it_status\n    bigint nr_user FK\n    smallint nr_session\n    smallint qt_minutes\n  }\n  tooth_mark {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_mark PK\n    varchar vc_tooth\n    smallint it_condition\n    varchar vc_faces\n    smallint it_situation\n    varchar vc_notes\n    date dt_mark\n    smallint it_status\n    bigint nr_user FK\n  }\n  document_template {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_template PK\n    smallint it_kind\n    varchar vc_name\n    varchar vc_body\n    smallint it_status\n  }\n  medication {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_medication PK\n    varchar vc_name\n    varchar vc_presentation\n    varchar vc_dosage\n    varchar vc_quantity\n    smallint it_use\n    boolean id_controlled\n    smallint it_status\n  }\n  patient_document {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_document PK\n    smallint it_kind\n    bigint nr_template FK\n    varchar vc_title\n    varchar vc_body\n    date dt_document\n    bigint nr_professional FK\n    smallint it_status\n    bigint nr_user FK\n  }\n  patient_document_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_document PK, FK\n    smallint nr_item PK\n    bigint nr_medication FK\n    varchar vc_name\n    varchar vc_presentation\n    varchar vc_dosage\n    varchar vc_quantity\n    smallint it_use\n    boolean id_controlled\n  }\n  patient_file {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_file PK\n    smallint it_type\n    smallint it_category\n    varchar vc_path\n    varchar vc_name\n    varchar vc_mime\n    bigint qt_bytes\n    date dt_file\n    varchar vc_tooth\n    varchar vc_description\n    smallint it_status\n    bigint nr_user FK\n  }\n  online_booking {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_enabled\n    varchar vc_slug\n    smallint qt_days_ahead\n    smallint qt_min_hours\n    varchar vc_message\n  }\n  signature {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_signature PK\n    smallint it_target\n    bigint nr_patient FK\n    bigint nr_document FK\n    bigint nr_budget FK\n    smallint it_signer\n    varchar vc_signer_name\n    varchar vc_signer_cpf\n    text tx_image\n    varchar vc_hash\n    uuid uu_code\n    timestamptz dh_signed\n    varchar vc_ip\n    varchar vc_user_agent\n    bigint nr_user FK\n  }\n  whatsapp_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_enabled\n    varchar vc_phone_number_id\n    varchar vc_waba_id\n    varchar vc_display_phone\n    varchar vc_language\n    boolean id_reminder\n    smallint qt_reminder_hours\n    varchar vc_tpl_reminder\n    boolean id_booked\n    varchar vc_tpl_booked\n    boolean id_birthday\n    varchar vc_tpl_birthday\n    boolean id_return\n    varchar vc_tpl_return\n    smallint qt_send_hour\n    smallint qt_resend\n    smallint qt_resend_hours\n  }\n  whatsapp_secret {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    text vc_token_enc\n    timestamptz dh_saved\n  }\n  whatsapp_message {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_message PK\n    smallint it_kind\n    bigint nr_patient FK\n    bigint nr_appointment FK\n    date dt_ref\n    varchar vc_to\n    varchar vc_template\n    jsonb js_params\n    smallint it_status\n    varchar vc_wa_id\n    varchar vc_error\n    timestamptz dh_sent\n    timestamptz dh_status\n    varchar vc_reply\n    timestamptz dh_reply\n    smallint qt_resend\n  }\n  fin_cash_session {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_session PK\n    bigint nr_account FK\n    bigint nr_user FK\n    timestamptz dh_open\n    numeric vl_open\n    timestamptz dh_close\n    numeric vl_counted\n    numeric vl_expected\n    smallint it_status\n    varchar vc_notes\n    bigint nr_user_closed FK\n  }\n  fin_transfer {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_transfer PK\n    smallint it_type\n    bigint nr_account_from FK\n    bigint nr_account_to FK\n    numeric vl_amount\n    date dt_transfer\n    varchar vc_description\n    bigint nr_cash_session FK\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_card_rate {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_rate PK\n    varchar vc_name\n    smallint it_payment_method\n    smallint qt_installments_min\n    smallint qt_installments_max\n    numeric pc_fee\n    numeric vl_fee_fixed\n    smallint qt_days\n    bigint nr_account FK\n    smallint it_status\n  }\n  fin_receivable {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_receivable PK\n    bigint nr_entry FK\n    bigint nr_rate FK\n    smallint it_payment_method\n    smallint nr_installment\n    smallint qt_installments\n    numeric vl_gross\n    numeric vl_fee\n    numeric vl_net\n    date dt_expected\n    bigint nr_account FK\n    smallint it_status\n    date dt_received\n    numeric vl_received\n    bigint nr_transfer FK\n    bigint nr_fee_entry FK\n    varchar vc_reference\n    varchar vc_card_brand\n    varchar vc_card_last4\n    varchar vc_authorization\n    varchar vc_holder_name\n    varchar vc_holder_document\n    varchar vc_bank_name\n    varchar vc_check_number\n    bigint nr_user_created FK\n  }\n  health_plan {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_plan PK\n    varchar vc_name\n    varchar vc_ans\n    varchar vc_document\n    smallint qt_payment_days\n    bigint nr_account FK\n    varchar vc_notes\n    smallint it_status\n  }\n  health_plan_price {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_plan PK, FK\n    bigint nr_procedure PK, FK\n    varchar vc_code\n    numeric vl_price\n  }\n  health_guide {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_guide PK\n    bigint nr_plan FK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_appointment FK\n    varchar vc_guide_number\n    varchar vc_card_number\n    date dt_service\n    numeric vl_total\n    smallint it_status\n    bigint nr_entry FK\n    date dt_invoiced\n    date dt_paid\n    numeric vl_paid\n    numeric vl_denied\n    varchar vc_notes\n    bigint nr_user_created FK\n  }\n  health_guide_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_guide PK, FK\n    smallint nr_item PK\n    bigint nr_procedure FK\n    varchar vc_tooth\n    smallint qt_quantity\n    numeric vl_unit\n    numeric vl_total\n    numeric vl_denied\n  }\n  fin_bank_line {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_line PK\n    bigint nr_account FK\n    varchar vc_fitid\n    date dt_posted\n    numeric vl_amount\n    varchar vc_memo\n    smallint it_status\n    bigint nr_entry FK\n    bigint nr_transfer FK\n    bigint nr_user_created FK\n  }\n  fin_recurrence {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_recurrence PK\n    smallint it_kind\n    bigint nr_category FK\n    bigint nr_account FK\n    bigint nr_supplier FK\n    bigint nr_patient FK\n    varchar vc_description\n    numeric vl_amount\n    smallint it_day\n    smallint it_payment_method\n    date dt_start\n    date dt_end\n    date dt_generated\n    smallint it_status\n    varchar vc_notes\n    bigint nr_user_created FK\n  }\n  fin_attachment {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_attachment PK\n    bigint nr_entry FK\n    smallint it_type\n    varchar vc_path\n    varchar vc_name\n    varchar vc_mime\n    bigint qt_bytes\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_receipt {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_receipt PK\n    varchar vc_number\n    bigint nr_entry FK\n    numeric vl_amount\n    date dt_paid\n    smallint it_payment_method\n    varchar vc_payer_name\n    varchar vc_payer_document\n    varchar vc_description\n    smallint it_status\n    varchar vc_cancel_reason\n    bigint nr_user_created FK\n  }\n  branch_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_slot_minutes\n    smallint qt_max_parallel\n    boolean id_allow_outside_hours\n    boolean id_auto_record_number\n    bigint nr_next_record\n    text[] vc_patient_required\n    smallint it_debt_rule\n    smallint qt_debt_days\n    boolean id_cash_enabled\n    smallint[] it_payment_methods\n    numeric pc_late_fee\n    numeric pc_late_interest\n    varchar vc_receipt_prefix\n    bigint nr_next_receipt\n    numeric pc_budget_max_discount\n    smallint qt_budget_valid_days\n    boolean id_budget_request_approval\n    boolean id_budget_admin_below_min\n    boolean id_budget_reduction_as_discount\n    smallint it_open_rule\n    smallint it_late_edit\n    numeric pc_dre_revenue_tax\n    numeric pc_dre_income_tax\n    numeric pc_dre_csll\n    boolean id_color_by_category\n    smallint it_agenda_mode\n    smallint it_contract_rule\n    smallint it_checkin_debt_rule\n    smallint it_checkin_open_rule\n    smallint it_checkin_contract_rule\n    smallint it_treat_debt_rule\n    smallint it_treat_open_rule\n    smallint it_treat_contract_rule\n    boolean id_record_sessions\n    boolean id_record_return\n    boolean id_record_time\n    boolean id_credit_check\n  }\n  branch_hour {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_hour PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  patient {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK\n    varchar vc_name\n    varchar vc_nickname\n    varchar vc_cpf UK\n    varchar vc_rg\n    date dt_birth\n    smallint it_gender\n    smallint it_marital_status\n    smallint it_education\n    smallint it_source\n    varchar vc_referral\n    bigint nr_referrer FK\n    text vc_notes\n    varchar vc_phone\n    varchar vc_mobile\n    varchar vc_phone_other\n    varchar vc_contact_name\n    varchar vc_email\n    boolean id_no_email\n    varchar vc_zip\n    varchar vc_state\n    varchar vc_city\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_district\n    varchar vc_address_complement\n    varchar vc_record_number\n    varchar vc_profession\n    varchar vc_workplace\n    varchar vc_work_time\n    varchar vc_plan_name\n    varchar vc_plan_number\n    varchar vc_father_name\n    varchar vc_father_cpf\n    varchar vc_father_rg\n    varchar vc_father_profession\n    varchar vc_mother_name\n    varchar vc_mother_cpf\n    varchar vc_mother_rg\n    varchar vc_mother_profession\n    varchar vc_guardian_name\n    varchar vc_guardian_cpf\n    varchar vc_guardian_rg\n    varchar vc_guardian_phone\n    date dt_return_alert\n    varchar vc_return_alert\n    smallint it_status\n  }\n  patient_note {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_note PK\n    text vc_note\n    bigint nr_user FK\n    timestamptz dh_note\n    smallint it_status\n  }\n  prosthetic_work {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_work PK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_supplier FK\n    varchar vc_lab\n    bigint nr_budget FK\n    smallint nr_item FK\n    varchar vc_description\n    varchar vc_tooth\n    varchar vc_shade\n    varchar vc_notes\n    smallint it_stage\n    date dt_sent\n    date dt_expected\n    date dt_received\n    date dt_installed\n    numeric vl_cost\n    bigint nr_entry FK\n    bigint nr_user_created FK\n  }\n  prosthetic_work_step {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_work PK, FK\n    smallint nr_step PK\n    smallint it_stage\n    date dt_step\n    varchar vc_notes\n    bigint nr_user FK\n  }\n  stock_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK, FK\n    numeric qt_stock\n    numeric qt_min\n    smallint it_status\n  }\n  stock_movement {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_movement PK\n    bigint nr_material FK\n    smallint it_type\n    date dt_movement\n    numeric qt_quantity\n    numeric qt_balance\n    numeric vl_unit_cost\n    numeric vl_total\n    bigint nr_supplier FK\n    varchar vc_document\n    bigint nr_entry FK\n    bigint nr_patient FK\n    bigint nr_evolution FK\n    bigint nr_movement_ref\n    varchar vc_notes\n    bigint nr_user FK\n  }\n  appointment_category {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_category PK\n    varchar vc_name\n    varchar vc_color\n    smallint it_status\n  }\n  appointment_marker {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_marker PK\n    varchar vc_name\n    varchar vc_color\n    smallint it_status\n  }\n  chair {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_chair PK\n    varchar vc_name\n    varchar vc_color\n    smallint it_status\n  }\n  appointment_tag {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_appointment PK, FK\n    bigint nr_marker PK, FK\n  }\n  price_table {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_price_table PK\n    varchar vc_name\n    boolean id_default\n    varchar vc_notes\n    smallint it_status\n  }\n  price_table_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_price_table PK, FK\n    bigint nr_procedure PK, FK\n    numeric vl_price\n  }\n  aligner_case {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_case PK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    varchar vc_system\n    varchar vc_case_number\n    bigint nr_budget FK\n    smallint qt_aligners\n    smallint qt_current\n    smallint qt_days_change\n    date dt_start\n    date dt_finished\n    varchar vc_pending\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  aligner_case_event {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_case PK, FK\n    smallint nr_event PK\n    timestamptz dh_event\n    smallint it_status\n    smallint qt_current\n    varchar vc_text\n    bigint nr_user FK\n  }\n  radiology_center {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_center PK\n    varchar vc_name\n    varchar vc_phone\n    varchar vc_email\n    varchar vc_address\n    varchar vc_notes\n    smallint it_integration\n    varchar vc_external_code\n    smallint it_status\n  }\n  radiology_request {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_request PK\n    bigint nr_patient FK\n    bigint nr_center FK\n    bigint nr_professional FK\n    date dt_request\n    text[] ar_exams\n    varchar vc_region\n    varchar vc_notes\n    smallint it_status\n    date dt_scheduled\n    date dt_done\n    date dt_report\n    varchar vc_report_url\n    bigint nr_user_created FK\n  }\n  credit_check {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_check PK\n    bigint nr_patient FK\n    varchar vc_document\n    smallint it_provider\n    boolean id_consent\n    smallint it_status\n    smallint it_result\n    smallint qt_score\n    integer qt_debts\n    numeric vl_debts\n    jsonb js_detail\n    varchar vc_protocol\n    varchar vc_error\n    timestamptz dh_done\n    bigint nr_user FK\n  }\n  referral_reward {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    varchar vc_referrer\n    date dt_reward\n    varchar vc_reward\n    numeric vl_reward\n    smallint it_status\n    bigint nr_user FK\n  }\n  notify_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_email\n    boolean id_sms\n    varchar vc_email_from_name\n    varchar vc_email_reply_to\n    boolean id_reminder\n    smallint qt_reminder_hours\n    boolean id_booked\n    boolean id_return\n    smallint qt_send_hour\n    varchar vc_tpl_reminder\n    varchar vc_tpl_booked\n    varchar vc_tpl_return\n    smallint qt_resend\n    smallint qt_resend_hours\n    boolean id_review\n    varchar vc_review_url\n    smallint qt_review_hours\n    varchar vc_tpl_review\n  }\n  notify_message {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_message PK\n    smallint it_channel\n    smallint it_kind\n    bigint nr_patient FK\n    bigint nr_appointment FK\n    date dt_ref\n    varchar vc_to\n    varchar vc_subject\n    text tx_body\n    uuid uu_token\n    smallint it_status\n    varchar vc_provider_id\n    varchar vc_error\n    timestamptz dh_sent\n    timestamptz dh_confirmed\n    smallint qt_resend\n  }\n  chart_model {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK\n    varchar vc_name\n    bigint nr_specialty FK\n    boolean id_per_tooth\n    smallint it_status\n  }\n  chart_field {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK, FK\n    smallint nr_field PK\n    varchar vc_label\n    smallint it_type\n    varchar vc_options\n    varchar vc_unit\n    boolean id_required\n  }\n  patient_chart {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_chart PK\n    bigint nr_model FK\n    varchar vc_model\n    varchar vc_tooth\n    date dt_chart\n    bigint nr_professional FK\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  patient_chart_value {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_chart PK, FK\n    smallint nr_field PK\n    varchar vc_label\n    smallint it_type\n    varchar vc_unit\n    varchar vc_value\n  }\n  perio_exam {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_exam PK\n    date dt_exam\n    bigint nr_professional FK\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  perio_tooth {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_exam PK, FK\n    varchar vc_tooth PK\n    boolean id_missing\n    smallint it_mobility\n    smallint it_furcation\n    smallint[] qt_probing\n    smallint[] qt_recession\n    boolean[] id_bleeding\n    boolean[] id_plaque\n  }"
+  "mermaid": "erDiagram\n  chart_model ||--o{ chart_field : \"campos\"\n  chart_model ||--o{ patient_chart : \"fichas preenchidas\"\n  patient ||--o{ patient_chart : \"fichas por especialidade\"\n  patient_chart ||--o{ patient_chart_value : \"valores\"\n  patient ||--o{ perio_exam : \"periogramas\"\n  perio_exam ||--o{ perio_tooth : \"dentes\"\n  branch ||--o{ notify_setting : \"alertas por e-mail/SMS\"\n  patient ||--o{ notify_message : \"alertas por e-mail/SMS\"\n  appointment ||--o{ notify_message : \"lembretes por e-mail/SMS\"\n  patient ||--o{ patient : \"indicou\"\n  patient ||--o{ referral_reward : \"recompensa da indicação\"\n  material ||--o{ stock_item : \"controle de estoque\"\n  stock_item ||--o{ stock_movement : \"movimentos\"\n  clinical_evolution ||--o{ stock_movement : \"baixas de material\"\n  patient ||--o{ prosthetic_work : \"trabalhos protéticos\"\n  fin_supplier ||--o{ prosthetic_work : \"trabalhos do laboratório\"\n  prosthetic_work ||--o{ prosthetic_work_step : \"etapas\"\n  screen ||--o{ access_profile_screen : \"liberada para perfis\"\n  access_profile ||--o{ access_profile_screen : \"telas do perfil\"\n  app_user ||--o{ event_log : \"atividades\"\n  screen ||--o{ event_log : \"eventos na tela\"\n  company ||--o{ branch : \"possui filiais\"\n  company ||--o{ access_profile : \"define perfis\"\n  company ||--o{ company_user : \"tem usuários\"\n  app_user ||--o{ company_user : \"participa de empresas\"\n  auth_users ||--|| app_user : \"uu_auth\"\n  branch ||--o{ branch_user_profile : \"acesso por filial\"\n  company_user ||--o{ branch_user_profile : \"perfis nas filiais\"\n  access_profile ||--o{ branch_user_profile : \"perfil atribuído\"\n  app_user ||--o{ access_log : \"acessos\"\n  branch ||--o| pricing_param : \"parâmetros de preço\"\n  branch ||--o{ clinic_expense : \"despesas\"\n  branch ||--o{ pricing_fee : \"taxas adicionais\"\n  branch ||--o{ material : \"materiais\"\n  branch ||--o{ specialty : \"especialidades\"\n  specialty |o--o{ procedure : \"agrupa procedimentos\"\n  branch ||--o{ procedure : \"procedimentos\"\n  procedure ||--o{ procedure_material : \"usa materiais\"\n  material ||--o{ procedure_material : \"usado em\"\n  branch ||--o{ patient : \"pacientes\"\n  branch ||--o{ professional : \"profissionais\"\n  professional ||--o{ professional_schedule : \"horário de atendimento\"\n  app_user |o--o{ professional : \"é o profissional\"\n  branch ||--o{ fin_account : \"contas\"\n  branch ||--o{ fin_category : \"plano de contas\"\n  branch ||--o{ fin_supplier : \"fornecedores\"\n  fin_category ||--o{ fin_entry : \"classifica\"\n  fin_account |o--o{ fin_entry : \"movimenta\"\n  fin_supplier |o--o{ fin_entry : \"cobra\"\n  fin_account ||--o{ fin_cash_session : \"caixa do dia\"\n  fin_cash_session |o--o{ fin_entry : \"recebe no caixa\"\n  fin_account ||--o{ fin_card_rate : \"recebe da taxa\"\n  fin_entry ||--o{ fin_receivable : \"gera recebíveis\"\n  fin_card_rate |o--o{ fin_receivable : \"aplica\"\n  fin_transfer |o--o| fin_receivable : \"confirma\"\n  branch ||--o{ health_plan : \"convênios\"\n  health_plan ||--o{ health_plan_price : \"tabela de preço\"\n  procedure ||--o{ health_plan_price : \"preço no convênio\"\n  health_plan ||--o{ health_guide : \"guias\"\n  patient ||--o{ health_guide : \"atendido por convênio\"\n  health_guide ||--|{ health_guide_item : \"procedimentos\"\n  fin_entry |o--o{ health_guide : \"faturamento\"\n  fin_account ||--o{ fin_bank_line : \"extrato do banco\"\n  fin_entry |o--o| fin_bank_line : \"concilia\"\n  fin_category ||--o{ fin_recurrence : \"classifica\"\n  fin_recurrence |o--o{ fin_entry : \"gera\"\n  fin_entry ||--o{ fin_attachment : \"anexa\"\n  patient ||--o{ budget : \"orçamentos\"\n  budget ||--|{ budget_item : \"itens\"\n  anamnesis_model ||--|{ anamnesis_question : \"perguntas\"\n  patient ||--o{ patient_anamnesis : \"anamneses\"\n  anamnesis_model ||--o{ patient_anamnesis : \"preenchida\"\n  patient_anamnesis ||--|{ patient_anamnesis_answer : \"respostas\"\n  patient ||--o{ clinical_evolution : \"evoluções\"\n  budget_item ||--o| clinical_evolution : \"realizado\"\n  professional ||--o{ clinical_evolution : \"atendeu\"\n  patient ||--o{ tooth_mark : \"odontograma\"\n  patient ||--o{ patient_document : \"documentos\"\n  document_template ||--o{ patient_document : \"emitido\"\n  patient_document ||--o{ patient_document_item : \"medicamentos\"\n  medication ||--o{ patient_document_item : \"receitado\"\n  patient ||--o{ patient_file : \"fotos e exames\"\n  branch ||--o| online_booking : \"agendamento online\"\n  patient_document ||--o{ signature : \"assinaturas\"\n  budget ||--o{ signature : \"assinaturas\"\n  branch ||--o| whatsapp_setting : \"WhatsApp\"\n  whatsapp_setting ||--o| whatsapp_secret : \"chave cifrada\"\n  patient ||--o{ whatsapp_message : \"mensagens\"\n  appointment ||--o{ whatsapp_message : \"lembretes\"\n  procedure ||--o{ budget_item : \"orçado\"\n  budget ||--o{ fin_entry : \"gera contas\"\n  fin_entry ||--o{ fin_receipt : \"recibos\"\n  fin_account ||--o{ fin_transfer : \"transfere\"\n  fin_cash_session |o--o{ fin_transfer : \"sangria / suprimento\"\n  appointment |o--o{ fin_entry : \"fecha o atendimento\"\n  professional |o--o{ fin_entry : \"comissão\"\n  patient |o--o{ fin_entry : \"paga\"\n  branch ||--o{ appointment : \"agenda\"\n  patient |o--o{ appointment : \"consultas\"\n  professional |o--o{ appointment : \"atende\"\n  procedure |o--o{ appointment : \"previsto em\"\n  patient ||--o{ patient_note : \"notas\"\n  patient ||--o{ aligner_case : \"alinhadores\"\n  aligner_case ||--o{ aligner_case_event : \"histórico\"\n  branch ||--o{ radiology_center : \"centros radiológicos\"\n  patient ||--o{ radiology_request : \"exames de imagem\"\n  radiology_center |o--o{ radiology_request : \"pedidos\"\n  patient ||--o{ credit_check : \"consultas de crédito\"\n  branch ||--o| invoice_setting : \"NFS-e\"\n  patient ||--o{ invoice : \"notas fiscais\"\n  fin_entry |o--o| invoice : \"nota fiscal\"\n  app_user ||--o{ access_authorization : \"pedido\"\n  price_table ||--o{ price_table_item : \"preços\"\n  procedure ||--o{ price_table_item : \"preço na tabela\"\n  price_table ||--o{ budget : \"tabela\"\n  appointment_category ||--o{ appointment : \"categoria\"\n  chair ||--o{ appointment : \"cadeira\"\n  appointment ||--o{ appointment_tag : \"marcadores\"\n  appointment_marker ||--o{ appointment_tag : \"uso\"\n  app_user ||--o{ patient_note : \"autor\"\n  auth_users {\n    uuid id PK\n    text email\n  }\n  company {\n    bigint nr_company PK\n    varchar vc_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n    smallint it_mfa_policy\n    boolean id_auth_print\n    boolean id_auth_export\n  }\n  branch {\n    bigint nr_company PK, FK\n    bigint nr_branch PK\n    varchar vc_name\n    varchar vc_legal_name\n    varchar vc_cnpj UK\n    varchar vc_email\n    varchar vc_phone\n    smallint it_size\n    smallint it_tax_regime\n    varchar vc_state_registration\n    varchar vc_city_registration\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_address_extra\n    varchar vc_district\n    varchar vc_city\n    char vc_state\n    varchar vc_zip_code\n    varchar vc_timezone\n    varchar vc_phone_extra\n    varchar vc_technical_name\n    varchar vc_technical_cro\n    varchar vc_technical_cro_state\n    varchar vc_forum_city\n    boolean id_main\n    smallint it_status\n    timestamptz dh_status\n    boolean id_blocked\n    timestamptz dh_blocked\n    varchar vc_block_reason\n  }\n  app_user {\n    bigint nr_user PK\n    uuid uu_auth FK, UK\n    varchar vc_name\n    varchar vc_email UK\n    varchar vc_cpf UK\n    varchar vc_phone\n    varchar vc_mobile\n    text vc_avatar_url\n    smallint it_level\n    smallint it_status\n    varchar vc_block_reason\n    timestamptz dh_last_login\n  }\n  access_profile {\n    bigint nr_company PK, FK\n    bigint nr_profile PK\n    varchar vc_name UK\n    smallint it_level\n    smallint it_status\n  }\n  company_user {\n    bigint nr_company PK, FK\n    bigint nr_user PK, FK\n    bigint nr_company_user UK\n    smallint it_status\n    varchar vc_block_reason\n  }\n  branch_user_profile {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_user PK, FK\n    bigint nr_profile PK, FK\n  }\n  access_log {\n    bigint nr_access PK\n    bigint nr_user FK\n    bigint nr_company\n    bigint nr_branch\n    smallint it_app\n    varchar vc_ip\n    varchar vc_device\n    varchar vc_user_agent\n    varchar vc_app_version\n    timestamptz dh_access\n  }\n  screen {\n    uuid uu_screen PK\n    varchar vc_code\n    varchar vc_name\n    varchar vc_group\n    smallint nr_order\n    smallint it_status\n  }\n  access_profile_screen {\n    bigint nr_company PK, FK\n    bigint nr_profile PK, FK\n    uuid uu_screen PK, FK\n    boolean id_read\n    boolean id_create\n    boolean id_update\n  }\n  access_authorization {\n    bigint nr_authorization PK\n    uuid uu_request\n    bigint nr_company FK\n    bigint nr_branch FK\n    smallint it_kind\n    varchar vc_target\n    bigint nr_user FK\n    bigint nr_user_admin FK\n    timestamptz dh_authorized\n    timestamptz dh_used\n    timestamptz dh_expires\n  }\n  event_log {\n    bigint nr_event PK\n    bigint nr_company\n    bigint nr_branch\n    bigint nr_user FK\n    uuid uu_screen FK\n    varchar vc_action\n    varchar vc_entity\n    varchar vc_key\n    varchar vc_summary\n    jsonb js_detail\n    timestamptz dh_event\n  }\n  pricing_param {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_rooms\n    numeric qt_hours_week\n    numeric qt_weeks_month\n    numeric pc_occupancy\n    numeric vl_professional_hour\n    numeric pc_card\n    numeric pc_commission\n    smallint it_tax_regime\n    numeric pc_tax_pf\n    numeric pc_tax_pj\n    numeric pc_profit\n    numeric vl_structure_hour_manual\n  }\n  clinic_expense {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_expense PK\n    varchar vc_name\n    smallint it_type\n    numeric vl_amount\n    smallint it_status\n  }\n  pricing_fee {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_fee PK\n    varchar vc_name\n    varchar vc_hint\n    numeric pc_rate\n    boolean id_active\n  }\n  material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK\n    varchar vc_name UK\n    varchar vc_package\n    numeric vl_package_price\n    numeric qt_yield\n    varchar vc_unit\n    numeric pc_waste\n    smallint it_price_source\n    varchar vc_price_source\n    timestamptz dh_price_updated\n    smallint it_status\n  }\n  specialty {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_specialty PK\n    varchar vc_name UK\n    numeric pc_profit\n    smallint it_status\n  }\n  procedure_template {\n    bigint nr_template PK\n    varchar vc_specialty UK\n    varchar vc_code\n    varchar vc_name UK\n    numeric qt_minutes\n    numeric vl_material_other\n    numeric vl_lab_cost\n    numeric vl_reference_price\n    integer nr_order\n    smallint it_status\n  }\n  procedure {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK\n    varchar vc_code UK\n    varchar vc_name UK\n    bigint nr_specialty FK\n    numeric qt_minutes\n    numeric vl_lab_cost\n    numeric vl_material_other\n    numeric vl_current_price\n    numeric pc_commission\n    numeric pc_profit\n    smallint it_status\n    smallint qt_sessions\n    smallint qt_return_days\n  }\n  procedure_material {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_procedure PK, FK\n    bigint nr_material PK, FK\n    numeric qt_used\n  }\n  professional {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK\n    varchar vc_name UK\n    varchar vc_council\n    varchar vc_color\n    smallint qt_slot_minutes\n    boolean id_online\n    bigint nr_user FK, UK\n    smallint it_status\n  }\n  professional_schedule {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_professional PK, FK\n    bigint nr_schedule PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  appointment {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_appointment PK\n    smallint it_type\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_procedure FK\n    varchar vc_title\n    text vc_notes\n    timestamptz dh_start\n    timestamptz dh_end\n    boolean id_all_day\n    boolean id_fit_in\n    smallint it_origin\n    smallint it_status\n    bigint nr_user_created FK\n    bigint nr_category FK\n    bigint nr_chair FK\n  }\n  fin_account {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_account PK\n    varchar vc_name UK\n    smallint it_type\n    numeric vl_opening\n    varchar vc_bank_code\n    varchar vc_bank_name\n    varchar vc_agency\n    varchar vc_account_number\n    smallint it_status\n  }\n  fin_category {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_category PK\n    varchar vc_name UK\n    smallint it_kind\n    smallint it_cost_type\n    smallint it_dre_group\n    smallint it_status\n  }\n  fin_supplier {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_supplier PK\n    varchar vc_name UK\n    varchar vc_document\n    varchar vc_phone\n    varchar vc_email\n    varchar vc_notes\n    smallint it_status\n  }\n  fin_entry {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_entry PK\n    smallint it_kind\n    bigint nr_category FK\n    bigint nr_account FK\n    bigint nr_supplier FK\n    bigint nr_patient FK\n    varchar vc_description\n    numeric vl_amount\n    date dt_due\n    date dt_competence\n    smallint it_payment_method\n    date dt_paid\n    numeric vl_paid\n    smallint it_status\n    uuid uu_group\n    smallint nr_installment\n    smallint qt_installments\n    boolean id_recurring\n    bigint nr_recurrence FK\n    timestamptz dh_health_exported\n    varchar vc_notes\n    bigint nr_user_created FK\n    bigint nr_appointment FK\n    bigint nr_budget FK\n    bigint nr_professional FK\n    bigint nr_cash_session FK\n  }\n  budget {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_budget PK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    varchar vc_title\n    date dt_budget\n    date dt_valid\n    numeric vl_gross\n    numeric vl_discount\n    numeric vl_total\n    smallint qt_installments\n    smallint it_payment_method\n    varchar vc_notes\n    smallint it_status\n    boolean id_discount_approved\n    boolean id_below_min\n    bigint nr_user_discount FK\n    timestamptz dh_discount\n    timestamptz dh_accepted\n    bigint nr_user_created FK\n    bigint nr_price_table FK\n  }\n  budget_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_budget PK, FK\n    smallint nr_item PK\n    bigint nr_procedure FK\n    varchar vc_description\n    varchar vc_tooth\n    numeric qt_quantity\n    numeric vl_unit\n    numeric vl_total\n    date dt_done\n    bigint nr_evolution\n    smallint qt_sessions\n    smallint qt_sessions_done\n  }\n  anamnesis_model {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK\n    varchar vc_name\n    bigint nr_specialty FK\n    smallint it_status\n  }\n  anamnesis_question {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK, FK\n    smallint nr_question PK\n    varchar vc_question\n    smallint it_type\n    boolean id_alert\n  }\n  patient_anamnesis {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_anamnesis PK\n    bigint nr_model FK\n    varchar vc_model\n    date dt_filled\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  patient_anamnesis_answer {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_anamnesis PK, FK\n    smallint nr_question PK\n    varchar vc_question\n    smallint it_type\n    boolean id_yes\n    varchar vc_text\n    boolean id_alert\n  }\n  clinical_evolution {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_evolution PK\n    timestamptz dh_evolution\n    bigint nr_professional FK\n    varchar vc_text\n    varchar vc_tooth\n    bigint nr_procedure FK\n    bigint nr_budget FK\n    smallint nr_item FK\n    smallint it_status\n    bigint nr_user FK\n    smallint nr_session\n    smallint qt_minutes\n  }\n  tooth_mark {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_mark PK\n    varchar vc_tooth\n    smallint it_condition\n    varchar vc_faces\n    smallint it_situation\n    varchar vc_notes\n    date dt_mark\n    smallint it_status\n    bigint nr_user FK\n  }\n  document_template {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_template PK\n    smallint it_kind\n    varchar vc_name\n    varchar vc_body\n    smallint it_status\n  }\n  medication {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_medication PK\n    varchar vc_name\n    varchar vc_presentation\n    varchar vc_dosage\n    varchar vc_quantity\n    smallint it_use\n    boolean id_controlled\n    smallint it_status\n  }\n  patient_document {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_document PK\n    smallint it_kind\n    bigint nr_template FK\n    varchar vc_title\n    varchar vc_body\n    date dt_document\n    bigint nr_professional FK\n    smallint it_status\n    bigint nr_user FK\n  }\n  patient_document_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_document PK, FK\n    smallint nr_item PK\n    bigint nr_medication FK\n    varchar vc_name\n    varchar vc_presentation\n    varchar vc_dosage\n    varchar vc_quantity\n    smallint it_use\n    boolean id_controlled\n  }\n  patient_file {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_file PK\n    smallint it_type\n    smallint it_category\n    varchar vc_path\n    varchar vc_name\n    varchar vc_mime\n    bigint qt_bytes\n    date dt_file\n    varchar vc_tooth\n    varchar vc_description\n    smallint it_status\n    bigint nr_user FK\n  }\n  online_booking {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_enabled\n    varchar vc_slug\n    smallint qt_days_ahead\n    smallint qt_min_hours\n    varchar vc_message\n  }\n  signature {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_signature PK\n    smallint it_target\n    bigint nr_patient FK\n    bigint nr_document FK\n    bigint nr_budget FK\n    smallint it_signer\n    varchar vc_signer_name\n    varchar vc_signer_cpf\n    text tx_image\n    varchar vc_hash\n    uuid uu_code\n    timestamptz dh_signed\n    varchar vc_ip\n    varchar vc_user_agent\n    bigint nr_user FK\n  }\n  whatsapp_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_enabled\n    varchar vc_phone_number_id\n    varchar vc_waba_id\n    varchar vc_display_phone\n    varchar vc_language\n    boolean id_reminder\n    smallint qt_reminder_hours\n    varchar vc_tpl_reminder\n    boolean id_booked\n    varchar vc_tpl_booked\n    boolean id_birthday\n    varchar vc_tpl_birthday\n    boolean id_return\n    varchar vc_tpl_return\n    smallint qt_send_hour\n    smallint qt_resend\n    smallint qt_resend_hours\n  }\n  whatsapp_secret {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    text vc_token_enc\n    timestamptz dh_saved\n  }\n  whatsapp_message {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_message PK\n    smallint it_kind\n    bigint nr_patient FK\n    bigint nr_appointment FK\n    date dt_ref\n    varchar vc_to\n    varchar vc_template\n    jsonb js_params\n    smallint it_status\n    varchar vc_wa_id\n    varchar vc_error\n    timestamptz dh_sent\n    timestamptz dh_status\n    varchar vc_reply\n    timestamptz dh_reply\n    smallint qt_resend\n  }\n  fin_cash_session {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_session PK\n    bigint nr_account FK\n    bigint nr_user FK\n    timestamptz dh_open\n    numeric vl_open\n    timestamptz dh_close\n    numeric vl_counted\n    numeric vl_expected\n    smallint it_status\n    varchar vc_notes\n    bigint nr_user_closed FK\n  }\n  fin_transfer {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_transfer PK\n    smallint it_type\n    bigint nr_account_from FK\n    bigint nr_account_to FK\n    numeric vl_amount\n    date dt_transfer\n    varchar vc_description\n    bigint nr_cash_session FK\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_card_rate {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_rate PK\n    varchar vc_name\n    smallint it_payment_method\n    smallint qt_installments_min\n    smallint qt_installments_max\n    numeric pc_fee\n    numeric vl_fee_fixed\n    smallint qt_days\n    bigint nr_account FK\n    smallint it_status\n  }\n  fin_receivable {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_receivable PK\n    bigint nr_entry FK\n    bigint nr_rate FK\n    smallint it_payment_method\n    smallint nr_installment\n    smallint qt_installments\n    numeric vl_gross\n    numeric vl_fee\n    numeric vl_net\n    date dt_expected\n    bigint nr_account FK\n    smallint it_status\n    date dt_received\n    numeric vl_received\n    bigint nr_transfer FK\n    bigint nr_fee_entry FK\n    varchar vc_reference\n    varchar vc_card_brand\n    varchar vc_card_last4\n    varchar vc_authorization\n    varchar vc_holder_name\n    varchar vc_holder_document\n    varchar vc_bank_name\n    varchar vc_check_number\n    bigint nr_user_created FK\n  }\n  health_plan {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_plan PK\n    varchar vc_name\n    varchar vc_ans\n    varchar vc_document\n    smallint qt_payment_days\n    bigint nr_account FK\n    varchar vc_notes\n    smallint it_status\n  }\n  health_plan_price {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_plan PK, FK\n    bigint nr_procedure PK, FK\n    varchar vc_code\n    numeric vl_price\n  }\n  health_guide {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_guide PK\n    bigint nr_plan FK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_appointment FK\n    varchar vc_guide_number\n    varchar vc_card_number\n    date dt_service\n    numeric vl_total\n    smallint it_status\n    bigint nr_entry FK\n    date dt_invoiced\n    date dt_paid\n    numeric vl_paid\n    numeric vl_denied\n    varchar vc_notes\n    bigint nr_user_created FK\n  }\n  health_guide_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_guide PK, FK\n    smallint nr_item PK\n    bigint nr_procedure FK\n    varchar vc_tooth\n    smallint qt_quantity\n    numeric vl_unit\n    numeric vl_total\n    numeric vl_denied\n  }\n  fin_bank_line {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_line PK\n    bigint nr_account FK\n    varchar vc_fitid\n    date dt_posted\n    numeric vl_amount\n    varchar vc_memo\n    smallint it_status\n    bigint nr_entry FK\n    bigint nr_transfer FK\n    bigint nr_user_created FK\n  }\n  fin_recurrence {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_recurrence PK\n    smallint it_kind\n    bigint nr_category FK\n    bigint nr_account FK\n    bigint nr_supplier FK\n    bigint nr_patient FK\n    varchar vc_description\n    numeric vl_amount\n    smallint it_day\n    smallint it_payment_method\n    date dt_start\n    date dt_end\n    date dt_generated\n    smallint it_status\n    varchar vc_notes\n    bigint nr_user_created FK\n  }\n  fin_attachment {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_attachment PK\n    bigint nr_entry FK\n    smallint it_type\n    varchar vc_path\n    varchar vc_name\n    varchar vc_mime\n    bigint qt_bytes\n    smallint it_status\n    bigint nr_user_created FK\n  }\n  fin_receipt {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_receipt PK\n    varchar vc_number\n    bigint nr_entry FK\n    numeric vl_amount\n    date dt_paid\n    smallint it_payment_method\n    varchar vc_payer_name\n    varchar vc_payer_document\n    varchar vc_description\n    smallint it_status\n    varchar vc_cancel_reason\n    bigint nr_user_created FK\n  }\n  branch_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    smallint qt_slot_minutes\n    smallint qt_max_parallel\n    boolean id_allow_outside_hours\n    boolean id_auto_record_number\n    bigint nr_next_record\n    text[] vc_patient_required\n    smallint it_debt_rule\n    smallint qt_debt_days\n    boolean id_cash_enabled\n    smallint[] it_payment_methods\n    numeric pc_late_fee\n    numeric pc_late_interest\n    varchar vc_receipt_prefix\n    bigint nr_next_receipt\n    numeric pc_budget_max_discount\n    smallint qt_budget_valid_days\n    boolean id_budget_request_approval\n    boolean id_budget_admin_below_min\n    boolean id_budget_reduction_as_discount\n    smallint it_open_rule\n    smallint it_late_edit\n    numeric pc_dre_revenue_tax\n    numeric pc_dre_income_tax\n    numeric pc_dre_csll\n    boolean id_color_by_category\n    smallint it_agenda_mode\n    smallint it_contract_rule\n    smallint it_checkin_debt_rule\n    smallint it_checkin_open_rule\n    smallint it_checkin_contract_rule\n    smallint it_treat_debt_rule\n    smallint it_treat_open_rule\n    smallint it_treat_contract_rule\n    boolean id_record_sessions\n    boolean id_record_return\n    boolean id_record_time\n    boolean id_credit_check\n  }\n  branch_hour {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_hour PK\n    smallint it_weekday\n    smallint qt_minute_start\n    smallint qt_minute_end\n  }\n  patient {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK\n    varchar vc_name\n    varchar vc_nickname\n    varchar vc_cpf UK\n    varchar vc_rg\n    date dt_birth\n    smallint it_gender\n    smallint it_marital_status\n    smallint it_education\n    smallint it_source\n    varchar vc_referral\n    bigint nr_referrer FK\n    text vc_notes\n    varchar vc_phone\n    varchar vc_mobile\n    varchar vc_phone_other\n    varchar vc_contact_name\n    varchar vc_email\n    boolean id_no_email\n    varchar vc_zip\n    varchar vc_state\n    varchar vc_city\n    varchar vc_address\n    varchar vc_address_number\n    varchar vc_district\n    varchar vc_address_complement\n    varchar vc_record_number\n    varchar vc_profession\n    varchar vc_workplace\n    varchar vc_work_time\n    varchar vc_plan_name\n    varchar vc_plan_number\n    varchar vc_father_name\n    varchar vc_father_cpf\n    varchar vc_father_rg\n    varchar vc_father_profession\n    varchar vc_mother_name\n    varchar vc_mother_cpf\n    varchar vc_mother_rg\n    varchar vc_mother_profession\n    varchar vc_guardian_name\n    varchar vc_guardian_cpf\n    varchar vc_guardian_rg\n    varchar vc_guardian_phone\n    date dt_return_alert\n    varchar vc_return_alert\n    smallint it_status\n  }\n  patient_note {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_note PK\n    text vc_note\n    bigint nr_user FK\n    timestamptz dh_note\n    smallint it_status\n  }\n  prosthetic_work {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_work PK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    bigint nr_supplier FK\n    varchar vc_lab\n    bigint nr_budget FK\n    smallint nr_item FK\n    varchar vc_description\n    varchar vc_tooth\n    varchar vc_shade\n    varchar vc_notes\n    smallint it_stage\n    date dt_sent\n    date dt_expected\n    date dt_received\n    date dt_installed\n    numeric vl_cost\n    bigint nr_entry FK\n    bigint nr_user_created FK\n  }\n  prosthetic_work_step {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_work PK, FK\n    smallint nr_step PK\n    smallint it_stage\n    date dt_step\n    varchar vc_notes\n    bigint nr_user FK\n  }\n  stock_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_material PK, FK\n    numeric qt_stock\n    numeric qt_min\n    smallint it_status\n  }\n  stock_movement {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_movement PK\n    bigint nr_material FK\n    smallint it_type\n    date dt_movement\n    numeric qt_quantity\n    numeric qt_balance\n    numeric vl_unit_cost\n    numeric vl_total\n    bigint nr_supplier FK\n    varchar vc_document\n    bigint nr_entry FK\n    bigint nr_patient FK\n    bigint nr_evolution FK\n    bigint nr_movement_ref\n    varchar vc_notes\n    bigint nr_user FK\n  }\n  appointment_category {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_category PK\n    varchar vc_name\n    varchar vc_color\n    smallint it_status\n  }\n  appointment_marker {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_marker PK\n    varchar vc_name\n    varchar vc_color\n    smallint it_status\n  }\n  chair {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_chair PK\n    varchar vc_name\n    varchar vc_color\n    smallint it_status\n  }\n  appointment_tag {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_appointment PK, FK\n    bigint nr_marker PK, FK\n  }\n  price_table {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_price_table PK\n    varchar vc_name\n    boolean id_default\n    varchar vc_notes\n    smallint it_status\n  }\n  price_table_item {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_price_table PK, FK\n    bigint nr_procedure PK, FK\n    numeric vl_price\n  }\n  aligner_case {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_case PK\n    bigint nr_patient FK\n    bigint nr_professional FK\n    varchar vc_system\n    varchar vc_case_number\n    bigint nr_budget FK\n    smallint qt_aligners\n    smallint qt_current\n    smallint qt_days_change\n    date dt_start\n    date dt_finished\n    varchar vc_pending\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  aligner_case_event {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_case PK, FK\n    smallint nr_event PK\n    timestamptz dh_event\n    smallint it_status\n    smallint qt_current\n    varchar vc_text\n    bigint nr_user FK\n  }\n  radiology_center {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_center PK\n    varchar vc_name\n    varchar vc_phone\n    varchar vc_email\n    varchar vc_address\n    varchar vc_notes\n    smallint it_integration\n    varchar vc_external_code\n    smallint it_status\n  }\n  radiology_request {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_request PK\n    bigint nr_patient FK\n    bigint nr_center FK\n    bigint nr_professional FK\n    date dt_request\n    text[] ar_exams\n    varchar vc_region\n    varchar vc_notes\n    smallint it_status\n    date dt_scheduled\n    date dt_done\n    date dt_report\n    varchar vc_report_url\n    bigint nr_user_created FK\n  }\n  credit_check {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_check PK\n    bigint nr_patient FK\n    varchar vc_document\n    smallint it_provider\n    boolean id_consent\n    smallint it_status\n    smallint it_result\n    smallint qt_score\n    integer qt_debts\n    numeric vl_debts\n    jsonb js_detail\n    varchar vc_protocol\n    varchar vc_error\n    timestamptz dh_done\n    bigint nr_user FK\n  }\n  invoice_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_enabled\n    varchar vc_city_ibge\n    varchar vc_service_code\n    varchar vc_city_service_code\n    varchar vc_cnae\n    numeric pc_iss\n    boolean id_iss_withheld\n    varchar vc_rps_series\n    varchar vc_tpl_description\n  }\n  invoice {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_invoice PK\n    bigint nr_patient FK\n    bigint nr_entry FK\n    date dt_competence\n    numeric vl_service\n    numeric pc_iss\n    numeric vl_iss\n    varchar vc_description\n    varchar vc_taker_name\n    varchar vc_taker_document\n    varchar vc_taker_email\n    smallint it_status\n    varchar vc_number\n    varchar vc_verification\n    varchar vc_pdf_url\n    varchar vc_xml_url\n    varchar vc_provider_ref\n    varchar vc_error\n    timestamptz dh_issued\n    timestamptz dh_cancelled\n    varchar vc_cancel_reason\n    bigint nr_user FK\n  }\n  referral_reward {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    varchar vc_referrer\n    date dt_reward\n    varchar vc_reward\n    numeric vl_reward\n    smallint it_status\n    bigint nr_user FK\n  }\n  notify_setting {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    boolean id_email\n    boolean id_sms\n    varchar vc_email_from_name\n    varchar vc_email_reply_to\n    boolean id_reminder\n    smallint qt_reminder_hours\n    boolean id_booked\n    boolean id_return\n    smallint qt_send_hour\n    varchar vc_tpl_reminder\n    varchar vc_tpl_booked\n    varchar vc_tpl_return\n    smallint qt_resend\n    smallint qt_resend_hours\n    boolean id_review\n    varchar vc_review_url\n    smallint qt_review_hours\n    varchar vc_tpl_review\n  }\n  notify_message {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_message PK\n    smallint it_channel\n    smallint it_kind\n    bigint nr_patient FK\n    bigint nr_appointment FK\n    date dt_ref\n    varchar vc_to\n    varchar vc_subject\n    text tx_body\n    uuid uu_token\n    smallint it_status\n    varchar vc_provider_id\n    varchar vc_error\n    timestamptz dh_sent\n    timestamptz dh_confirmed\n    smallint qt_resend\n  }\n  chart_model {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK\n    varchar vc_name\n    bigint nr_specialty FK\n    boolean id_per_tooth\n    smallint it_status\n  }\n  chart_field {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_model PK, FK\n    smallint nr_field PK\n    varchar vc_label\n    smallint it_type\n    varchar vc_options\n    varchar vc_unit\n    boolean id_required\n  }\n  patient_chart {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_chart PK\n    bigint nr_model FK\n    varchar vc_model\n    varchar vc_tooth\n    date dt_chart\n    bigint nr_professional FK\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  patient_chart_value {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_chart PK, FK\n    smallint nr_field PK\n    varchar vc_label\n    smallint it_type\n    varchar vc_unit\n    varchar vc_value\n  }\n  perio_exam {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_exam PK\n    date dt_exam\n    bigint nr_professional FK\n    varchar vc_notes\n    smallint it_status\n    bigint nr_user FK\n  }\n  perio_tooth {\n    bigint nr_company PK, FK\n    bigint nr_branch PK, FK\n    bigint nr_patient PK, FK\n    bigint nr_exam PK, FK\n    varchar vc_tooth PK\n    boolean id_missing\n    smallint it_mobility\n    smallint it_furcation\n    smallint[] qt_probing\n    smallint[] qt_recession\n    boolean[] id_bleeding\n    boolean[] id_plaque\n  }"
 };

@@ -1,0 +1,103 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.invoice_settings_save(jsonb)                               ::
+  ::  UsedBy      : Flutter -> rpc('invoice_settings_save') (Configuracoes)       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava os dados fiscais da NFS-e da filial (ALTERAR na tela SETTINGS).
+    Update parcial: chave presente altera, ausente mantem; cria a linha na
+    primeira vez. Codigo IBGE da cidade com 7 digitos; ISS de 0 a 5%.
+    Campos do texto: {{paciente}}, {{data}}, {{clinica}}.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    id_enabled, id_iss_withheld  boolean
+    vc_city_ibge (7 digitos), vc_service_code (item da LC 116, ate 10), vc_city_service_code (ate 20),
+    vc_cnae (ate 10), vc_rps_series (ate 5), vc_tpl_description (1 a 500)  text
+    pc_iss  numeric  0 a 5
+
+  Output jsonb: {"id_enabled", "missing": [text]}
+
+  Errors: VERSION_MISMATCH, INVOICE_BRANCH_REQUIRED, INVOICE_FORBIDDEN, INVOICE_VALUE_INVALID,
+    INVOICE_IBGE_INVALID, INVOICE_TEMPLATE_INVALID
+*/
+create or replace function ad.invoice_settings_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _s          od.invoice_setting;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'invoice_settings_save');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('INVOICE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('INVOICE_FORBIDDEN');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  insert into od.invoice_setting (nr_company, nr_branch) values (_nr_company, _nr_branch) on conflict do nothing;
+  select * into _s from od.invoice_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+  begin
+    if p_json ? 'id_enabled'      then _s.id_enabled := (p_json ->> 'id_enabled')::boolean; end if;
+    if p_json ? 'id_iss_withheld' then _s.id_iss_withheld := (p_json ->> 'id_iss_withheld')::boolean; end if;
+    if p_json ? 'vc_city_ibge'    then _s.vc_city_ibge := nullif(regexp_replace(coalesce(p_json ->> 'vc_city_ibge', ''), '\D', '', 'g'), ''); end if;
+    if p_json ? 'vc_service_code' then _s.vc_service_code := nullif(trim(p_json ->> 'vc_service_code'), ''); end if;
+    if p_json ? 'vc_city_service_code' then _s.vc_city_service_code := nullif(trim(p_json ->> 'vc_city_service_code'), ''); end if;
+    if p_json ? 'vc_cnae'         then _s.vc_cnae := nullif(regexp_replace(coalesce(p_json ->> 'vc_cnae', ''), '[^0-9]', '', 'g'), ''); end if;
+    if p_json ? 'vc_rps_series'   then _s.vc_rps_series := nullif(trim(p_json ->> 'vc_rps_series'), ''); end if;
+    if p_json ? 'vc_tpl_description' then _s.vc_tpl_description := nullif(trim(p_json ->> 'vc_tpl_description'), ''); end if;
+    if p_json ? 'pc_iss'          then _s.pc_iss := round((p_json ->> 'pc_iss')::numeric, 2); end if;
+  exception when others then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end;
+
+  if _s.id_enabled is null or _s.id_iss_withheld is null or _s.vc_service_code is null or length(_s.vc_service_code) > 10
+     or length(coalesce(_s.vc_city_service_code, '')) > 20 or _s.vc_cnae is null or length(_s.vc_cnae) > 10
+     or _s.vc_rps_series is null or length(_s.vc_rps_series) > 5
+     or _s.pc_iss is null or _s.pc_iss not between 0 and 5 then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end if;
+  if _s.vc_city_ibge is not null and _s.vc_city_ibge !~ '^[0-9]{7}$' then
+    raise exception '%', ad.fn_message('INVOICE_IBGE_INVALID');
+  end if;
+  if _s.vc_tpl_description is null or length(_s.vc_tpl_description) > 500 then
+    raise exception '%', ad.fn_message('INVOICE_TEMPLATE_INVALID');
+  end if;
+
+  update od.invoice_setting s set
+    id_enabled = _s.id_enabled, vc_city_ibge = _s.vc_city_ibge, vc_service_code = _s.vc_service_code,
+    vc_city_service_code = _s.vc_city_service_code, vc_cnae = _s.vc_cnae, pc_iss = _s.pc_iss,
+    id_iss_withheld = _s.id_iss_withheld, vc_rps_series = _s.vc_rps_series, vc_tpl_description = _s.vc_tpl_description
+   where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'SETTINGS', 'UPDATE',
+    'invoice_setting', _nr_company::text || '/' || _nr_branch::text,
+    format('Nota fiscal %s', case when _s.id_enabled then 'ligada' else 'desligada' end),
+    jsonb_build_object('id_enabled', _s.id_enabled, 'pc_iss', _s.pc_iss, 'vc_service_code', _s.vc_service_code));
+
+  return jsonb_build_object('id_enabled', _s.id_enabled,
+                            'missing', to_jsonb(od.fn_invoice_missing(_nr_company, _nr_branch)));
+end;
+$$;
+
+revoke all on function ad.invoice_settings_save(jsonb) from public, anon;
+grant execute on function ad.invoice_settings_save(jsonb) to authenticated;

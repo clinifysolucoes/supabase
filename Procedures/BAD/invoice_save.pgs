@@ -1,0 +1,213 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.invoice_save(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> rpc('invoice_save') (Financeiro, Notas fiscais)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Rascunho de NFS-e (vc_action I, CRIAR na tela FINANCE; U, ALTERAR) ou
+    descarte (D, ALTERAR) de uma nota que ainda nao foi emitida (rascunho 1
+    ou erro 8). Update parcial no U.
+    No I, a partir do paciente e, opcional, de uma conta a receber dele (uma
+    nota ativa por conta): valor = pago (ou o valor da conta), competencia =
+    data do pagamento (ou hoje); tomador = paciente ou, se menor de 18 anos
+    com CPF do responsavel, o responsavel; descricao do modelo da filial
+    ({{paciente}}, {{data}}, {{clinica}}). ISS = valor x aliquota da filial.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    vc_action   text     I | U | D
+    nr_invoice  bigint   obrigatorio no U/D
+    nr_patient  bigint   obrigatorio no I (paciente ativo)
+    nr_entry    bigint   opcional no I (conta a receber do paciente, nao cancelada)
+    vl_service  numeric  > 0;  dt_competence  date
+    vc_description (ate 1000), vc_taker_name (ate 150), vc_taker_document (CPF/CNPJ), vc_taker_email  text
+
+  Output jsonb: {"nr_invoice", "it_status"}
+
+  Errors: VERSION_MISMATCH, INVOICE_ACTION_INVALID, INVOICE_BRANCH_REQUIRED, INVOICE_FORBIDDEN, INVOICE_NOT_FOUND,
+    INVOICE_LOCKED, INVOICE_VALUE_INVALID, INVOICE_PATIENT_INVALID, INVOICE_ENTRY_INVALID, INVOICE_ENTRY_EXISTS,
+    INVOICE_TAKER_INVALID, INVOICE_EMAIL_INVALID
+*/
+create or replace function ad.invoice_save(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _nr_invoice bigint;
+  _old        od.invoice;
+  _new        od.invoice;
+  _p          od.patient;
+  _e          od.fin_entry;
+  _s          od.invoice_setting;
+  _clinic     text;
+  _tz         text;
+  _doc        text;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'invoice_save');
+  if _action not in ('I', 'U', 'D') then
+    raise exception '%', ad.fn_message('INVOICE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('INVOICE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'I' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action in ('U', 'D') and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('INVOICE_FORBIDDEN');
+  end if;
+  select b.vc_name, b.vc_timezone into _clinic, _tz from ad.branch b
+   where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  select * into _s from od.invoice_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+  if _action in ('U', 'D') then
+    begin
+      _nr_invoice := (p_json ->> 'nr_invoice')::bigint;
+    exception when others then
+      raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+    end;
+    select * into _old from od.invoice i
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_invoice = _nr_invoice
+     for update;
+    if not found then
+      raise exception '%', ad.fn_message('INVOICE_NOT_FOUND');
+    end if;
+    if _old.it_status not in (1, 8) then
+      raise exception '%', ad.fn_message('INVOICE_LOCKED');
+    end if;
+    if _action = 'D' then
+      update od.invoice i set it_status = 90, dh_cancelled = now(), vc_cancel_reason = 'Rascunho descartado'
+       where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_invoice = _nr_invoice;
+      perform ad.fn_event_log(
+        _nr_user, _nr_company, _nr_branch, 'FINANCE', 'UPDATE',
+        'invoice', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_invoice::text,
+        format('Rascunho de nota fiscal %s descartado', _nr_invoice),
+        jsonb_build_object('nr_patient', _old.nr_patient));
+      return jsonb_build_object('nr_invoice', _nr_invoice, 'it_status', 90);
+    end if;
+    _new := _old;
+  else
+    begin
+      select * into _p from od.patient p
+       where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+         and p.nr_patient = (p_json ->> 'nr_patient')::bigint and p.it_status = 1;
+    exception when others then
+      raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+    end;
+    if _p.nr_patient is null then
+      raise exception '%', ad.fn_message('INVOICE_PATIENT_INVALID');
+    end if;
+    _new.nr_company := _nr_company;
+    _new.nr_branch  := _nr_branch;
+    _new.nr_patient := _p.nr_patient;
+    _new.it_status  := 1;
+    _new.dt_competence := (now() at time zone coalesce(_tz, 'America/Sao_Paulo'))::date;
+    if (p_json ->> 'nr_entry') is not null then
+      begin
+        select * into _e from od.fin_entry e
+         where e.nr_company = _nr_company and e.nr_branch = _nr_branch
+           and e.nr_entry = (p_json ->> 'nr_entry')::bigint;
+      exception when others then
+        raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+      end;
+      if _e.nr_entry is null or _e.it_kind <> 1 or _e.it_status = 90 or _e.nr_patient is distinct from _p.nr_patient then
+        raise exception '%', ad.fn_message('INVOICE_ENTRY_INVALID');
+      end if;
+      if exists (select 1 from od.invoice i
+                  where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_entry = _e.nr_entry
+                    and i.it_status <> 90) then
+        raise exception '%', ad.fn_message('INVOICE_ENTRY_EXISTS');
+      end if;
+      _new.nr_entry := _e.nr_entry;
+      _new.vl_service := coalesce(_e.vl_paid, _e.vl_amount);
+      _new.dt_competence := coalesce(_e.dt_paid, _new.dt_competence);
+    end if;
+    -- tomador: paciente ou o responsavel do menor
+    if _p.dt_birth > (_new.dt_competence - interval '18 years')::date
+       and length(regexp_replace(coalesce(_p.vc_guardian_cpf, ''), '\D', '', 'g')) = 11
+       and nullif(trim(coalesce(_p.vc_guardian_name, '')), '') is not null then
+      _new.vc_taker_name := trim(_p.vc_guardian_name);
+      _new.vc_taker_document := regexp_replace(_p.vc_guardian_cpf, '\D', '', 'g');
+    else
+      _new.vc_taker_name := _p.vc_name;
+      _new.vc_taker_document := regexp_replace(coalesce(_p.vc_cpf, ''), '\D', '', 'g');
+    end if;
+    _new.vc_taker_email := case when coalesce(_p.id_no_email, false) then null else lower(trim(_p.vc_email)) end;
+    _new.vc_description := od.fn_notify_render(
+      coalesce(_s.vc_tpl_description, 'Serviços odontológicos prestados a {{paciente}}.'),
+      jsonb_build_object('paciente', _p.vc_name, 'clinica', _clinic,
+                         'data', to_char(_new.dt_competence, 'DD/MM/YYYY')));
+  end if;
+
+  begin
+    if p_json ? 'vl_service'        then _new.vl_service := round((p_json ->> 'vl_service')::numeric, 2); end if;
+    if p_json ? 'dt_competence'     then _new.dt_competence := (p_json ->> 'dt_competence')::date; end if;
+    if p_json ? 'vc_description'    then _new.vc_description := nullif(trim(p_json ->> 'vc_description'), ''); end if;
+    if p_json ? 'vc_taker_name'     then _new.vc_taker_name := nullif(trim(p_json ->> 'vc_taker_name'), ''); end if;
+    if p_json ? 'vc_taker_document' then _new.vc_taker_document := regexp_replace(coalesce(p_json ->> 'vc_taker_document', ''), '\D', '', 'g'); end if;
+    if p_json ? 'vc_taker_email'    then _new.vc_taker_email := nullif(lower(trim(p_json ->> 'vc_taker_email')), ''); end if;
+  exception when others then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end;
+
+  if _new.vl_service is null or _new.vl_service <= 0 or _new.vl_service > 9999999999 or _new.dt_competence is null
+     or _new.vc_description is null or length(_new.vc_description) > 1000 then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end if;
+  if _new.vc_taker_name is null or length(_new.vc_taker_name) > 150
+     or not ((length(_new.vc_taker_document) = 11 and ad.fn_cpf_is_valid(_new.vc_taker_document))
+             or length(_new.vc_taker_document) = 14) then
+    raise exception '%', ad.fn_message('INVOICE_TAKER_INVALID');
+  end if;
+  if _new.vc_taker_email is not null and (length(_new.vc_taker_email) > 120 or not ad.fn_email_is_valid(_new.vc_taker_email)) then
+    raise exception '%', ad.fn_message('INVOICE_EMAIL_INVALID');
+  end if;
+  _new.pc_iss := coalesce(_s.pc_iss, 2);
+  _new.vl_iss := round(_new.vl_service * _new.pc_iss / 100, 2);
+
+  if _action = 'I' then
+    perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+    select coalesce(max(i.nr_invoice), 0) + 1 into _nr_invoice
+      from od.invoice i where i.nr_company = _nr_company and i.nr_branch = _nr_branch;
+    insert into od.invoice (nr_company, nr_branch, nr_invoice, nr_patient, nr_entry, dt_competence, vl_service, pc_iss,
+                            vl_iss, vc_description, vc_taker_name, vc_taker_document, vc_taker_email, nr_user)
+    values (_nr_company, _nr_branch, _nr_invoice, _new.nr_patient, _new.nr_entry, _new.dt_competence, _new.vl_service,
+            _new.pc_iss, _new.vl_iss, _new.vc_description, _new.vc_taker_name, _new.vc_taker_document,
+            _new.vc_taker_email, _nr_user);
+  else
+    update od.invoice i set
+      dt_competence = _new.dt_competence, vl_service = _new.vl_service, pc_iss = _new.pc_iss, vl_iss = _new.vl_iss,
+      vc_description = _new.vc_description, vc_taker_name = _new.vc_taker_name,
+      vc_taker_document = _new.vc_taker_document, vc_taker_email = _new.vc_taker_email
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_invoice = _nr_invoice;
+  end if;
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', case when _action = 'I' then 'CREATE' else 'UPDATE' end,
+    'invoice', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_invoice::text,
+    format('Nota fiscal %s %s: R$ %s', _nr_invoice, case when _action = 'I' then 'criada' else 'alterada' end,
+           to_char(_new.vl_service, 'FM999G999G990D00')),
+    jsonb_build_object('nr_patient', _new.nr_patient, 'nr_entry', _new.nr_entry, 'vl_service', _new.vl_service));
+
+  return jsonb_build_object('nr_invoice', _nr_invoice, 'it_status', coalesce(_new.it_status, 1));
+end;
+$$;
+
+revoke all on function ad.invoice_save(jsonb) from public, anon;
+grant execute on function ad.invoice_save(jsonb) to authenticated;

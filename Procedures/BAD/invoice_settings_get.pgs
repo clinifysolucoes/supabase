@@ -1,0 +1,69 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.invoice_settings_get(jsonb)                                ::
+  ::  UsedBy      : Flutter -> rpc('invoice_settings_get') (Configuracoes)        ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Dados fiscais da NFS-e da filial (LER na tela SETTINGS), com os padroes
+    quando ainda nao configurada, e o que falta para emitir (od.fn_invoice_missing):
+    dados do prestador em ad.branch e os da propria configuracao.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+
+  Output jsonb: {"settings": {id_enabled, vc_city_ibge, vc_service_code, vc_city_service_code, vc_cnae, pc_iss,
+                              id_iss_withheld, vc_rps_series, vc_tpl_description, id_saved},
+                 "missing": [text], "permission": {"id_update"}}
+
+  Errors: VERSION_MISMATCH, INVOICE_BRANCH_REQUIRED, INVOICE_FORBIDDEN
+*/
+create or replace function ad.invoice_settings_get(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _perm       jsonb;
+  _s          od.invoice_setting;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'invoice_settings_get');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('INVOICE_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'SETTINGS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('INVOICE_FORBIDDEN');
+  end if;
+  select * into _s from od.invoice_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+
+  return jsonb_build_object(
+    'settings', jsonb_build_object(
+      'id_enabled', coalesce(_s.id_enabled, false),
+      'vc_city_ibge', _s.vc_city_ibge,
+      'vc_service_code', coalesce(_s.vc_service_code, '4.12'),
+      'vc_city_service_code', _s.vc_city_service_code,
+      'vc_cnae', coalesce(_s.vc_cnae, '8630504'),
+      'pc_iss', coalesce(_s.pc_iss, 2),
+      'id_iss_withheld', coalesce(_s.id_iss_withheld, false),
+      'vc_rps_series', coalesce(_s.vc_rps_series, '1'),
+      'vc_tpl_description', coalesce(_s.vc_tpl_description, 'Serviços odontológicos prestados a {{paciente}}.'),
+      'id_saved', _s.nr_company is not null),
+    'missing', to_jsonb(od.fn_invoice_missing(_nr_company, _nr_branch)),
+    'permission', jsonb_build_object('id_update', coalesce((_perm ->> 'id_update')::boolean, false)));
+end;
+$$;
+
+revoke all on function ad.invoice_settings_get(jsonb) from public, anon;
+grant execute on function ad.invoice_settings_get(jsonb) to authenticated;

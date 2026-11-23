@@ -110,6 +110,8 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.radiology_center`](#odradiologycenter) | Centro radiológico | Centro radiológico parceiro da filial, para onde vão os pedidos de exame de imagem. A integração automática (it_integration 1) fica preparada para quando o centro tiver contrato e chave. |
 | [`od.radiology_request`](#odradiologyrequest) | Pedido de exame de imagem | Pedido de exame de imagem do paciente (panorâmica, tomografia, documentação ortodôntica...) a um centro radiológico, com situação, datas e o link do laudo/imagens no portal do centro. |
 | [`od.credit_check`](#odcreditcheck) | Consulta de crédito | Consulta de crédito do paciente pelo CPF no birô (Serasa, SPC Brasil, Boa Vista), feita pela Edge Function credit-check com a autorização do paciente. Guarda só o resultado resumido (nada consta / com restrições, score, quantidade e valor das dívidas). |
+| [`od.invoice_setting`](#odinvoicesetting) | Configuração da NFS-e | Dados fiscais da filial para emitir NFS-e (o prestador — CNPJ, inscrição municipal, regime, endereço — vem de ad.branch). A conta no emissor é do sistema (Edge Function invoice-issue). |
+| [`od.invoice`](#odinvoice) | Nota fiscal de serviço (NFS-e) | NFS-e de atendimento: rascunho a partir do paciente ou de uma conta a receber, emitida e cancelada pela Edge Function invoice-issue no emissor. Uma nota ativa por conta a receber. |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
@@ -232,6 +234,9 @@ erDiagram
   patient ||--o{ radiology_request : "exames de imagem"
   radiology_center |o--o{ radiology_request : "pedidos"
   patient ||--o{ credit_check : "consultas de crédito"
+  branch ||--o| invoice_setting : "NFS-e"
+  patient ||--o{ invoice : "notas fiscais"
+  fin_entry |o--o| invoice : "nota fiscal"
   app_user ||--o{ access_authorization : "pedido"
   price_table ||--o{ price_table_item : "preços"
   procedure ||--o{ price_table_item : "preço na tabela"
@@ -1322,6 +1327,45 @@ erDiagram
     varchar vc_protocol
     varchar vc_error
     timestamptz dh_done
+    bigint nr_user FK
+  }
+  invoice_setting {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    boolean id_enabled
+    varchar vc_city_ibge
+    varchar vc_service_code
+    varchar vc_city_service_code
+    varchar vc_cnae
+    numeric pc_iss
+    boolean id_iss_withheld
+    varchar vc_rps_series
+    varchar vc_tpl_description
+  }
+  invoice {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_invoice PK
+    bigint nr_patient FK
+    bigint nr_entry FK
+    date dt_competence
+    numeric vl_service
+    numeric pc_iss
+    numeric vl_iss
+    varchar vc_description
+    varchar vc_taker_name
+    varchar vc_taker_document
+    varchar vc_taker_email
+    smallint it_status
+    varchar vc_number
+    varchar vc_verification
+    varchar vc_pdf_url
+    varchar vc_xml_url
+    varchar vc_provider_ref
+    varchar vc_error
+    timestamptz dh_issued
+    timestamptz dh_cancelled
+    varchar vc_cancel_reason
     bigint nr_user FK
   }
   referral_reward {
@@ -3430,6 +3474,69 @@ Consulta de crédito do paciente pelo CPF no birô (Serasa, SPC Brasil, Boa Vist
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.invoice_setting
+
+**Configuração da NFS-e**
+
+Dados fiscais da filial para emitir NFS-e (o prestador — CNPJ, inscrição municipal, regime, endereço — vem de ad.branch). A conta no emissor é do sistema (Edge Function invoice-issue).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via invoice_settings_save (ALTERAR em SETTINGS).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `branch.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `branch.nr_branch` | NOT NULL |  | Número da filial. |
+| `id_enabled` | `boolean` |  | NOT NULL | `false` | Emissão de NFS-e ligada na filial. |
+| `vc_city_ibge` | `varchar(7)` |  | NULL |  | Código IBGE da cidade do prestador (7 dígitos). |
+| `vc_service_code` | `varchar(10)` |  | NOT NULL | `'4.12'` | Item da lista de serviços da LC 116 (4.12 = odontologia). |
+| `vc_city_service_code` | `varchar(20)` |  | NULL |  | Código de tributação do município, quando a prefeitura exige. |
+| `vc_cnae` | `varchar(10)` |  | NOT NULL | `'8630504'` | CNAE do serviço (8630-5/04 = atividade odontológica), só dígitos. |
+| `pc_iss` | `numeric(5,2)` |  | NOT NULL | `2` | Alíquota do ISS em pontos (0 a 5). |
+| `id_iss_withheld` | `boolean` |  | NOT NULL | `false` | ISS retido pelo tomador. |
+| `vc_rps_series` | `varchar(5)` |  | NOT NULL | `'1'` | Série do RPS. |
+| `vc_tpl_description` | `varchar(500)` |  | NOT NULL |  | Modelo da descrição do serviço ({{paciente}}, {{data}}, {{clinica}}). |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
+### od.invoice
+
+**Nota fiscal de serviço (NFS-e)**
+
+NFS-e de atendimento: rascunho a partir do paciente ou de uma conta a receber, emitida e cancelada pela Edge Function invoice-issue no emissor. Uma nota ativa por conta a receber.
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via invoice_save / invoice_issue_check (FINANCE) e invoice_result (service_role).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_invoice` | `bigint` | PK3 | NOT NULL |  | Número interno da nota (sequencial por filial). |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente atendido. |
+| `nr_entry` | `bigint` | FK → `fin_entry.nr_entry` | NULL |  | Conta a receber que originou a nota (uma nota ativa por conta). |
+| `dt_competence` | `date` |  | NOT NULL |  | Competência (data do serviço/pagamento). |
+| `vl_service` | `numeric(12,2)` |  | NOT NULL |  | Valor do serviço. |
+| `pc_iss` | `numeric(5,2)` |  | NOT NULL |  | Alíquota do ISS usada (da configuração da filial). |
+| `vl_iss` | `numeric(12,2)` |  | NOT NULL |  | Valor do ISS (valor × alíquota). |
+| `vc_description` | `varchar(1000)` |  | NOT NULL |  | Discriminação do serviço. |
+| `vc_taker_name` | `varchar(150)` |  | NOT NULL |  | Tomador (paciente ou responsável do menor). |
+| `vc_taker_document` | `varchar(14)` |  | NOT NULL |  | CPF ou CNPJ do tomador, só dígitos. |
+| `vc_taker_email` | `varchar(120)` |  | NULL |  | E-mail do tomador (o emissor envia a nota). |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação da nota. Valores: 1 = Rascunho; 2 = Processando; 3 = Emitida; 8 = Erro (pode reenviar); 90 = Cancelada. |
+| `vc_number` | `varchar(30)` |  | NULL |  | Número da NFS-e na prefeitura. |
+| `vc_verification` | `varchar(60)` |  | NULL |  | Código de verificação. |
+| `vc_pdf_url` | `varchar(500)` |  | NULL |  | Link do PDF (DANFSE) no emissor. |
+| `vc_xml_url` | `varchar(500)` |  | NULL |  | Link do XML no emissor. |
+| `vc_provider_ref` | `varchar(80)` |  | NULL |  | Referência da nota no emissor. |
+| `vc_error` | `varchar(500)` |  | NULL |  | Último erro do emissor (ex.: INVOICE_NOT_CONFIGURED). |
+| `dh_issued` | `timestamptz` |  | NULL |  | Quando foi emitida. |
+| `dh_cancelled` | `timestamptz` |  | NULL |  | Quando foi cancelada (ou o rascunho descartado). |
+| `vc_cancel_reason` | `varchar(255)` |  | NULL |  | Motivo do cancelamento. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem criou a nota. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.referral_reward
 
 **Recompensa por indicação**
@@ -3746,6 +3853,12 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.credit_check_request(p_json jsonb)` | authenticated | Abre uma consulta de crédito do paciente (alterar em PATIENTS) como o usuário que chamou a Edge Function credit-check: consulta ligada na filial, autorização do paciente (id_consent), CPF válido, sem outra pendente há menos de 5 minutos. Devolve o CPF para a Edge Function consultar o birô. |
 | `ad.credit_check_result(p_json jsonb)` | service_role | Grava o resultado de uma consulta de crédito pendente (só service_role, pela Edge Function credit-check): concluída com nada consta / com restrições, score e dívidas, ou erro (ex.: CREDIT_NOT_CONFIGURED). |
 | `ad.credit_check_list(p_json jsonb)` | authenticated | Consultas de crédito do paciente (ler em PATIENTS), as 50 mais recentes, com o CPF mascarado, e se a consulta está ligada na filial e se o usuário pode consultar. |
+| `ad.invoice_settings_get(p_json jsonb)` | authenticated | Dados fiscais da NFS-e da filial (ler em SETTINGS), com os padrões e o que falta para emitir. |
+| `ad.invoice_settings_save(p_json jsonb)` | authenticated | Grava os dados fiscais da NFS-e (alterar em SETTINGS), com update parcial: ligada, IBGE, item LC 116, código municipal, CNAE, ISS, retenção, série do RPS e modelo da descrição. |
+| `ad.invoice_save(p_json jsonb)` | authenticated | Rascunho de NFS-e (I criar em FINANCE, U alterar) a partir do paciente e de uma conta a receber opcional, ou descarte (D) de nota não emitida. Tomador = paciente ou responsável do menor; ISS pela alíquota da filial. |
+| `ad.invoice_issue_check(p_json jsonb)` | authenticated | Valida e prepara a emissão (ISSUE, criar em FINANCE: passa a nota para processando) ou o cancelamento (CANCEL, alterar em FINANCE, com motivo) de uma NFS-e, como o usuário da Edge Function invoice-issue; devolve prestador, tomador e serviço. |
+| `ad.invoice_result(p_json jsonb)` | service_role | Grava a resposta do emissor (só service_role): emitida com número/PDF/XML, erro (pode reenviar) ou cancelada. |
+| `ad.invoice_list(p_json jsonb)` | authenticated | Notas fiscais da filial (ler em FINANCE) com totais por situação, valor emitido e se a NFS-e está ligada e pronta. Filtros: situação, competência, paciente e busca. |
 | `ad.aligner_list(p_json jsonb)` | authenticated | Casos de alinhadores da filial (ler em ALIGNERS) com histórico, previsão de término e totais por situação. Filtros: situação, período de início, profissional, paciente e busca. |
 | `ad.aligner_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) um caso de alinhadores; pendência pede o texto; finalizar grava a data e o último alinhador; criação e mudanças de situação ou de alinhador atual vão para o histórico. Grava event_log sem dados pessoais. |
 | `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
@@ -3856,6 +3969,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `od.fn_fin_category_ensure(p_nr_company bigint, p_nr_branch bigint, p_vc_name text, p_it_kind smallint, p_it_cost_type smallint, p_nr_user bigint)` | interna | Categoria do plano de contas pelo nome e tipo; cria (ou reativa) quando falta. Usada para Comissões e para a receita padrão do fechamento. |
 | `od.fn_fin_receivable_make(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_qt_installments integer, p_vc_reference text, p_nr_user bigint)` | interna | Depois da baixa de uma conta a receber em cartão/boleto/cheque com taxa ativa: leva o valor para a conta de passagem Recebíveis (criada se faltar) e cria um recebível por parcela do cartão com bruto, taxa, líquido e previsão. Sem taxa não faz nada. |
 | `od.fn_fin_bank_candidates(p_nr_company bigint, p_nr_branch bigint, p_nr_line bigint)` | interna | Até 5 sugestões para uma linha pendente do extrato: lançamentos pagos e transferências da mesma conta, mesmo valor com sinal, até 5 dias de diferença e ainda não conciliados. |
+| `od.fn_invoice_missing(p_company bigint, p_branch bigint)` | interna | O que falta para a filial emitir NFS-e (lista vazia = pronta): cnpj, city_registration, tax_regime, address, city_ibge, settings. |
 | `od.fn_fin_recurrence_fill(p_company bigint, p_branch bigint, p_until date)` | interna | Gera os lançamentos das contas recorrentes ativas da filial até o mês de p_until (um por mês, no dia da regra, entre dt_start e dt_end); guarda até onde gerou, então não duplica. Chamada por fin_recurrence_save/list, fin_entry_list, fin_overview e fin_cashflow. |
 | `od.fn_fin_receivable_details(p_nr_company bigint, p_nr_branch bigint, p_nr_entry bigint, p_json jsonb)` | interna | Grava nos recebíveis em aberto de um pagamento os dados do cartão (bandeira, 4 dígitos, autorização, titular e CPF) e do cheque (banco, número) que vieram no JSON da RPC. |
 | `od.fn_pricing_calc(p_json jsonb)` | interna | Fórmula do preço: custo direto = materiais + laboratório + tempo × estrutura/h + tempo × hora clínica; preço = custo ÷ (1 − cartão − comissão − taxas − IR − lucro) no regime PJ (IR sobre o faturamento) ou (1 − IR) × custo ÷ ((1 − IR)(1 − cartão − comissão − taxas) − lucro) no regime PF (IR sobre o lucro); preço mínimo com lucro zero. Devolve a decomposição e id_valid. Com vl_current_price (valor cobrado hoje) devolve também o lucro que sobra com ele e it_price_status: 0 sem valor, 1 ok, 2 abaixo do sugerido, 3 abaixo do mínimo, 4 abaixo do custo direto. |
@@ -4255,6 +4369,23 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `HEALTH_PLAN_REQUIRED` | `health_plan_save` |  |
 | `HEALTH_PLAN_STATUS_INVALID` | `health_plan_save` |  |
 | `HEALTH_PLAN_VALUE_INVALID` | `health_plan_save` |  |
+| `INVOICE_ACTION_INVALID` | `invoice_save`, `invoice_issue_check`, `invoice_result` |  |
+| `INVOICE_BRANCH_REQUIRED` | `invoice_settings_get`, `invoice_settings_save`, `invoice_save`, `invoice_issue_check`, `invoice_list` |  |
+| `INVOICE_CANCEL_REASON_REQUIRED` | `invoice_issue_check` |  |
+| `INVOICE_DISABLED` | `invoice_issue_check` |  |
+| `INVOICE_EMAIL_INVALID` | `invoice_save` |  |
+| `INVOICE_ENTRY_EXISTS` | `invoice_save` |  |
+| `INVOICE_ENTRY_INVALID` | `invoice_save` |  |
+| `INVOICE_FORBIDDEN` | `invoice_settings_get`, `invoice_settings_save`, `invoice_save`, `invoice_issue_check`, `invoice_list` |  |
+| `INVOICE_IBGE_INVALID` | `invoice_settings_save` |  |
+| `INVOICE_LOCKED` | `invoice_save` |  |
+| `INVOICE_NOT_FOUND` | `invoice_save`, `invoice_issue_check`, `invoice_result` |  |
+| `INVOICE_PATIENT_INVALID` | `invoice_save` |  |
+| `INVOICE_SETUP_INCOMPLETE` | `invoice_issue_check` |  |
+| `INVOICE_STATUS_INVALID` | `invoice_issue_check` |  |
+| `INVOICE_TAKER_INVALID` | `invoice_save` |  |
+| `INVOICE_TEMPLATE_INVALID` | `invoice_settings_save` |  |
+| `INVOICE_VALUE_INVALID` | `invoice_settings_save`, `invoice_save`, `invoice_result`, `invoice_list` |  |
 | `MATERIAL_ACTION_INVALID` | `material_save` |  |
 | `MATERIAL_FORBIDDEN` | `material_save` |  |
 | `MATERIAL_NAME_IN_USE` | `material_save` | Name |
@@ -4508,7 +4639,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `radiology_center_save`, `radiology_save`, `radiology_list`, `credit_check_request`, `credit_check_result`, `credit_check_list`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `radiology_center_save`, `radiology_save`, `radiology_list`, `credit_check_request`, `credit_check_result`, `credit_check_list`, `invoice_settings_get`, `invoice_settings_save`, `invoice_save`, `invoice_issue_check`, `invoice_result`, `invoice_list`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

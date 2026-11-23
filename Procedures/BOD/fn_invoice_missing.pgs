@@ -1,0 +1,54 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : OD - Odontologia                                              ::
+  ::  Object      : od.fn_invoice_missing(bigint, bigint)                         ::
+  ::  UsedBy      : ad.invoice_settings_get, ad.invoice_issue_check               ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    O que falta para a filial emitir NFS-e, como lista de codigos (vazia =
+    pronta): cnpj, city_registration (inscricao municipal), tax_regime,
+    address (CEP, endereco, numero, bairro, cidade e UF), city_ibge,
+    settings (configuracao nunca salva). Helper interno.
+  Output: text[]
+*/
+create or replace function od.fn_invoice_missing(p_company bigint, p_branch bigint)
+returns text[]
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  _b ad.branch;
+  _s od.invoice_setting;
+  _m text[] := '{}';
+begin
+  select * into _b from ad.branch b where b.nr_company = p_company and b.nr_branch = p_branch;
+  select * into _s from od.invoice_setting s where s.nr_company = p_company and s.nr_branch = p_branch;
+  if coalesce(length(regexp_replace(coalesce(_b.vc_cnpj, ''), '\D', '', 'g')), 0) <> 14 then
+    _m := _m || 'cnpj'::text;
+  end if;
+  if nullif(trim(coalesce(_b.vc_city_registration, '')), '') is null then
+    _m := _m || 'city_registration'::text;
+  end if;
+  if _b.it_tax_regime is null then
+    _m := _m || 'tax_regime'::text;
+  end if;
+  if nullif(trim(coalesce(_b.vc_zip_code, '')), '') is null or nullif(trim(coalesce(_b.vc_address, '')), '') is null
+     or nullif(trim(coalesce(_b.vc_address_number, '')), '') is null or nullif(trim(coalesce(_b.vc_district, '')), '') is null
+     or nullif(trim(coalesce(_b.vc_city, '')), '') is null or nullif(trim(coalesce(_b.vc_state, '')), '') is null then
+    _m := _m || 'address'::text;
+  end if;
+  if _s.nr_company is null then
+    _m := _m || 'settings'::text;
+  elsif _s.vc_city_ibge is null then
+    _m := _m || 'city_ibge'::text;
+  end if;
+  return _m;
+end;
+$$;
+
+revoke all on function od.fn_invoice_missing(bigint, bigint) from public, anon, authenticated;

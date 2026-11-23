@@ -305,3 +305,11 @@ create or replace trigger radiology_request_audit
 create or replace trigger credit_check_audit
   before insert or update on od.credit_check
   for each row execute function ad.trg_audit();
+
+create or replace trigger invoice_setting_audit
+  before insert or update on od.invoice_setting
+  for each row execute function ad.trg_audit();
+
+create or replace trigger invoice_audit
+  before insert or update on od.invoice
+  for each row execute function ad.trg_audit();
