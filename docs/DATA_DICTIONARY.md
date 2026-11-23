@@ -109,6 +109,7 @@ Colunas de auditoria em **toda** tabela (preenchidas pelo trigger `ad.trg_audit`
 | [`od.aligner_case_event`](#odalignercaseevent) | Histórico do caso de alinhadores | Criação e cada mudança de situação ou de alinhador atual do caso, com anotação. |
 | [`od.radiology_center`](#odradiologycenter) | Centro radiológico | Centro radiológico parceiro da filial, para onde vão os pedidos de exame de imagem. A integração automática (it_integration 1) fica preparada para quando o centro tiver contrato e chave. |
 | [`od.radiology_request`](#odradiologyrequest) | Pedido de exame de imagem | Pedido de exame de imagem do paciente (panorâmica, tomografia, documentação ortodôntica...) a um centro radiológico, com situação, datas e o link do laudo/imagens no portal do centro. |
+| [`od.credit_check`](#odcreditcheck) | Consulta de crédito | Consulta de crédito do paciente pelo CPF no birô (Serasa, SPC Brasil, Boa Vista), feita pela Edge Function credit-check com a autorização do paciente. Guarda só o resultado resumido (nada consta / com restrições, score, quantidade e valor das dívidas). |
 | [`od.referral_reward`](#odreferralreward) | Recompensa por indicação | Retorno dado a quem indicou um paciente (brinde, desconto, agradecimento): uma por paciente indicado, com o nome de quem indicou naquele momento. Desfazer marca it_status 90. |
 | [`od.notify_setting`](#odnotifysetting) | Alertas por e-mail e SMS | Configuração da filial dos alertas por e-mail (Resend) e SMS (Zenvia): canais ligados, remetente do e-mail, alertas, antecedência do lembrete, hora de envio e os textos com campos {{nome}}, {{clinica}}, {{data}}, {{hora}}, {{profissional}}, {{retorno}} e {{link}}. As contas dos provedores são do sistema (secrets das Edge Functions). |
 | [`od.notify_message`](#odnotifymessage) | Alerta por e-mail ou SMS | Fila e histórico dos alertas por e-mail e SMS: uma linha por canal e alerta (o índice único impede repetir), com o texto já montado, o token do link de confirmação do lembrete, a situação, o id do provedor ou o erro e a confirmação pelo paciente. |
@@ -230,6 +231,7 @@ erDiagram
   branch ||--o{ radiology_center : "centros radiológicos"
   patient ||--o{ radiology_request : "exames de imagem"
   radiology_center |o--o{ radiology_request : "pedidos"
+  patient ||--o{ credit_check : "consultas de crédito"
   app_user ||--o{ access_authorization : "pedido"
   price_table ||--o{ price_table_item : "preços"
   procedure ||--o{ price_table_item : "preço na tabela"
@@ -1064,6 +1066,7 @@ erDiagram
     boolean id_record_sessions
     boolean id_record_return
     boolean id_record_time
+    boolean id_credit_check
   }
   branch_hour {
     bigint nr_company PK, FK
@@ -1301,6 +1304,25 @@ erDiagram
     date dt_report
     varchar vc_report_url
     bigint nr_user_created FK
+  }
+  credit_check {
+    bigint nr_company PK, FK
+    bigint nr_branch PK, FK
+    bigint nr_check PK
+    bigint nr_patient FK
+    varchar vc_document
+    smallint it_provider
+    boolean id_consent
+    smallint it_status
+    smallint it_result
+    smallint qt_score
+    integer qt_debts
+    numeric vl_debts
+    jsonb js_detail
+    varchar vc_protocol
+    varchar vc_error
+    timestamptz dh_done
+    bigint nr_user FK
   }
   referral_reward {
     bigint nr_company PK, FK
@@ -2931,6 +2953,7 @@ Preferências da filial (uma linha; sem linha valem os padrões): agenda (interv
 | `id_record_sessions` | `boolean` |  | NOT NULL | `false` | Prontuário: item do orçamento realizado em várias sessões (qt_sessions do procedimento). |
 | `id_record_return` | `boolean` |  | NOT NULL | `false` | Prontuário: ao concluir um procedimento com qt_return_days, cria o alerta de retorno do paciente. |
 | `id_record_time` | `boolean` |  | NOT NULL | `false` | Prontuário: registrar o tempo de execução de cada evolução (qt_minutes). |
+| `id_credit_check` | `boolean` |  | NOT NULL | `false` | Consulta de crédito (SPC/Serasa) ligada na ficha do paciente; a conta no birô é do sistema (Edge Function credit-check). |
 | `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
@@ -3376,6 +3399,37 @@ Pedido de exame de imagem do paciente (panorâmica, tomografia, documentação o
 | `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
 | `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
 
+### od.credit_check
+
+**Consulta de crédito**
+
+Consulta de crédito do paciente pelo CPF no birô (Serasa, SPC Brasil, Boa Vista), feita pela Edge Function credit-check com a autorização do paciente. Guarda só o resultado resumido (nada consta / com restrições, score, quantidade e valor das dívidas).
+
+**RLS:** SELECT: filiais acessíveis (private.fn_my_branches). Escrita só via credit_check_request (ALTERAR em PATIENTS) e credit_check_result (service_role).
+
+| Coluna | Tipo | Chave | Nulo | Default | Descrição |
+|---|---|---|---|---|---|
+| `nr_company` | `bigint` | PK1, FK → `patient.nr_company` | NOT NULL |  | Número da empresa. |
+| `nr_branch` | `bigint` | PK2, FK → `patient.nr_branch` | NOT NULL |  | Número da filial. |
+| `nr_check` | `bigint` | PK3 | NOT NULL |  | Número da consulta (sequencial por filial). |
+| `nr_patient` | `bigint` | FK → `patient.nr_patient` | NOT NULL |  | Paciente consultado. |
+| `vc_document` | `varchar(14)` |  | NOT NULL |  | CPF consultado, só dígitos (a lista devolve mascarado). |
+| `it_provider` | `smallint` |  | NOT NULL |  | Birô de crédito. Valores: 1 = Serasa Experian; 2 = SPC Brasil; 3 = Boa Vista. |
+| `id_consent` | `boolean` |  | NOT NULL |  | Paciente autorizou a consulta (LGPD); sempre verdadeiro. |
+| `it_status` | `smallint` |  | NOT NULL | `1` | Situação da consulta. Valores: 1 = Pendente; 2 = Concluída; 9 = Erro. |
+| `it_result` | `smallint` |  | NULL |  | Resultado (só concluída). Valores: 1 = Nada consta; 2 = Com restrições. |
+| `qt_score` | `smallint` |  | NULL |  | Score de crédito (0 a 1000), quando o birô devolve. |
+| `qt_debts` | `integer` |  | NULL |  | Quantidade de dívidas/restrições. |
+| `vl_debts` | `numeric(14,2)` |  | NULL |  | Valor total das dívidas/restrições. |
+| `js_detail` | `jsonb` |  | NULL |  | Resumo devolvido pelo birô (credores, valores, datas). |
+| `vc_protocol` | `varchar(80)` |  | NULL |  | Protocolo da consulta no birô. |
+| `vc_error` | `varchar(500)` |  | NULL |  | Erro (ex.: CREDIT_NOT_CONFIGURED quando o birô ainda não foi contratado). |
+| `dh_done` | `timestamptz` |  | NULL |  | Quando o resultado foi gravado. |
+| `nr_user` | `bigint` | FK → `app_user.nr_user` | NOT NULL |  | Quem pediu a consulta. |
+| `nr_operator` | `bigint` |  | NULL |  | Usuário (ad.app_user.nr_user) da última alteração. Preenchido pelo trigger ad.trg_audit. |
+| `dh_created` | `timestamptz` |  | NOT NULL | `now()` | Data/hora de inclusão do registro (trigger ad.trg_audit; nunca muda). |
+| `dh_updated` | `timestamptz` |  | NOT NULL | `now()` | Data/hora da última atualização (trigger ad.trg_audit). |
+
 ### od.referral_reward
 
 **Recompensa por indicação**
@@ -3689,6 +3743,9 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.radiology_center_save(p_json jsonb)` | authenticated | Cadastra (I, criar em RADIOLOGY) ou altera (U) um centro radiológico da filial, com update parcial; telefone só dígitos, nome único na filial, it_integration 0 manual ou 1 integração automática (preparada). |
 | `ad.radiology_save(p_json jsonb)` | authenticated | Cria (I, criar em RADIOLOGY) ou altera (U) um pedido de exame de imagem do paciente, com update parcial: exames, centro, profissional, região, situação (solicitado, agendado, realizado, laudo recebido, cancelado), datas e link do laudo. Realizado/laudo preenchem as datas se vierem vazias; cancelado não muda. |
 | `ad.radiology_list(p_json jsonb)` | authenticated | Pedidos de exame de imagem da filial (ler em RADIOLOGY), os centros radiológicos e os totais por situação. Filtros: situação, período, centro, paciente e busca (paciente, exame, região). |
+| `ad.credit_check_request(p_json jsonb)` | authenticated | Abre uma consulta de crédito do paciente (alterar em PATIENTS) como o usuário que chamou a Edge Function credit-check: consulta ligada na filial, autorização do paciente (id_consent), CPF válido, sem outra pendente há menos de 5 minutos. Devolve o CPF para a Edge Function consultar o birô. |
+| `ad.credit_check_result(p_json jsonb)` | service_role | Grava o resultado de uma consulta de crédito pendente (só service_role, pela Edge Function credit-check): concluída com nada consta / com restrições, score e dívidas, ou erro (ex.: CREDIT_NOT_CONFIGURED). |
+| `ad.credit_check_list(p_json jsonb)` | authenticated | Consultas de crédito do paciente (ler em PATIENTS), as 50 mais recentes, com o CPF mascarado, e se a consulta está ligada na filial e se o usuário pode consultar. |
 | `ad.aligner_list(p_json jsonb)` | authenticated | Casos de alinhadores da filial (ler em ALIGNERS) com histórico, previsão de término e totais por situação. Filtros: situação, período de início, profissional, paciente e busca. |
 | `ad.aligner_save(p_json jsonb)` | authenticated | Cria (I, permissão criar) ou altera parcialmente (U, permissão alterar) um caso de alinhadores; pendência pede o texto; finalizar grava a data e o último alinhador; criação e mudanças de situação ou de alinhador atual vão para o histórico. Grava event_log sem dados pessoais. |
 | `ad.prosthetic_list(p_json jsonb)` | authenticated | Trabalhos protéticos da filial (ler em PROSTHETIC) por situação (abertos, atrasados, instalados, cancelados), paciente ou busca, com o histórico das etapas, totais por etapa, atrasados e os laboratórios (fornecedores ativos). |
@@ -3741,7 +3798,7 @@ Contrato das RPC: `p_json jsonb` de entrada (sempre com `nr_version`), `jsonb` d
 | `ad.appointment_pending_checkout(p_json jsonb)` | authenticated | Consultas do período que já aconteceram e ainda não foram fechadas no financeiro (sem conta a receber ligada e sem guia de convênio; fora faltas e canceladas), para a aba A receber. Exige leitura na tela FINANCE. |
 | `ad.user_password_reset_check(p_json jsonb)` | authenticated | Checagem antes de o administrador da empresa definir uma senha nova para um usuário dela (a troca no Auth é da Edge Function user-password-reset). Exige administrador da empresa e usuário vinculado a ela; conta compartilhada com outra empresa ou administrador da plataforma só troca a própria senha. Devolve o id da conta no Auth e grava event_log (sem a senha). |
 | `ad.settings_get(p_json jsonb)` | authenticated | Configurações da filial: dados da clínica, preferências da agenda e do cadastro de pacientes (padrões quando não há linha) e horário de funcionamento. Qualquer usuário com acesso à filial lê; devolve se pode alterar (tela SETTINGS) e se pode alterar os dados da clínica (administrador). Inclui as regras do financeiro: bloqueio de inadimplentes e tolerância, caixa ligado, formas aceitas, multa e juros. Inclui as alíquotas do DRE. Inclui o prefixo e o próximo número dos recibos. Inclui security.it_mfa_policy (2FA da empresa). Inclui o desconto máximo e a validade padrão dos orçamentos. Inclui as regras de orçamento, de conta em aberto e de edição de multa e juros. Inclui id_color_by_category, it_agenda_mode e agenda_catalog (categorias, marcadores e cadeiras, inclusive inativos). Inclui as regras de bloqueio do contrato, do check-in e do tratamento. Inclui id_record_sessions, id_record_return e id_record_time. Em security, também id_auth_print e id_auth_export. |
-| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). Também id_color_by_category e it_agenda_mode (1 por profissional, 2 por cadeira). Também as regras de bloqueio it_contract_rule, it_checkin_* e it_treat_* (1 a 4). Também id_record_sessions, id_record_return e id_record_time. |
+| `ad.settings_save(p_json jsonb)` | authenticated | Grava as preferências da filial (update parcial; cria a linha na primeira vez) e, com hours, substitui o horário de funcionamento. Permissão de alterar na tela SETTINGS. Grava event_log. Também grava bloqueio de inadimplentes (it_debt_rule, qt_debt_days), caixa do dia, formas de pagamento aceitas, multa e juros. vc_patient_required define os campos obrigatórios do cadastro do paciente. Também grava as alíquotas do DRE (pc_dre_revenue_tax, pc_dre_income_tax, pc_dre_csll). Também grava o prefixo e o próximo número dos recibos. Também grava o desconto máximo e a validade padrão dos orçamentos. Também grava as regras de orçamento, conta em aberto (it_open_rule) e edição de multa e juros (it_late_edit). Também id_color_by_category e it_agenda_mode (1 por profissional, 2 por cadeira). Também as regras de bloqueio it_contract_rule, it_checkin_* e it_treat_* (1 a 4). Também id_record_sessions, id_record_return e id_record_time. Também id_credit_check (consulta de crédito SPC/Serasa na ficha do paciente). |
 | `ad.access_request(p_json jsonb)` | authenticated | Antes de imprimir (it_kind 1) ou exportar (2): se a empresa exige administrador, abre um pedido de liberação válido por 10 minutos e devolve uu_request; senão id_required = false. Qualquer usuário com acesso à filial. |
 | `ad.access_authorize(p_json jsonb)` | authenticated | Libera um pedido de impressão/exportação. Chamada com a sessão do administrador (o app faz o login dele numa sessão separada); exige administrador da empresa do pedido, dentro da validade. Grava event_log com quem pediu, quem liberou e o que foi. |
 | `ad.data_export(p_json jsonb)` | authenticated | Exportação de planilhas da filial (Configurações > Exportar): pacientes, financeiro (contas a receber e a pagar por vencimento, até 400 dias), procedimentos (com custo e preços calculados) ou agenda (por data no fuso da filial). Devolve colunas e linhas (até 20000) para o app montar o Excel. Exige alterar na tela SETTINGS e ler na tela dos dados. Grava event_log só com tipo, período e quantidade de linhas. Com id_auth_export na empresa, exige uu_authorization liberado por um administrador (access_authorize), do próprio usuário, válido e não usado. |
@@ -4006,6 +4063,16 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `COMPANY_USER_PROFILE_INVALID` | `company_user_save` | Profile |
 | `COMPANY_USER_STATUS_INVALID` | `company_user_save` |  |
 | `COMPANY_USER_USER_REQUIRED` | `company_user_save`, `user_password_reset_check` |  |
+| `CREDIT_BRANCH_REQUIRED` | `credit_check_request`, `credit_check_list` |  |
+| `CREDIT_CONSENT_REQUIRED` | `credit_check_request` |  |
+| `CREDIT_DISABLED` | `credit_check_request` |  |
+| `CREDIT_DOCUMENT_REQUIRED` | `credit_check_request` |  |
+| `CREDIT_FORBIDDEN` | `credit_check_request`, `credit_check_list` |  |
+| `CREDIT_NOT_FOUND` | `credit_check_result` |  |
+| `CREDIT_PATIENT_INVALID` | `credit_check_request`, `credit_check_list` |  |
+| `CREDIT_PENDING` | `credit_check_request` |  |
+| `CREDIT_PROVIDER_INVALID` | `credit_check_request` |  |
+| `CREDIT_VALUE_INVALID` | `credit_check_result` |  |
 | `DASHBOARD_BRANCH_REQUIRED` | `dashboard_get` |  |
 | `DASHBOARD_FORBIDDEN` | `dashboard_get` |  |
 | `DASHBOARD_PERIOD_INVALID` | `dashboard_get` |  |
@@ -4441,7 +4508,7 @@ Toda chave abaixo pode chegar em `PostgrestException.message` como JSON. O app t
 | `USER_UPDATE_CPF_INVALID` | `user_update` | Cpf |
 | `USER_UPDATE_NAME_REQUIRED` | `user_update` |  |
 | `USER_UPDATE_USER_NOT_FOUND` | `user_update` |  |
-| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `radiology_center_save`, `radiology_save`, `radiology_list`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
+| `VERSION_MISMATCH` | `session_context`, `company_create`, `company_update`, `branch_create`, `branch_update`, `access_profile_save`, `company_user_save`, `user_update`, `branch_list`, `access_profile_list`, `company_user_list`, `access_log_list`, `screen_list`, `event_log_list`, `user_create_check`, `pricing_param_get`, `pricing_param_save`, `material_list`, `material_save`, `procedure_list`, `procedure_save`, `procedure_suggest`, `appointment_list`, `agenda_catalog_save`, `appointment_save`, `professional_list`, `professional_save`, `specialty_list`, `specialty_save`, `fin_setup`, `fin_catalog`, `fin_account_save`, `fin_category_save`, `fin_supplier_save`, `fin_entry_save`, `fin_entry_settle`, `fin_entry_list`, `fin_overview`, `fin_cashflow`, `fin_statement`, `appointment_checkout_get`, `appointment_checkout`, `fin_cash_open`, `fin_cash_close`, `fin_dre`, `fin_cash_status`, `fin_transfer_save`, `fin_rate_save`, `fin_receivable_settle`, `fin_receivable_list`, `fin_health_export`, `health_plan_save`, `health_plan_list`, `health_guide_save`, `health_guide_settle`, `health_guide_list`, `fin_bank_import`, `fin_bank_list`, `fin_bank_reconcile`, `fin_recurrence_save`, `fin_recurrence_list`, `fin_receipt_issue`, `fin_receipt_get`, `fin_receipt_cancel`, `anamnesis_model_list`, `anamnesis_model_save`, `patient_anamnesis_save`, `clinical_evolution_save`, `tooth_mark_save`, `patient_record_get`, `dashboard_get`, `radiology_center_save`, `radiology_save`, `radiology_list`, `credit_check_request`, `credit_check_result`, `credit_check_list`, `aligner_list`, `aligner_save`, `prosthetic_list`, `prosthetic_save`, `prosthetic_stage`, `stock_list`, `stock_item_save`, `stock_movement_save`, `stock_movement_list`, `referral_list`, `referral_reward_save`, `notify_settings_get`, `notify_settings_save`, `notify_message_list`, `notify_dispatch`, `chart_model_list`, `chart_model_save`, `patient_chart_save`, `patient_chart_list`, `perio_exam_save`, `perio_exam_list`, `patient_summary_get`, `report_get`, `document_template_list`, `document_template_save`, `medication_list`, `medication_save`, `patient_document_render`, `patient_document_save`, `patient_document_list`, `signature_save`, `signature_list`, `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list`, `whatsapp_dispatch`, `patient_file_save`, `patient_file_list`, `online_booking_settings_get`, `online_booking_settings_save`, `online_booking_public`, `budget_list`, `budget_get`, `price_table_save`, `price_table_list`, `budget_save`, `budget_status`, `fin_attachment_save`, `fin_attachment_list`, `appointment_pending_checkout`, `user_password_reset_check`, `settings_get`, `settings_save`, `access_request`, `access_authorize`, `data_export`, `trash_list`, `trash_restore`, `patient_list`, `patient_get`, `patient_save`, `patient_note_save` | Function, Database, Application |
 | `WHATSAPP_ACTION_INVALID` | `whatsapp_dispatch` |  |
 | `WHATSAPP_BRANCH_REQUIRED` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |
 | `WHATSAPP_FORBIDDEN` | `whatsapp_settings_get`, `whatsapp_settings_save`, `whatsapp_message_list` |  |

@@ -437,3 +437,9 @@ drop policy if exists radiology_request_select on od.radiology_request;
 create policy radiology_request_select on od.radiology_request
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.credit_check
+drop policy if exists credit_check_select on od.credit_check;
+create policy credit_check_select on od.credit_check
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

@@ -1,0 +1,83 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (so service_role; nao e do app)           ::
+  ::  Object      : ad.credit_check_result(jsonb)                                 ::
+  ::  UsedBy      : Edge Function credit-check (service_role)                     ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava o resultado de uma consulta de credito pendente (it_status 1). So o
+    service_role executa: a Edge Function credit-check chama depois de
+    consultar o birô (ou ao descobrir que a chave nao esta configurada).
+      it_status 2 concluida: it_result 1 nada consta | 2 com restricoes,
+                             qt_score, qt_debts, vl_debts, vc_protocol,
+                             js_detail (resumo: credores, valores, datas)
+      it_status 9 erro:      vc_error (chave da mensagem ou texto do birô)
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_check  bigint  obrigatorios
+    it_status   integer  2 | 9
+    it_result, qt_score, qt_debts  integer;  vl_debts  numeric
+    vc_protocol (ate 80), vc_error (ate 500)  text;  js_detail  object
+
+  Output jsonb: {"nr_check", "it_status"}
+
+  Errors: VERSION_MISMATCH, CREDIT_NOT_FOUND, CREDIT_VALUE_INVALID
+*/
+create or replace function ad.credit_check_result(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _c       od.credit_check;
+  _status  smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'credit_check_result');
+  begin
+    select * into _c from od.credit_check c
+     where c.nr_company = (p_json ->> 'nr_company')::bigint and c.nr_branch = (p_json ->> 'nr_branch')::bigint
+       and c.nr_check = (p_json ->> 'nr_check')::bigint and c.it_status = 1
+     for update;
+    _status := (p_json ->> 'it_status')::smallint;
+  exception when others then
+    raise exception '%', ad.fn_message('CREDIT_VALUE_INVALID');
+  end;
+  if _c.nr_check is null then
+    raise exception '%', ad.fn_message('CREDIT_NOT_FOUND');
+  end if;
+  if _status is null or _status not in (2, 9) then
+    raise exception '%', ad.fn_message('CREDIT_VALUE_INVALID');
+  end if;
+
+  begin
+    if _status = 2 then
+      update od.credit_check c set
+        it_status = 2, it_result = (p_json ->> 'it_result')::smallint,
+        qt_score = (p_json ->> 'qt_score')::smallint, qt_debts = (p_json ->> 'qt_debts')::integer,
+        vl_debts = round((p_json ->> 'vl_debts')::numeric, 2),
+        vc_protocol = left(nullif(trim(p_json ->> 'vc_protocol'), ''), 80),
+        js_detail = case when jsonb_typeof(p_json -> 'js_detail') = 'object' then p_json -> 'js_detail' end,
+        vc_error = null, dh_done = now()
+       where c.nr_company = _c.nr_company and c.nr_branch = _c.nr_branch and c.nr_check = _c.nr_check;
+    else
+      update od.credit_check c set
+        it_status = 9, vc_error = left(coalesce(nullif(trim(p_json ->> 'vc_error'), ''), 'CREDIT_PROVIDER_ERROR'), 500),
+        dh_done = now()
+       where c.nr_company = _c.nr_company and c.nr_branch = _c.nr_branch and c.nr_check = _c.nr_check;
+    end if;
+  exception when others then
+    raise exception '%', ad.fn_message('CREDIT_VALUE_INVALID');
+  end;
+
+  return jsonb_build_object('nr_check', _c.nr_check, 'it_status', _status);
+end;
+$$;
+
+revoke all on function ad.credit_check_result(jsonb) from public, anon, authenticated;
+grant execute on function ad.credit_check_result(jsonb) to service_role;

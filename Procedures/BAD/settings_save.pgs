@@ -6,7 +6,7 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 05/11/2026                                                    ::
-  ::  Change      : 18/11/2026 - sessoes, retorno e tempo no prontuario           ::
+  ::  Change      : 23/11/2026 - consulta de credito (SPC/Serasa)                 ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava as preferencias da filial (od.branch_setting, criada na primeira
@@ -49,6 +49,7 @@
     it_treat_debt_rule, it_treat_open_rule, it_treat_contract_rule
     id_record_sessions, id_record_return, id_record_time  boolean  opcionais (prontuario: sessoes,
                                      retorno automatico e tempo de execucao dos procedimentos)
+    id_credit_check  boolean  opcional (consulta de credito SPC/Serasa na ficha do paciente)
                             integer  opcionais 1..4 (bloqueios: contrato sem assinatura ao
                                      agendar; vencida, em aberto e contrato no check-in e
                                      no tratamento)
@@ -120,6 +121,7 @@ begin
     _cur.id_record_sessions := false;
     _cur.id_record_return := false;
     _cur.id_record_time := false;
+    _cur.id_credit_check := false;
     _cur.it_contract_rule := 1;
     _cur.it_checkin_debt_rule := 1;
     _cur.it_checkin_open_rule := 1;
@@ -168,6 +170,7 @@ begin
     _new.id_record_sessions := case when p_json ? 'id_record_sessions' then (p_json ->> 'id_record_sessions')::boolean else _cur.id_record_sessions end;
     _new.id_record_return := case when p_json ? 'id_record_return' then (p_json ->> 'id_record_return')::boolean else _cur.id_record_return end;
     _new.id_record_time := case when p_json ? 'id_record_time' then (p_json ->> 'id_record_time')::boolean else _cur.id_record_time end;
+    _new.id_credit_check := case when p_json ? 'id_credit_check' then (p_json ->> 'id_credit_check')::boolean else _cur.id_credit_check end;
     _new.it_contract_rule := case when p_json ? 'it_contract_rule' then (p_json ->> 'it_contract_rule')::smallint else _cur.it_contract_rule end;
     _new.it_checkin_debt_rule := case when p_json ? 'it_checkin_debt_rule' then (p_json ->> 'it_checkin_debt_rule')::smallint else _cur.it_checkin_debt_rule end;
     _new.it_checkin_open_rule := case when p_json ? 'it_checkin_open_rule' then (p_json ->> 'it_checkin_open_rule')::smallint else _cur.it_checkin_open_rule end;
@@ -232,7 +235,8 @@ begin
     raise exception '%', ad.fn_message('SETTINGS_DEBT_INVALID');
   end if;
   if _new.id_color_by_category is null or _new.it_agenda_mode is null or _new.it_agenda_mode not in (1, 2)
-     or _new.id_record_sessions is null or _new.id_record_return is null or _new.id_record_time is null then
+     or _new.id_record_sessions is null or _new.id_record_return is null or _new.id_record_time is null
+     or _new.id_credit_check is null then
     raise exception '%', ad.fn_message('SETTINGS_VALUE_INVALID');
   end if;
   if _new.it_late_edit is null or _new.it_late_edit not in (0, 1, 2) then
@@ -260,7 +264,7 @@ begin
                                  id_budget_request_approval, id_budget_admin_below_min, id_budget_reduction_as_discount,
                                  it_open_rule, it_late_edit, id_color_by_category, it_agenda_mode,
                                  it_contract_rule, it_checkin_debt_rule, it_checkin_open_rule, it_checkin_contract_rule, it_treat_debt_rule, it_treat_open_rule, it_treat_contract_rule,
-                                 id_record_sessions, id_record_return, id_record_time, nr_operator)
+                                 id_record_sessions, id_record_return, id_record_time, id_credit_check, nr_operator)
   values (_nr_company, _nr_branch, _new.qt_slot_minutes, _new.qt_max_parallel, _new.id_allow_outside_hours,
           _new.id_auto_record_number, _new.nr_next_record, _new.vc_patient_required,
           _new.it_debt_rule, _new.qt_debt_days, _new.id_cash_enabled, _new.it_payment_methods, _new.pc_late_fee,
@@ -269,7 +273,7 @@ begin
           _new.id_budget_request_approval, _new.id_budget_admin_below_min, _new.id_budget_reduction_as_discount,
           _new.it_open_rule, _new.it_late_edit, _new.id_color_by_category, _new.it_agenda_mode,
           _new.it_contract_rule, _new.it_checkin_debt_rule, _new.it_checkin_open_rule, _new.it_checkin_contract_rule, _new.it_treat_debt_rule, _new.it_treat_open_rule, _new.it_treat_contract_rule,
-          _new.id_record_sessions, _new.id_record_return, _new.id_record_time, _nr_user)
+          _new.id_record_sessions, _new.id_record_return, _new.id_record_time, _new.id_credit_check, _nr_user)
   on conflict (nr_company, nr_branch) do update set
     qt_slot_minutes        = excluded.qt_slot_minutes,
     qt_max_parallel        = excluded.qt_max_parallel,
@@ -306,7 +310,8 @@ begin
     it_treat_contract_rule = excluded.it_treat_contract_rule,
     id_record_sessions = excluded.id_record_sessions,
     id_record_return = excluded.id_record_return,
-    id_record_time = excluded.id_record_time;
+    id_record_time = excluded.id_record_time,
+    id_credit_check = excluded.id_credit_check;
 
   if p_json ? 'hours' then
     if jsonb_typeof(p_json -> 'hours') <> 'array' then
