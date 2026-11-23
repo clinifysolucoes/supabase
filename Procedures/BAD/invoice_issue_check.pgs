@@ -1,0 +1,135 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.invoice_issue_check(jsonb)                                 ::
+  ::  UsedBy      : Edge Function invoice-issue (JWT do usuario)                  ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Valida e prepara a emissao ou o cancelamento de uma NFS-e, como o usuario
+    que chamou a Edge Function invoice-issue, e devolve os dados para o
+    emissor (prestador, tomador, servico).
+      ISSUE   CRIAR em FINANCE; nota rascunho (1), com erro (8) ou presa em
+              processando (2) ha mais de 10 minutos; NFS-e ligada na filial e
+              sem pendencias (od.fn_invoice_missing). Passa a nota para 2.
+      CANCEL  ALTERAR em FINANCE; nota emitida (3) e motivo com 15 a 255
+              caracteres. A nota continua 3 ate o emissor confirmar.
+    Grava o event_log.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_invoice  bigint  obrigatorios
+    vc_action   text     ISSUE | CANCEL
+    vc_cancel_reason  text  obrigatorio no CANCEL
+
+  Output jsonb: {"nr_invoice", "vc_action", "ref", "provider": {cnpj, city_registration, tax_regime, name,
+                 legal_name, email, phone, address{...}, city_ibge}, "service": {...}, "taker": {...},
+                 "vc_provider_ref", "vc_cancel_reason"}
+
+  Errors: VERSION_MISMATCH, INVOICE_ACTION_INVALID, INVOICE_BRANCH_REQUIRED, INVOICE_FORBIDDEN, INVOICE_NOT_FOUND,
+    INVOICE_DISABLED, INVOICE_SETUP_INCOMPLETE, INVOICE_STATUS_INVALID, INVOICE_CANCEL_REASON_REQUIRED
+*/
+create or replace function ad.invoice_issue_check(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _action     text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _perm       jsonb;
+  _i          od.invoice;
+  _b          ad.branch;
+  _s          od.invoice_setting;
+  _missing    text[];
+  _reason     text := nullif(trim(coalesce(p_json ->> 'vc_cancel_reason', '')), '');
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'invoice_issue_check');
+  if _action not in ('ISSUE', 'CANCEL') then
+    raise exception '%', ad.fn_message('INVOICE_ACTION_INVALID');
+  end if;
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('INVOICE_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  _perm    := ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE');
+  if _nr_user is null
+     or (_action = 'ISSUE' and not coalesce((_perm ->> 'id_create')::boolean, false))
+     or (_action = 'CANCEL' and not coalesce((_perm ->> 'id_update')::boolean, false)) then
+    raise exception '%', ad.fn_message('INVOICE_FORBIDDEN');
+  end if;
+
+  begin
+    select * into _i from od.invoice i
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_invoice = (p_json ->> 'nr_invoice')::bigint
+     for update;
+  exception when others then
+    _i := null;
+  end;
+  if _i.nr_invoice is null then
+    raise exception '%', ad.fn_message('INVOICE_NOT_FOUND');
+  end if;
+  select * into _s from od.invoice_setting s where s.nr_company = _nr_company and s.nr_branch = _nr_branch;
+  if not coalesce(_s.id_enabled, false) then
+    raise exception '%', ad.fn_message('INVOICE_DISABLED');
+  end if;
+  _missing := od.fn_invoice_missing(_nr_company, _nr_branch);
+  if cardinality(_missing) > 0 then
+    raise exception '%', ad.fn_message('INVOICE_SETUP_INCOMPLETE', jsonb_build_object('Missing', array_to_string(_missing, ', ')));
+  end if;
+
+  if _action = 'ISSUE' then
+    if not (_i.it_status in (1, 8) or (_i.it_status = 2 and _i.dh_updated < now() - interval '10 minutes')) then
+      raise exception '%', ad.fn_message('INVOICE_STATUS_INVALID');
+    end if;
+    update od.invoice i set it_status = 2, vc_error = null
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch and i.nr_invoice = _i.nr_invoice;
+  else
+    if _i.it_status <> 3 then
+      raise exception '%', ad.fn_message('INVOICE_STATUS_INVALID');
+    end if;
+    if _reason is null or length(_reason) not between 15 and 255 then
+      raise exception '%', ad.fn_message('INVOICE_CANCEL_REASON_REQUIRED');
+    end if;
+  end if;
+
+  select * into _b from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch;
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'FINANCE', 'UPDATE',
+    'invoice', _nr_company::text || '/' || _nr_branch::text || '/' || _i.nr_invoice::text,
+    format('Nota fiscal %s: %s enviada ao emissor', _i.nr_invoice,
+           case when _action = 'ISSUE' then 'emissão' else 'cancelamento' end),
+    jsonb_build_object('vc_action', _action, 'vc_cancel_reason', _reason));
+
+  return jsonb_build_object(
+    'nr_invoice', _i.nr_invoice,
+    'vc_action', _action,
+    'ref', format('clinify-%s-%s-%s', _nr_company, _nr_branch, _i.nr_invoice),
+    'vc_provider_ref', _i.vc_provider_ref,
+    'vc_cancel_reason', _reason,
+    'provider', jsonb_build_object(
+      'cnpj', regexp_replace(_b.vc_cnpj, '\D', '', 'g'), 'city_registration', trim(_b.vc_city_registration),
+      'tax_regime', _b.it_tax_regime, 'name', _b.vc_name, 'legal_name', coalesce(_b.vc_legal_name, _b.vc_name),
+      'email', _b.vc_email, 'phone', _b.vc_phone, 'city_ibge', _s.vc_city_ibge,
+      'address', jsonb_build_object('zip', regexp_replace(_b.vc_zip_code, '\D', '', 'g'), 'street', _b.vc_address,
+                                    'number', _b.vc_address_number, 'extra', _b.vc_address_extra,
+                                    'district', _b.vc_district, 'city', _b.vc_city, 'state', _b.vc_state)),
+    'service', jsonb_build_object(
+      'dt_competence', _i.dt_competence, 'vl_service', _i.vl_service, 'pc_iss', _i.pc_iss, 'vl_iss', _i.vl_iss,
+      'id_iss_withheld', _s.id_iss_withheld, 'service_code', _s.vc_service_code,
+      'city_service_code', _s.vc_city_service_code, 'cnae', _s.vc_cnae, 'rps_series', _s.vc_rps_series,
+      'description', _i.vc_description),
+    'taker', jsonb_build_object('name', _i.vc_taker_name, 'document', _i.vc_taker_document, 'email', _i.vc_taker_email));
+end;
+$$;
+
+revoke all on function ad.invoice_issue_check(jsonb) from public, anon;
+grant execute on function ad.invoice_issue_check(jsonb) to authenticated;

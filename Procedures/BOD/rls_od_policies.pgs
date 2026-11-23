@@ -443,3 +443,15 @@ drop policy if exists credit_check_select on od.credit_check;
 create policy credit_check_select on od.credit_check
   for select to authenticated
   using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.invoice_setting
+drop policy if exists invoice_setting_select on od.invoice_setting;
+create policy invoice_setting_select on od.invoice_setting
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));
+
+-- od.invoice
+drop policy if exists invoice_select on od.invoice;
+create policy invoice_select on od.invoice
+  for select to authenticated
+  using ((nr_company, nr_branch) in (select mb.nr_company, mb.nr_branch from private.fn_my_branches() mb));

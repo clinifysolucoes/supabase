@@ -1,0 +1,100 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (so service_role; nao e do app)           ::
+  ::  Object      : ad.invoice_result(jsonb)                                      ::
+  ::  UsedBy      : Edge Function invoice-issue (service_role)                    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Grava a resposta do emissor de NFS-e. So o service_role executa.
+      ISSUE  ok: nota processando (2) vira emitida (3) com numero, codigo de
+                 verificacao, links do PDF/XML e referencia no emissor
+             erro: vira 8 com vc_error (a nota pode ser reenviada)
+      CANCEL ok: nota emitida (3) vira cancelada (90) com o motivo
+             erro: continua 3 com vc_error
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_invoice  bigint  obrigatorios
+    vc_action   text     ISSUE | CANCEL
+    id_ok       boolean
+    vc_number (ate 30), vc_verification (ate 60), vc_pdf_url, vc_xml_url (ate 500), vc_provider_ref (ate 80),
+    vc_error (ate 500), vc_cancel_reason (ate 255)  text
+
+  Output jsonb: {"nr_invoice", "it_status"}
+
+  Errors: VERSION_MISMATCH, INVOICE_ACTION_INVALID, INVOICE_NOT_FOUND, INVOICE_VALUE_INVALID
+*/
+create or replace function ad.invoice_result(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _action text := upper(coalesce(p_json ->> 'vc_action', ''));
+  _ok     boolean;
+  _i      od.invoice;
+  _status smallint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'invoice_result');
+  if _action not in ('ISSUE', 'CANCEL') then
+    raise exception '%', ad.fn_message('INVOICE_ACTION_INVALID');
+  end if;
+  begin
+    _ok := (p_json ->> 'id_ok')::boolean;
+    select * into _i from od.invoice i
+     where i.nr_company = (p_json ->> 'nr_company')::bigint and i.nr_branch = (p_json ->> 'nr_branch')::bigint
+       and i.nr_invoice = (p_json ->> 'nr_invoice')::bigint
+       and i.it_status = case when _action = 'ISSUE' then 2 else 3 end
+     for update;
+  exception when others then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end;
+  if _ok is null then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end if;
+  if _i.nr_invoice is null then
+    raise exception '%', ad.fn_message('INVOICE_NOT_FOUND');
+  end if;
+
+  if _action = 'ISSUE' and _ok then
+    if nullif(trim(coalesce(p_json ->> 'vc_number', '')), '') is null then
+      raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+    end if;
+    update od.invoice i set
+      it_status = 3, vc_number = left(trim(p_json ->> 'vc_number'), 30),
+      vc_verification = left(nullif(trim(p_json ->> 'vc_verification'), ''), 60),
+      vc_pdf_url = left(nullif(trim(p_json ->> 'vc_pdf_url'), ''), 500),
+      vc_xml_url = left(nullif(trim(p_json ->> 'vc_xml_url'), ''), 500),
+      vc_provider_ref = left(nullif(trim(p_json ->> 'vc_provider_ref'), ''), 80),
+      vc_error = null, dh_issued = now()
+     where i.nr_company = _i.nr_company and i.nr_branch = _i.nr_branch and i.nr_invoice = _i.nr_invoice;
+    _status := 3;
+  elsif _action = 'ISSUE' then
+    update od.invoice i set
+      it_status = 8, vc_error = left(coalesce(nullif(trim(p_json ->> 'vc_error'), ''), 'INVOICE_PROVIDER_ERROR'), 500)
+     where i.nr_company = _i.nr_company and i.nr_branch = _i.nr_branch and i.nr_invoice = _i.nr_invoice;
+    _status := 8;
+  elsif _ok then
+    update od.invoice i set
+      it_status = 90, dh_cancelled = now(), vc_error = null,
+      vc_cancel_reason = left(nullif(trim(p_json ->> 'vc_cancel_reason'), ''), 255)
+     where i.nr_company = _i.nr_company and i.nr_branch = _i.nr_branch and i.nr_invoice = _i.nr_invoice;
+    _status := 90;
+  else
+    update od.invoice i set
+      vc_error = left(coalesce(nullif(trim(p_json ->> 'vc_error'), ''), 'INVOICE_PROVIDER_ERROR'), 500)
+     where i.nr_company = _i.nr_company and i.nr_branch = _i.nr_branch and i.nr_invoice = _i.nr_invoice;
+    _status := 3;
+  end if;
+
+  return jsonb_build_object('nr_invoice', _i.nr_invoice, 'it_status', _status);
+end;
+$$;
+
+revoke all on function ad.invoice_result(jsonb) from public, anon, authenticated;
+grant execute on function ad.invoice_result(jsonb) to service_role;

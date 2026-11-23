@@ -1,0 +1,122 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.invoice_list(jsonb)                                        ::
+  ::  UsedBy      : Flutter -> rpc('invoice_list') (Financeiro, Notas fiscais)    ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Notas fiscais da filial (LER na tela FINANCE), mais recentes primeiro
+    (ate 500), os totais por situacao no filtro de periodo/paciente e se a
+    NFS-e esta ligada e pronta (sem pendencias de configuracao).
+    Situacao: 1 rascunho | 2 processando | 3 emitida | 8 erro | 90 cancelada.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    it_status   integer  opcional (sem = todas menos canceladas)
+    dt_start, dt_end  date  opcionais (competencia)
+    nr_patient  bigint   opcional
+    vc_search   text     opcional (tomador, numero ou descricao)
+
+  Output jsonb: {"invoices": [{nr_invoice, nr_patient, vc_patient, nr_entry, dt_competence, vl_service, pc_iss, vl_iss,
+                               vc_description, vc_taker_name, vc_taker_document, vc_taker_email, it_status, vc_number,
+                               vc_verification, vc_pdf_url, vc_xml_url, vc_error, dh_issued, dh_cancelled,
+                               vc_cancel_reason, vc_user, dh_created}],
+                 "totals": {qt_draft, qt_processing, qt_issued, qt_error, vl_issued},
+                 "id_enabled", "missing": [text], "id_truncated"}
+
+  Errors: VERSION_MISMATCH, INVOICE_BRANCH_REQUIRED, INVOICE_FORBIDDEN, INVOICE_VALUE_INVALID
+*/
+create or replace function ad.invoice_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _status     smallint;
+  _d0         date;
+  _d1         date;
+  _patient    bigint;
+  _search     text := nullif(trim(coalesce(p_json ->> 'vc_search', '')), '');
+  _limit      constant integer := 500;
+  _rows       jsonb;
+  _qt         integer;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'invoice_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('INVOICE_BRANCH_REQUIRED');
+  end if;
+  if private.fn_current_user_nr() is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'FINANCE') ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('INVOICE_FORBIDDEN');
+  end if;
+  begin
+    _status  := (p_json ->> 'it_status')::smallint;
+    _d0      := (p_json ->> 'dt_start')::date;
+    _d1      := (p_json ->> 'dt_end')::date;
+    _patient := (p_json ->> 'nr_patient')::bigint;
+  exception when others then
+    raise exception '%', ad.fn_message('INVOICE_VALUE_INVALID');
+  end;
+
+  with base as (
+    select i.*, p.vc_name as vc_patient, u.vc_name as vc_user
+      from od.invoice i
+      join od.patient p on p.nr_company = i.nr_company and p.nr_branch = i.nr_branch and p.nr_patient = i.nr_patient
+      left join ad.app_user u on u.nr_user = i.nr_user
+     where i.nr_company = _nr_company and i.nr_branch = _nr_branch
+       and (case when _status is null then i.it_status <> 90 else i.it_status = _status end)
+       and (_d0 is null or i.dt_competence >= _d0)
+       and (_d1 is null or i.dt_competence <= _d1)
+       and (_patient is null or i.nr_patient = _patient)
+       and (_search is null or i.vc_taker_name ilike '%' || _search || '%' or p.vc_name ilike '%' || _search || '%'
+            or coalesce(i.vc_number, '') ilike '%' || _search || '%' or i.vc_description ilike '%' || _search || '%')
+  ), lim as (
+    select * from base order by dt_competence desc, nr_invoice desc limit _limit
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'nr_invoice', l.nr_invoice, 'nr_patient', l.nr_patient, 'vc_patient', l.vc_patient, 'nr_entry', l.nr_entry,
+           'dt_competence', l.dt_competence, 'vl_service', l.vl_service, 'pc_iss', l.pc_iss, 'vl_iss', l.vl_iss,
+           'vc_description', l.vc_description, 'vc_taker_name', l.vc_taker_name,
+           'vc_taker_document', l.vc_taker_document, 'vc_taker_email', l.vc_taker_email, 'it_status', l.it_status,
+           'vc_number', l.vc_number, 'vc_verification', l.vc_verification, 'vc_pdf_url', l.vc_pdf_url,
+           'vc_xml_url', l.vc_xml_url, 'vc_error', l.vc_error, 'dh_issued', l.dh_issued,
+           'dh_cancelled', l.dh_cancelled, 'vc_cancel_reason', l.vc_cancel_reason, 'vc_user', l.vc_user,
+           'dh_created', l.dh_created)
+           order by l.dt_competence desc, l.nr_invoice desc), '[]'::jsonb),
+         (select count(*) from base)
+    into _rows, _qt
+    from lim l;
+
+  return jsonb_build_object(
+    'invoices', _rows,
+    'totals', (select jsonb_build_object(
+                 'qt_draft',      count(*) filter (where i.it_status = 1),
+                 'qt_processing', count(*) filter (where i.it_status = 2),
+                 'qt_issued',     count(*) filter (where i.it_status = 3),
+                 'qt_error',      count(*) filter (where i.it_status = 8),
+                 'vl_issued',     coalesce(sum(i.vl_service) filter (where i.it_status = 3), 0))
+                 from od.invoice i
+                where i.nr_company = _nr_company and i.nr_branch = _nr_branch
+                  and (_d0 is null or i.dt_competence >= _d0)
+                  and (_d1 is null or i.dt_competence <= _d1)
+                  and (_patient is null or i.nr_patient = _patient)),
+    'id_enabled', coalesce((select s.id_enabled from od.invoice_setting s
+                             where s.nr_company = _nr_company and s.nr_branch = _nr_branch), false),
+    'missing', to_jsonb(od.fn_invoice_missing(_nr_company, _nr_branch)),
+    'id_truncated', _qt > _limit);
+end;
+$$;
+
+revoke all on function ad.invoice_list(jsonb) from public, anon;
+grant execute on function ad.invoice_list(jsonb) to authenticated;
