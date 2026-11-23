@@ -6,14 +6,15 @@
   ::----------------------------------------------------------------------------::
   ::  Programmer  : clinifysolucoes                                               ::
   ::  Date        : 12/11/2026                                                    ::
-  ::  Change      : 17/11/2026 - reenvio do lembrete                              ::
+  ::  Change      : 18/11/2026 - avaliacao no Google                              ::
   ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
   Description:
     Grava a configuracao dos alertas por e-mail e SMS da filial (ALTERAR na
     tela SETTINGS). Update parcial: chave presente altera, ausente mantem.
     Desligar um canal cancela (90) o que dele ainda estava na fila.
     Campos dos textos: {{nome}}, {{clinica}}, {{data}}, {{hora}},
-    {{profissional}}, {{retorno}} e, no lembrete, {{link}} (confirmacao).
+    {{profissional}}, {{retorno}} e, no lembrete, {{link}} (confirmacao); na
+    avaliacao, {{avaliacao}} (link da clinica no Google).
 
   Input p_json:
     nr_version  integer  obrigatorio = 1
@@ -22,12 +23,16 @@
     vc_email_from_name (ate 80), vc_email_reply_to (e-mail)
     qt_reminder_hours (1 a 72), qt_send_hour (6 a 20), qt_resend (0 a 3 reenvios do
     lembrete sem confirmacao), qt_resend_hours (1 a 24 horas entre os reenvios)
-    vc_tpl_reminder, vc_tpl_booked, vc_tpl_return  text (1 a 500)
+    vc_tpl_reminder, vc_tpl_booked, vc_tpl_return, vc_tpl_review  text (1 a 500)
+    id_review  boolean  avaliacao no Google depois do atendimento (exige vc_review_url)
+    vc_review_url  text  link de avaliacao da clinica no Google (https://, ate 500)
+    qt_review_hours  integer  horas depois do fim da consulta (1 a 72)
 
   Output jsonb: {"id_email", "id_sms"}
 
   Errors: VERSION_MISMATCH, NOTIFY_BRANCH_REQUIRED, NOTIFY_FORBIDDEN, NOTIFY_VALUE_INVALID,
-    NOTIFY_EMAIL_INVALID, NOTIFY_TEMPLATE_INVALID
+    NOTIFY_EMAIL_INVALID, NOTIFY_TEMPLATE_INVALID, NOTIFY_REVIEW_URL_INVALID,
+    NOTIFY_REVIEW_URL_REQUIRED
 */
 create or replace function ad.notify_settings_save(p_json jsonb)
 returns jsonb
@@ -67,7 +72,8 @@ begin
             from jsonb_each(p_json) e(k, v)
            where k in ('id_email', 'id_sms', 'vc_email_from_name', 'vc_email_reply_to', 'id_reminder',
                        'qt_reminder_hours', 'id_booked', 'id_return', 'qt_send_hour', 'qt_resend', 'qt_resend_hours',
-                       'vc_tpl_reminder', 'vc_tpl_booked', 'vc_tpl_return'));
+                       'vc_tpl_reminder', 'vc_tpl_booked', 'vc_tpl_return', 'id_review', 'vc_review_url',
+                       'qt_review_hours', 'vc_tpl_review'));
   if _js ? 'vc_email_reply_to' and jsonb_typeof(_js -> 'vc_email_reply_to') = 'string' then
     _js := jsonb_set(_js, '{vc_email_reply_to}', to_jsonb(lower(_js ->> 'vc_email_reply_to')));
   end if;
@@ -81,6 +87,7 @@ begin
      or _new.qt_send_hour is null or _new.qt_send_hour not between 6 and 20
      or _new.qt_resend is null or _new.qt_resend not between 0 and 3
      or _new.qt_resend_hours is null or _new.qt_resend_hours not between 1 and 24
+     or _new.id_review is null or _new.qt_review_hours is null or _new.qt_review_hours not between 1 and 72
      or length(coalesce(_new.vc_email_from_name, '')) > 80 then
     raise exception '%', ad.fn_message('NOTIFY_VALUE_INVALID');
   end if;
@@ -88,7 +95,15 @@ begin
      and (length(_new.vc_email_reply_to) > 120 or not ad.fn_email_is_valid(_new.vc_email_reply_to)) then
     raise exception '%', ad.fn_message('NOTIFY_EMAIL_INVALID');
   end if;
+  if _new.vc_review_url is not null
+     and (length(_new.vc_review_url) > 500 or _new.vc_review_url !~ '^https://\S+$') then
+    raise exception '%', ad.fn_message('NOTIFY_REVIEW_URL_INVALID');
+  end if;
+  if _new.id_review and _new.vc_review_url is null then
+    raise exception '%', ad.fn_message('NOTIFY_REVIEW_URL_REQUIRED');
+  end if;
   if _new.vc_tpl_reminder is null or _new.vc_tpl_booked is null or _new.vc_tpl_return is null
+     or _new.vc_tpl_review is null or length(_new.vc_tpl_review) > 500
      or length(_new.vc_tpl_reminder) > 500 or length(_new.vc_tpl_booked) > 500 or length(_new.vc_tpl_return) > 500 then
     raise exception '%', ad.fn_message('NOTIFY_TEMPLATE_INVALID');
   end if;
@@ -99,7 +114,9 @@ begin
     id_reminder = _new.id_reminder, qt_reminder_hours = _new.qt_reminder_hours,
     id_booked = _new.id_booked, id_return = _new.id_return, qt_send_hour = _new.qt_send_hour,
     qt_resend = _new.qt_resend, qt_resend_hours = _new.qt_resend_hours,
-    vc_tpl_reminder = _new.vc_tpl_reminder, vc_tpl_booked = _new.vc_tpl_booked, vc_tpl_return = _new.vc_tpl_return
+    vc_tpl_reminder = _new.vc_tpl_reminder, vc_tpl_booked = _new.vc_tpl_booked, vc_tpl_return = _new.vc_tpl_return,
+    id_review = _new.id_review, vc_review_url = _new.vc_review_url, qt_review_hours = _new.qt_review_hours,
+    vc_tpl_review = _new.vc_tpl_review
    where w.nr_company = _nr_company and w.nr_branch = _nr_branch;
 
   -- desligar um canal cancela o que dele ainda estava na fila
@@ -113,7 +130,7 @@ begin
     format('Alertas por e-mail %s e SMS %s', case when _new.id_email then 'ligados' else 'desligados' end,
            case when _new.id_sms then 'ligados' else 'desligados' end),
     jsonb_build_object('id_email', _new.id_email, 'id_sms', _new.id_sms, 'id_reminder', _new.id_reminder,
-                       'id_booked', _new.id_booked, 'id_return', _new.id_return));
+                       'id_booked', _new.id_booked, 'id_return', _new.id_return, 'id_review', _new.id_review));
 
   return jsonb_build_object('id_email', _new.id_email, 'id_sms', _new.id_sms);
 end;
