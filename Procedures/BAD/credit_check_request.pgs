@@ -1,0 +1,112 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.credit_check_request(jsonb)                                ::
+  ::  UsedBy      : Edge Function credit-check (JWT do usuario)                   ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Abre uma consulta de credito do paciente (ALTERAR na tela PATIENTS), como
+    o usuario que chamou a Edge Function credit-check. Exige a consulta ligada
+    na filial (od.branch_setting.id_credit_check), a autorizacao do paciente
+    (id_consent = true, LGPD) e CPF valido no cadastro. Nao deixa abrir outra
+    consulta do mesmo paciente com uma ainda pendente ha menos de 5 minutos.
+    Grava a linha pendente (it_status 1) e o event_log (sem o CPF); a Edge
+    Function consulta o birô e grava o resultado por ad.credit_check_result.
+
+  Input p_json:
+    nr_version   integer  obrigatorio = 1
+    nr_company, nr_branch  bigint  obrigatorios
+    nr_patient   bigint   obrigatorio
+    id_consent   boolean  obrigatorio = true (paciente autorizou a consulta)
+    it_provider  integer  1 Serasa | 2 SPC Brasil | 3 Boa Vista (vem da Edge Function)
+
+  Output jsonb: {"nr_check", "vc_document", "vc_name", "dt_birth"}
+
+  Errors: VERSION_MISMATCH, CREDIT_BRANCH_REQUIRED, CREDIT_FORBIDDEN, CREDIT_DISABLED, CREDIT_CONSENT_REQUIRED,
+    CREDIT_PROVIDER_INVALID, CREDIT_PATIENT_INVALID, CREDIT_DOCUMENT_REQUIRED, CREDIT_PENDING
+*/
+create or replace function ad.credit_check_request(p_json jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_user    bigint;
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _provider   smallint;
+  _patient    od.patient;
+  _doc        text;
+  _nr_check   bigint;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'credit_check_request');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('CREDIT_BRANCH_REQUIRED');
+  end if;
+  _nr_user := private.fn_current_user_nr();
+  if _nr_user is null
+     or not coalesce((ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS') ->> 'id_update')::boolean, false) then
+    raise exception '%', ad.fn_message('CREDIT_FORBIDDEN');
+  end if;
+  if not coalesce((select s.id_credit_check from od.branch_setting s
+                    where s.nr_company = _nr_company and s.nr_branch = _nr_branch), false) then
+    raise exception '%', ad.fn_message('CREDIT_DISABLED');
+  end if;
+  if coalesce(p_json ->> 'id_consent', '') <> 'true' then
+    raise exception '%', ad.fn_message('CREDIT_CONSENT_REQUIRED');
+  end if;
+  begin
+    _provider := (p_json ->> 'it_provider')::smallint;
+  exception when others then
+    _provider := null;
+  end;
+  if _provider is null or _provider not in (1, 2, 3) then
+    raise exception '%', ad.fn_message('CREDIT_PROVIDER_INVALID');
+  end if;
+
+  begin
+    select * into _patient from od.patient p
+     where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+       and p.nr_patient = (p_json ->> 'nr_patient')::bigint and p.it_status = 1;
+  exception when others then
+    raise exception '%', ad.fn_message('CREDIT_PATIENT_INVALID');
+  end;
+  if _patient.nr_patient is null then
+    raise exception '%', ad.fn_message('CREDIT_PATIENT_INVALID');
+  end if;
+  _doc := regexp_replace(coalesce(_patient.vc_cpf, ''), '\D', '', 'g');
+  if length(_doc) <> 11 or not ad.fn_cpf_is_valid(_doc) then
+    raise exception '%', ad.fn_message('CREDIT_DOCUMENT_REQUIRED');
+  end if;
+
+  perform 1 from ad.branch b where b.nr_company = _nr_company and b.nr_branch = _nr_branch for update;
+  if exists (select 1 from od.credit_check c
+              where c.nr_company = _nr_company and c.nr_branch = _nr_branch and c.nr_patient = _patient.nr_patient
+                and c.it_status = 1 and c.dh_created > now() - interval '5 minutes') then
+    raise exception '%', ad.fn_message('CREDIT_PENDING');
+  end if;
+  select coalesce(max(c.nr_check), 0) + 1 into _nr_check
+    from od.credit_check c where c.nr_company = _nr_company and c.nr_branch = _nr_branch;
+  insert into od.credit_check (nr_company, nr_branch, nr_check, nr_patient, vc_document, it_provider, id_consent, nr_user)
+  values (_nr_company, _nr_branch, _nr_check, _patient.nr_patient, _doc, _provider, true, _nr_user);
+
+  perform ad.fn_event_log(
+    _nr_user, _nr_company, _nr_branch, 'PATIENTS', 'CREATE',
+    'credit_check', _nr_company::text || '/' || _nr_branch::text || '/' || _nr_check::text,
+    format('Consulta de crédito do paciente %s', _patient.nr_patient),
+    jsonb_build_object('nr_patient', _patient.nr_patient, 'it_provider', _provider, 'id_consent', true));
+
+  return jsonb_build_object('nr_check', _nr_check, 'vc_document', _doc, 'vc_name', _patient.vc_name,
+                            'dt_birth', _patient.dt_birth);
+end;
+$$;
+
+revoke all on function ad.credit_check_request(jsonb) from public, anon;
+grant execute on function ad.credit_check_request(jsonb) to authenticated;

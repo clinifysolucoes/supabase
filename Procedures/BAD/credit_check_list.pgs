@@ -1,0 +1,81 @@
+/*::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  ::  Project     : Supabase multi-company login (base do futuro sistema odonto)  ::
+  ::  Schema      : AD - Administrative (RPC exposta; dados no schema od)         ::
+  ::  Object      : ad.credit_check_list(jsonb)                                   ::
+  ::  UsedBy      : Flutter -> rpc('credit_check_list') (ficha do paciente)       ::
+  ::----------------------------------------------------------------------------::
+  ::  Programmer  : clinifysolucoes                                               ::
+  ::  Date        : 23/11/2026                                                    ::
+  ::  Change      : First version                                                 ::
+  ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+  Description:
+    Consultas de credito do paciente (LER na tela PATIENTS), mais recentes
+    primeiro (ate 50), e se a consulta esta ligada na filial e se o usuario
+    pode consultar (ALTERAR em PATIENTS). O CPF volta mascarado.
+
+  Input p_json:
+    nr_version  integer  obrigatorio = 1
+    nr_company, nr_branch, nr_patient  bigint  obrigatorios
+
+  Output jsonb: {"id_enabled", "id_can_check",
+                 "checks": [{nr_check, vc_document_masked, it_provider, it_status, it_result, qt_score,
+                             qt_debts, vl_debts, js_detail, vc_protocol, vc_error, vc_user, dh_created, dh_done}]}
+
+  Errors: VERSION_MISMATCH, CREDIT_BRANCH_REQUIRED, CREDIT_FORBIDDEN, CREDIT_PATIENT_INVALID
+*/
+create or replace function ad.credit_check_list(p_json jsonb)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  _nr_company bigint;
+  _nr_branch  bigint;
+  _patient    bigint;
+  _perm       jsonb;
+begin
+  perform ad.fn_check_version((p_json ->> 'nr_version')::integer, 1, 'credit_check_list');
+  _nr_company := (p_json ->> 'nr_company')::bigint;
+  _nr_branch  := (p_json ->> 'nr_branch')::bigint;
+  if _nr_company is null or _nr_branch is null then
+    raise exception '%', ad.fn_message('CREDIT_BRANCH_REQUIRED');
+  end if;
+  _perm := ad.fn_screen_permission(_nr_company, _nr_branch, 'PATIENTS');
+  if private.fn_current_user_nr() is null or not coalesce((_perm ->> 'id_read')::boolean, false) then
+    raise exception '%', ad.fn_message('CREDIT_FORBIDDEN');
+  end if;
+  begin
+    _patient := (p_json ->> 'nr_patient')::bigint;
+  exception when others then
+    _patient := null;
+  end;
+  if _patient is null or not exists (select 1 from od.patient p
+                                      where p.nr_company = _nr_company and p.nr_branch = _nr_branch
+                                        and p.nr_patient = _patient) then
+    raise exception '%', ad.fn_message('CREDIT_PATIENT_INVALID');
+  end if;
+
+  return jsonb_build_object(
+    'id_enabled', coalesce((select s.id_credit_check from od.branch_setting s
+                             where s.nr_company = _nr_company and s.nr_branch = _nr_branch), false),
+    'id_can_check', coalesce((_perm ->> 'id_update')::boolean, false),
+    'checks', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'nr_check', c.nr_check,
+               'vc_document_masked', '***.' || substr(c.vc_document, 4, 3) || '.' || substr(c.vc_document, 7, 3) || '-**',
+               'it_provider', c.it_provider, 'it_status', c.it_status, 'it_result', c.it_result,
+               'qt_score', c.qt_score, 'qt_debts', c.qt_debts, 'vl_debts', c.vl_debts, 'js_detail', c.js_detail,
+               'vc_protocol', c.vc_protocol, 'vc_error', c.vc_error, 'vc_user', u.vc_name,
+               'dh_created', c.dh_created, 'dh_done', c.dh_done)
+               order by c.nr_check desc)
+        from (select * from od.credit_check c0
+               where c0.nr_company = _nr_company and c0.nr_branch = _nr_branch and c0.nr_patient = _patient
+               order by c0.nr_check desc limit 50) c
+        left join ad.app_user u on u.nr_user = c.nr_user), '[]'::jsonb));
+end;
+$$;
+
+revoke all on function ad.credit_check_list(jsonb) from public, anon;
+grant execute on function ad.credit_check_list(jsonb) to authenticated;
