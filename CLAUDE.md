@@ -447,6 +447,7 @@ sempre depois de validar o chamador por uma RPC (ex.: `user_create_check`).
 | `notify-confirm` | confirmação da consulta pelo link do lembrete (sem login, `verify_jwt = false`): repassa o token para `ad.notify_dispatch` CONFIRM | nenhum extra |
 | `credit-check` | consulta de crédito do paciente: valida e abre a consulta com `ad.credit_check_request` (JWT do usuário), consulta o birô (adaptador em `queryProvider`, ainda não escrito: depende do contrato) e grava o resultado por `ad.credit_check_result` (service_role); sem as secrets grava `CREDIT_NOT_CONFIGURED` | `CREDIT_PROVIDER` (serasa/spc/boavista), `CREDIT_API_URL`, `CREDIT_API_KEY`, `CREDIT_CLIENT_ID` (opcional) |
 | `invoice-issue` | NFS-e: valida e prepara com `ad.invoice_issue_check` (JWT do usuário), envia ao emissor (adaptadores em `issueOnProvider`/`cancelOnProvider`, ainda não escritos: dependem do contrato) e grava por `ad.invoice_result` (service_role); sem as secrets grava `INVOICE_NOT_CONFIGURED` | `INVOICE_PROVIDER` (focus/nfeio/enotas/plugnotas), `INVOICE_API_URL`, `INVOICE_API_KEY` |
+| `integrations-status` | diz ao app quais integrações já têm as secrets (só sim/não e o nome do que falta, nunca o valor) e se o adaptador já foi escrito (`implemented`, mudar para true ao escrever os de crédito/NFS-e); as telas mostram "aguardando configuração" enquanto falta algo | nenhum extra |
 
 ### Setup do projeto Supabase (uma vez por ambiente)
 
