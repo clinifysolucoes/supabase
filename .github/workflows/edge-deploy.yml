@@ -42,9 +42,12 @@ jobs:
           [ -n "$SUPABASE_ACCESS_TOKEN" ] || fail "secrets.SUPABASE_ACCESS_TOKEN vazio (token pessoal da Supabase: Account > Access Tokens)"
           echo "project_ref=$PROJECT_REF"
 
+      # Versao fixa: "latest" consulta a API do GitHub a cada execucao e falhava com
+      # "Failed to resolve latest Supabase CLI release: rate limit exceeded".
+      # Para atualizar, troque aqui por outra versao estavel (github.com/supabase/cli/releases).
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.122.1
 
       - name: Deploy de todas as functions
         run: supabase functions deploy --project-ref "$PROJECT_REF"
